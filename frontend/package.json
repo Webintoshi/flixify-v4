@@ -23,6 +23,7 @@
     "zustand": "^4.4.7"
   },
   "devDependencies": {
+    "eslint": "^8.57.1",
     "@vitejs/plugin-react": "^4.2.1",
     "autoprefixer": "^10.4.16",
     "postcss": "^8.4.32",

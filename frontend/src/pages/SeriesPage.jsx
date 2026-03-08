@@ -6,6 +6,7 @@ import {
   TrendingUp, Clock, Calendar, ChevronLeft, ChevronRight
 } from 'lucide-react';
 import { fetchUserPlaylist, hasValidSubscription } from '../services/playlist';
+import { groupSeriesEpisodes, parseSeriesFromPlaylist } from '../utils/playlistParser';
 
 const PRIMARY = '#E50914';
 const BG_DARK = '#0a0a0a';
@@ -121,39 +122,7 @@ const isSeriesTargetUrl = (value) => {
 
 // Parse series from M3U
 const parseSeriesFromM3U = (content) => {
-  const lines = content.split('\n');
-  const episodes = [];
-  let current = null;
-
-  for (const line of lines) {
-    const t = line.trim();
-    if (t.startsWith('#EXTINF:')) {
-      const nameMatch = t.match(/tvg-name="([^"]+)"/);
-      const logoMatch = t.match(/tvg-logo="([^"]+)"/);
-      const groupMatch = t.match(/group-title="([^"]+)"/);
-      const commaIdx = t.lastIndexOf(',');
-      const fullTitle = commaIdx > -1 ? t.substring(commaIdx + 1).trim() : nameMatch?.[1] || 'Unknown';
-      const genre = normalizeGenre(groupMatch?.[1], fullTitle);
-      const { seriesName, season, episode } = extractSeriesMetadata(fullTitle, genre);
-
-      current = {
-        seriesName,
-        season,
-        episode,
-        fullTitle,
-        logo: logoMatch?.[1] || '',
-        genre,
-        id: Math.random().toString(36).substr(2, 9)
-      };
-    } else if (t && !t.startsWith('#') && current) {
-      if (isSeriesTargetUrl(t)) {
-        current.url = t;
-        episodes.push(current);
-      }
-      current = null;
-    }
-  }
-  return episodes;
+  return parseSeriesFromPlaylist(content);
 };
 
 // Platform bazlı varsayılan dizi görselleri
@@ -174,50 +143,7 @@ const PLATFORM_POSTERS = {
 
 // Group episodes by series
 const groupBySeries = (episodes) => {
-  const seriesMap = {};
-  
-  episodes.forEach(ep => {
-    const key = ep.seriesName.toLowerCase();
-    if (!seriesMap[key]) {
-      seriesMap[key] = {
-        name: ep.seriesName,
-        genre: ep.genre,
-        logo: ep.logo, // İlk bölümün logosu
-        seasons: {},
-        episodeKeys: new Set()
-      };
-    }
-    
-    // Eğer bu bölümde logo var ve seride logo yoksa, kullan
-    if (ep.logo && !seriesMap[key].logo) {
-      seriesMap[key].logo = ep.logo;
-    }
-    
-    const episodeKey = `${ep.season}:${ep.episode}:${ep.fullTitle.toLowerCase()}:${ep.url}`;
-    if (seriesMap[key].episodeKeys.has(episodeKey)) {
-      return;
-    }
-    seriesMap[key].episodeKeys.add(episodeKey);
-
-    if (!seriesMap[key].seasons[ep.season]) {
-      seriesMap[key].seasons[ep.season] = [];
-    }
-    
-    seriesMap[key].seasons[ep.season].push(ep);
-  });
-  
-  Object.values(seriesMap).forEach(series => {
-    Object.keys(series.seasons).forEach(season => {
-      series.seasons[season].sort((a, b) => a.episode - b.episode);
-    });
-    
-    // Logo yoksa platform bazlı varsayılan kullan
-    if (!series.logo) {
-      series.logo = PLATFORM_POSTERS[series.genre] || PLATFORM_POSTERS['default'];
-    }
-  });
-  
-  return Object.values(seriesMap).map(({ episodeKeys, ...series }) => series);
+  return groupSeriesEpisodes(episodes, PLATFORM_POSTERS);
 };
 
 // Series Card - Modern
@@ -689,9 +615,8 @@ function SeriesPage() {
       
       const netflixSeries = groupedSeries.find(s => s.genre === 'Netflix Dizileri');
       setHeroSeries(netflixSeries || groupedSeries[0]);
-
-      */
       setLoading(false);
+      */
     } catch (err) {
       console.error('M3U fetch error:', err);
       setError('Diziler yuklenirken hata olustu: ' + err.message);

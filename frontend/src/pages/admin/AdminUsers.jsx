@@ -15,6 +15,7 @@ import {
   AlertTriangle,
   RefreshCw
 } from 'lucide-react'
+import { buildApiUrl } from '../../config/api'
 
 const PRIMARY = '#E50914'
 const BG_SURFACE = '#141414'
@@ -161,7 +162,7 @@ function AdminUsers() {
     
     // Fetch user details with stats
     try {
-      const response = await fetch(`${API_URL}/admin/users/${user.code}`, {
+      const response = await fetch(buildApiUrl(`/admin/users/${user.code}`), {
         headers: { 'Authorization': `Bearer ${useAdminStore.getState().adminToken}` }
       })
       if (response.ok) {

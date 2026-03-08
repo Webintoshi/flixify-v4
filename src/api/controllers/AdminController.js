@@ -782,7 +782,7 @@ class AdminController {
    */
   getAnalytics = asyncHandler(async (req, res) => {
     const userCounts = await this._userRepository.countByStatus();
-    const expiredUsers = await this._userRepository.findExpired();
+    await this._userRepository.findExpired();
     
     // Get payments data
     const { data: payments } = await this._adminRepository.getPayments();

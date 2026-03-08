@@ -7,7 +7,6 @@
 
 const UserRepository = require('../../application/ports/UserRepository');
 const User = require('../../domain/entities/User');
-const Code = require('../../domain/value-objects/Code');
 const logger = require('../../config/logger');
 
 class InMemoryUserRepository extends UserRepository {

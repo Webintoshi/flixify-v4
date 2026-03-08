@@ -8,6 +8,7 @@ import {
 } from 'lucide-react'
 import mpegts from 'mpegts.js'
 import { fetchUserPlaylist, hasValidSubscription } from '../services/playlist'
+import { parseLiveChannels } from '../utils/playlistParser'
 
 const PRIMARY = '#E50914'
 const BG_DARK = '#0a0a0a'
@@ -379,7 +380,7 @@ function PlayerPage() {
         throw new Error('M3U playlist bos veya gecersiz icerik')
       }
 
-      const parsed = parseM3U(text)
+      const parsed = parseLiveChannels(text)
 
       M3UCache.set(user.code, parsed)
 
@@ -418,7 +419,7 @@ function PlayerPage() {
         throw new Error('M3U playlist bos veya gecersiz icerik')
       }
       
-      const parsed = parseM3U(text)
+      const parsed = parseLiveChannels(text)
       
       // Cache'e kaydet
       M3UCache.set(user.code, parsed)
@@ -428,8 +429,8 @@ function PlayerPage() {
         setCurrentChannel(parsed[0])
       }
       
-      */
       if (!silent) setLoading(false)
+      */
     } catch (err) {
       console.error('M3U fetch error:', err)
       if (!silent) {
@@ -437,59 +438,6 @@ function PlayerPage() {
         setLoading(false)
       }
     }
-  }
-
-  const parseM3U = (content) => {
-    const lines = content.split('\n')
-    const channels = []
-    let current = null
-
-    for (const line of lines) {
-      const t = line.trim()
-      if (t.startsWith('#EXTINF:')) {
-        const nameMatch = t.match(/tvg-name="([^"]+)"/)
-        const logoMatch = t.match(/tvg-logo="([^"]+)"/)
-        const groupMatch = t.match(/group-title="([^"]+)"/)
-        const countryMatch = t.match(/tvg-country="([^"]+)"/)
-        const commaIdx = t.lastIndexOf(',')
-        const name = commaIdx > -1 ? t.substring(commaIdx + 1).trim() : nameMatch?.[1] || 'Bilinmiyor'
-        const rawGroup = groupMatch?.[1] || 'Diger'
-        
-        let country = countryMatch?.[1] || ''
-        if (!country) {
-          const groupCodeMatch = rawGroup.match(/^([A-Z]{2}):/)
-          if (groupCodeMatch) {
-            const code = groupCodeMatch[1]
-            const validCountries = ['TR', 'DE', 'GB', 'US', 'FR', 'IT', 'NL', 'RU', 'AR']
-            if (validCountries.includes(code)) country = code
-          }
-        }
-        
-        if (!country) {
-          const groupLower = rawGroup.toLowerCase()
-          const nameLower = name.toLowerCase()
-          if (groupLower.includes('turkiye') || groupLower.includes('turkey') || /^tr[ |.]/.test(nameLower)) country = 'TR'
-          else if (groupLower.includes('almanya') || groupLower.includes('germany')) country = 'DE'
-          else if (groupLower.includes('ingiltere') || groupLower.includes('uk')) country = 'GB'
-          else if (groupLower.includes('amerika') || groupLower.includes('usa')) country = 'US'
-          else if (groupLower.includes('fransa') || groupLower.includes('france')) country = 'FR'
-          else if (groupLower.includes('italya') || groupLower.includes('italy')) country = 'IT'
-          else if (groupLower.includes('hollanda') || groupLower.includes('netherlands')) country = 'NL'
-          else if (groupLower.includes('rusya') || groupLower.includes('russia')) country = 'RU'
-          else if (groupLower.includes('arap') || groupLower.includes('arab')) country = 'AR'
-        }
-        
-        let group = rawGroup.replace(/^[A-Z]{2}:/, '').replace('INT:', '').trim()
-        if (!group) group = 'Diger'
-        
-        current = { name, logo: logoMatch?.[1] || '', group, country: country || 'TR' }
-      } else if (t && !t.startsWith('#') && current) {
-        current.url = t
-        channels.push(current)
-        current = null
-      }
-    }
-    return channels
   }
 
   // Filtreleme - Debounced arama kullanarak

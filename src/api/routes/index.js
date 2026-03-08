@@ -24,12 +24,10 @@ function createRoutes({
   m3uController,
   authMiddleware,
   adminAuthMiddleware,
-  optionalAuthMiddleware,
   subscriptionCheckMiddleware,
   rateLimiters,
   validators,
-  userRepository,
-  supabaseClient
+  userRepository
 }) {
   // Statik paketler için database bağlantısı gerekmez
   const packageController = new PackageController();

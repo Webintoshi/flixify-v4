@@ -110,7 +110,7 @@ async function startServer() {
   // Test Supabase connection
   let useMockRepository = false;
   try {
-    const { data, error } = await supabaseClient.from('users').select('count', { count: 'exact', head: true });
+    const { error } = await supabaseClient.from('users').select('count', { count: 'exact', head: true });
     if (error) throw error;
     logger.info('Supabase connected successfully');
   } catch (error) {
@@ -343,7 +343,7 @@ async function startServer() {
     process.exit(1);
   });
 
-  process.on('unhandledRejection', (reason, promise) => {
+  process.on('unhandledRejection', (reason) => {
     logger.error('Unhandled rejection', { reason });
     process.exit(1);
   });

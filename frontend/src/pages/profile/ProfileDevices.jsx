@@ -21,6 +21,21 @@ const deviceLimits = {
   tv: { limit: 1, label: 'Televizyon', icon: Tv }
 };
 
+function formatLastActive(value) {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    return 'Bilinmiyor';
+  }
+
+  return parsed.toLocaleString('tr-TR', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+}
+
 function ProfileDevices() {
   const [devices, setDevices] = useState([]);
   const [loading, setLoading] = useState(true);

@@ -18,7 +18,10 @@
     "test:integration": "jest --config jest.integration.config.js",
     "db:migrate": "node scripts/migrate.js",
     "db:seed": "node scripts/seed.js",
-    "lint": "eslint src/ --ext .js",
+    "lint": "npm run lint:backend && npm run lint:frontend",
+    "lint:backend": "eslint src/api src/config src/infrastructure src/server.js --ext .js",
+    "lint:frontend": "eslint frontend/src --ext .js,.jsx",
+    "quality:check": "npm run lint && npm run client:build",
     "security:audit": "npm audit && snyk test"
   },
   "dependencies": {

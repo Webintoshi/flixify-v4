@@ -6,6 +6,7 @@ import {
   ChevronLeft, ChevronRight, Film
 } from 'lucide-react'
 import { fetchUserPlaylist, hasValidSubscription } from '../services/playlist'
+import { dedupeByTitle, parseMoviesFromPlaylist } from '../utils/playlistParser'
 
 const PRIMARY = '#E50914'
 const BG_DARK = '#0a0a0a'
@@ -28,54 +29,6 @@ const GENRES = [
   { id: 'Belgesel & Biyografi', name: 'Belgesel', color: '#795548', icon: '📚' },
   { id: 'Suç & Polisiye', name: 'Suc', color: '#607d8b', icon: '🔍' },
 ]
-
-// Parse M3U and extract VOD movies
-const parseMoviesFromM3U = (content) => {
-  const lines = content.split('\n')
-  const movies = []
-  let current = null
-
-  for (const line of lines) {
-    const t = line.trim()
-    if (t.startsWith('#EXTINF:')) {
-      const nameMatch = t.match(/tvg-name="([^"]+)"/)
-      const logoMatch = t.match(/tvg-logo="([^"]+)"/)
-      const groupMatch = t.match(/group-title="([^"]+)"/)
-      const commaIdx = t.lastIndexOf(',')
-      const title = commaIdx > -1 ? t.substring(commaIdx + 1).trim() : nameMatch?.[1] || 'Unknown'
-      
-      let genre = groupMatch?.[1] || 'Diger'
-      genre = genre.replace('TR:', '').replace('TR | ', '').trim()
-      
-      current = { 
-        title, 
-        logo: logoMatch?.[1] || '', 
-        genre,
-        id: Math.random().toString(36).substr(2, 9)
-      }
-    } else if (t && !t.startsWith('#') && current) {
-      if (t.includes('/movie/') || t.match(/\.(mkv|mp4|avi|mov)$/i)) {
-        current.url = t
-        if (!current.genre.toLowerCase().includes('xxx') && !current.genre.toLowerCase().includes('adult')) {
-          movies.push(current)
-        }
-      }
-      current = null
-    }
-  }
-  return movies
-}
-
-// Remove duplicate movies
-const removeDuplicates = (movies) => {
-  const seen = new Set()
-  return movies.filter(movie => {
-    const key = movie.title.toLowerCase()
-    if (seen.has(key)) return false
-    seen.add(key)
-    return true
-  })
-}
 
 // Movie Card - Modern
 const MovieCard = ({ movie, onClick }) => {
@@ -400,8 +353,8 @@ function MoviesPage() {
         throw new Error('M3U playlist bos veya gecersiz icerik')
       }
 
-      let parsedMovies = parseMoviesFromM3U(text)
-      parsedMovies = removeDuplicates(parsedMovies)
+      let parsedMovies = parseMoviesFromPlaylist(text)
+      parsedMovies = dedupeByTitle(parsedMovies)
 
       setMovies(parsedMovies)
 
@@ -411,8 +364,8 @@ function MoviesPage() {
       setHeroMovie(featuredMovie)
 
       setLoading(false)
-      return;
-      /*
+      return
+      /* Legacy fallback removed.
         } else if (response.status === 401) {
           throw new Error('Oturum süresi dolmuş. Lütfen tekrar giriş yapın.')
         } else {
@@ -427,8 +380,8 @@ function MoviesPage() {
         throw new Error('M3U playlist bos veya gecersiz icerik')
       }
       
-      let parsedMovies = parseMoviesFromM3U(text)
-      parsedMovies = removeDuplicates(parsedMovies)
+      let parsedMovies = parseMoviesFromPlaylist(text)
+      parsedMovies = dedupeByTitle(parsedMovies)
       
       setMovies(parsedMovies)
       
@@ -436,9 +389,8 @@ function MoviesPage() {
                            parsedMovies.find(m => m.genre.includes('4K')) || 
                            parsedMovies[0]
       setHeroMovie(featuredMovie)
-
-      */
       setLoading(false)
+      */
     } catch (err) {
       console.error('M3U fetch error:', err)
       setError('Filmler yuklenirken hata olustu: ' + err.message)

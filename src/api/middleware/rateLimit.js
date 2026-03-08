@@ -93,7 +93,7 @@ function createRateLimiter(options) {
       const ip = getClientIp(req);
       return `${keyPrefix}${ip}:${requestIdentity}`;
     },
-    handler: (req, res, next, options) => {
+    handler: (req, res, _next, _options) => {
       logger.warn('Rate limit exceeded', {
         ip: getClientIp(req),
         path: req.path,

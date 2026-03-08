@@ -161,7 +161,7 @@ function createOptionalAuthMiddleware(config) {
  * Validates admin JWT tokens
  */
 function createAdminAuthMiddleware(config) {
-  const { jwtSecret, cacheService } = config;
+  const { jwtSecret } = config;
 
   return async (req, res, next) => {
     const authHeader = req.headers.authorization;

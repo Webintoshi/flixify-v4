@@ -65,14 +65,12 @@ router.get('/clear-rate-limit', async (req, res) => {
 });
 
 // Auto-create test user with real M3U
-developmentRoutes = (userRepository, activateUser) => {
+const developmentRoutes = (userRepository) => {
   
   // GET /dev/setup - Create test user with real M3U
   router.get('/setup', async (req, res) => {
     try {
       const User = require('../../domain/entities/User');
-      const Code = require('../../domain/value-objects/Code');
-      
       // Check if test user exists
       const existing = await userRepository.findByCode('A1B2C3D4E5F6A7B8');
       if (existing) {

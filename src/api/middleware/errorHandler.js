@@ -101,7 +101,7 @@ function createProblemDetails(error, req) {
 /**
  * Global error handler middleware
  */
-function errorHandler(err, req, res, next) {
+function errorHandler(err, req, res, _next) {
   // Determine status code
   let statusCode = err.statusCode || 500;
   let errorCode = err.code || 'INTERNAL_ERROR';
