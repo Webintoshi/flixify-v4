@@ -29,6 +29,96 @@ const PLATFORMS = [
   { id: 'Anime', name: 'Anime', color: '#FF69B4', icon: '🌸' },
 ];
 
+const PLATFORM_ALIASES = {
+  'Netflix Dizileri': ['netflix'],
+  'Disney+ Dizileri': ['disney+', 'disney plus', 'disney'],
+  'Amazon Prime Dizileri': ['amazon prime', 'prime video', 'prime'],
+  'TV+ Dizileri': ['tv+'],
+  'TOD (beIN) Dizileri': ['tod', 'bein', 'bein connect'],
+  'BluTV Dizileri (HBO)': ['blutv', 'blue tv', 'bluetv', 'hbo'],
+  'Apple TV+ Dizileri': ['apple tv+', 'apple tv'],
+  'GAÄ°N Dizileri': ['gain'],
+  'Exxen Dizileri': ['exxen'],
+  'GÃ¼nlÃ¼k Diziler': ['gunluk', 'daily'],
+  'Anime': ['anime']
+};
+
+const EPISODE_PATTERN = /\bS(\d{1,2})E(\d{1,3})\b/i;
+const LEADING_REGION_PATTERN = /^[A-Z0-9]{2,4}\s*[•|:-]\s*/;
+const TRAILING_STREAM_LABEL_PATTERN = /\s+(24\/7|FHD|HD|4K|UHD)$/i;
+
+const unwrapProxyTargetUrl = (value) => {
+  if (!value || typeof value !== 'string') {
+    return '';
+  }
+
+  try {
+    const parsed = new URL(value);
+    const proxiedTarget = parsed.searchParams.get('url');
+    return proxiedTarget ? decodeURIComponent(proxiedTarget) : value;
+  } catch (error) {
+    return value;
+  }
+};
+
+const normalizeGenre = (rawGenre, fullTitle) => {
+  let genre = (rawGenre || 'Diger').replace('TR:', '').replace('TR | ', '').trim();
+  const haystack = `${genre} ${fullTitle}`.toLowerCase();
+
+  const matchedPlatform = Object.entries(PLATFORM_ALIASES).find(([, aliases]) =>
+    aliases.some((alias) => haystack.includes(alias))
+  );
+
+  if (matchedPlatform) {
+    return matchedPlatform[0];
+  }
+
+  return genre;
+};
+
+const stripPlatformAlias = (value, genre) => {
+  const aliases = PLATFORM_ALIASES[genre] || [];
+  const lowered = value.toLowerCase();
+
+  for (const alias of aliases) {
+    if (lowered.startsWith(alias)) {
+      return value.slice(alias.length).trim();
+    }
+  }
+
+  return value;
+};
+
+const extractSeriesMetadata = (fullTitle, genre) => {
+  const normalizedTitle = fullTitle.replace(/\s+/g, ' ').trim();
+  const episodeMatch = normalizedTitle.match(EPISODE_PATTERN);
+
+  let seriesName = episodeMatch
+    ? normalizedTitle.slice(0, episodeMatch.index).trim()
+    : normalizedTitle;
+  const season = episodeMatch ? parseInt(episodeMatch[1], 10) : 1;
+  const episode = episodeMatch ? parseInt(episodeMatch[2], 10) : 1;
+
+  seriesName = seriesName.replace(LEADING_REGION_PATTERN, '').trim();
+  seriesName = stripPlatformAlias(seriesName, genre);
+  seriesName = seriesName.replace(TRAILING_STREAM_LABEL_PATTERN, '').trim();
+
+  if (!seriesName) {
+    seriesName = normalizedTitle.replace(TRAILING_STREAM_LABEL_PATTERN, '').trim() || normalizedTitle;
+  }
+
+  return {
+    seriesName,
+    season,
+    episode
+  };
+};
+
+const isSeriesTargetUrl = (value) => {
+  const originalTarget = unwrapProxyTargetUrl(value).toLowerCase();
+  return originalTarget.includes('/series/');
+};
+
 // Parse series from M3U
 const parseSeriesFromM3U = (content) => {
   const lines = content.split('\n');
@@ -43,29 +133,20 @@ const parseSeriesFromM3U = (content) => {
       const groupMatch = t.match(/group-title="([^"]+)"/);
       const commaIdx = t.lastIndexOf(',');
       const fullTitle = commaIdx > -1 ? t.substring(commaIdx + 1).trim() : nameMatch?.[1] || 'Unknown';
-      
-      const match = fullTitle.match(/^(.+?)\s*S(\d+)E(\d+)$/i);
-      
-      if (match) {
-        const seriesName = match[1].trim();
-        const season = parseInt(match[2]);
-        const episode = parseInt(match[3]);
-        
-        let genre = groupMatch?.[1] || 'Diger';
-        genre = genre.replace('TR:', '').replace('TR | ', '').trim();
-        
-        current = {
-          seriesName,
-          season,
-          episode,
-          fullTitle,
-          logo: logoMatch?.[1] || '',
-          genre,
-          id: Math.random().toString(36).substr(2, 9)
-        };
-      }
+      const genre = normalizeGenre(groupMatch?.[1], fullTitle);
+      const { seriesName, season, episode } = extractSeriesMetadata(fullTitle, genre);
+
+      current = {
+        seriesName,
+        season,
+        episode,
+        fullTitle,
+        logo: logoMatch?.[1] || '',
+        genre,
+        id: Math.random().toString(36).substr(2, 9)
+      };
     } else if (t && !t.startsWith('#') && current) {
-      if (t.includes('/series/')) {
+      if (isSeriesTargetUrl(t)) {
         current.url = t;
         episodes.push(current);
       }
@@ -102,7 +183,8 @@ const groupBySeries = (episodes) => {
         name: ep.seriesName,
         genre: ep.genre,
         logo: ep.logo, // İlk bölümün logosu
-        seasons: {}
+        seasons: {},
+        episodeKeys: new Set()
       };
     }
     
@@ -111,6 +193,12 @@ const groupBySeries = (episodes) => {
       seriesMap[key].logo = ep.logo;
     }
     
+    const episodeKey = `${ep.season}:${ep.episode}:${ep.fullTitle.toLowerCase()}:${ep.url}`;
+    if (seriesMap[key].episodeKeys.has(episodeKey)) {
+      return;
+    }
+    seriesMap[key].episodeKeys.add(episodeKey);
+
     if (!seriesMap[key].seasons[ep.season]) {
       seriesMap[key].seasons[ep.season] = [];
     }
@@ -129,7 +217,7 @@ const groupBySeries = (episodes) => {
     }
   });
   
-  return Object.values(seriesMap);
+  return Object.values(seriesMap).map(({ episodeKeys, ...series }) => series);
 };
 
 // Series Card - Modern
@@ -552,6 +640,11 @@ function SeriesPage() {
 
       const parsedEpisodes = parseSeriesFromM3U(text);
       const groupedSeries = groupBySeries(parsedEpisodes);
+
+      if (groupedSeries.length === 0) {
+        throw new Error('Playlistte gosterilecek dizi kaydi bulunamadi.');
+      }
+
       setSeries(groupedSeries);
       
       const netflixSeries = groupedSeries.find(s => s.genre === 'Netflix Dizileri');

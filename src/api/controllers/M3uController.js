@@ -19,6 +19,7 @@ class M3uController {
     this._cacheService = cacheService;
     this._jwtSecret = jwtSecret;
     this._userProviderOrigins = new Map();
+    this._userAllowedOrigins = new Map();
 
     this._circuitBreaker = new CircuitBreaker(this._fetchM3u.bind(this), {
       timeout: parseInt(process.env.PROXY_TIMEOUT_MS, 10) || 30000,
@@ -220,6 +221,64 @@ class M3uController {
     return typeof value === 'string' && /^https?:\/\//i.test(value);
   }
 
+  _addAllowedOrigin(origins, value) {
+    if (!this._isHttpUrl(value)) {
+      return;
+    }
+
+    try {
+      origins.add(new URL(value).origin);
+    } catch (error) {
+      logger.warn('Skipping invalid allowed origin candidate', {
+        value,
+        error: error.message
+      });
+    }
+  }
+
+  _extractAllowedOrigins(content, providerUrl) {
+    const origins = new Set();
+
+    this._addAllowedOrigin(origins, providerUrl);
+
+    content
+      .split(/\r?\n/)
+      .forEach((line) => {
+        const trimmed = line.trim();
+
+        if (!trimmed) {
+          return;
+        }
+
+        if (trimmed.startsWith('#EXTINF:')) {
+          const logoMatch = trimmed.match(/tvg-logo="([^"]+)"/i);
+          if (logoMatch?.[1]) {
+            this._addAllowedOrigin(origins, logoMatch[1]);
+          }
+          return;
+        }
+
+        if (trimmed.startsWith('#')) {
+          return;
+        }
+
+        this._addAllowedOrigin(origins, trimmed);
+      });
+
+    return Array.from(origins);
+  }
+
+  async _rememberAllowedOrigins(code, content, providerUrl) {
+    const origins = this._extractAllowedOrigins(content, providerUrl);
+    const cacheKey = `m3u:allowed-origins:${code}`;
+    const originSet = new Set(origins);
+
+    this._userAllowedOrigins.set(code, originSet);
+    await this._cacheService.set(cacheKey, origins, 300);
+
+    return originSet;
+  }
+
   _rewriteExtinfLine(line, context) {
     return line.replace(/tvg-logo="([^"]+)"/i, (match, logoUrl) => {
       if (!this._isHttpUrl(logoUrl)) {
@@ -310,6 +369,26 @@ class M3uController {
     return origin;
   }
 
+  async _getAllowedOrigins(code) {
+    if (this._userAllowedOrigins.has(code)) {
+      return this._userAllowedOrigins.get(code);
+    }
+
+    const cacheKey = `m3u:allowed-origins:${code}`;
+    const cachedOrigins = await this._cacheService.get(cacheKey);
+
+    if (Array.isArray(cachedOrigins) && cachedOrigins.length > 0) {
+      const originSet = new Set(cachedOrigins);
+      this._userAllowedOrigins.set(code, originSet);
+      return originSet;
+    }
+
+    const providerOrigin = await this._getProviderOrigin(code);
+    const fallbackSet = new Set([providerOrigin]);
+    this._userAllowedOrigins.set(code, fallbackSet);
+    return fallbackSet;
+  }
+
   async _assertAllowedProxyTarget(code, targetUrl) {
     let parsedTarget;
 
@@ -327,8 +406,8 @@ class M3uController {
       throw protocolError;
     }
 
-    const providerOrigin = await this._getProviderOrigin(code);
-    if (parsedTarget.origin !== providerOrigin) {
+    const allowedOrigins = await this._getAllowedOrigins(code);
+    if (!allowedOrigins.has(parsedTarget.origin)) {
       const originError = new Error('Proxy target origin is not allowed');
       originError.statusCode = 403;
       throw originError;
@@ -387,6 +466,8 @@ class M3uController {
       code,
       token: accessToken
     });
+
+    await this._rememberAllowedOrigins(code, rawPlaylist, m3uUrl);
 
     res.set({
       'Content-Type': 'application/x-mpegURL',
@@ -529,7 +610,9 @@ class M3uController {
 
     const cacheKey = `m3u:content:${code}`;
     await this._cacheService.delete(cacheKey);
+    await this._cacheService.delete(`m3u:allowed-origins:${code}`);
     this._userProviderOrigins.delete(code);
+    this._userAllowedOrigins.delete(code);
 
     logger.info('M3U cache cleared', { code });
     res.json({ status: 'success', message: 'Cache cleared' });
