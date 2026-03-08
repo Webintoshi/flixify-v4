@@ -1,0 +1,725 @@
+/* ============================================
+   FLIXIFY - COMPREHENSIVE RESPONSIVE SYSTEM
+   ============================================
+   
+   Breakpoint Hierarchy:
+   - 4K TV:      3840px+  (2160p Smart TV)
+   - 2K/QHD TV:  2560px+  (1440p TV/Monitor)
+   - FHD TV:     1920px+  (1080p Smart TV)
+   - HD TV:      1366px+  (720p/HD Ready TV)
+   - Desktop:    1440px+  (Large monitors)
+   - Laptop L:   1280px+  (13-15" laptops)
+   - Laptop S:   1024px+  (Small laptops/iPad Pro)
+   - Tablet:      768px+  (iPad/Medium tablets)
+   - Mobile L:    480px+  (Large phones)
+   - Mobile S:    360px+  (Small phones)
+   
+   ============================================ */
+
+/* ============================================
+   1. CSS CUSTOM PROPERTIES - DESIGN TOKENS
+   ============================================ */
+
+:root {
+  /* Spacing Scale - Fluid */
+  --space-xs: clamp(0.25rem, 0.5vw, 0.5rem);
+  --space-sm: clamp(0.5rem, 1vw, 0.75rem);
+  --space-md: clamp(0.75rem, 1.5vw, 1rem);
+  --space-lg: clamp(1rem, 2vw, 1.5rem);
+  --space-xl: clamp(1.5rem, 3vw, 2rem);
+  --space-2xl: clamp(2rem, 4vw, 3rem);
+  --space-3xl: clamp(3rem, 6vw, 4rem);
+  --space-4xl: clamp(4rem, 8vw, 6rem);
+  
+  /* Font Scale - Fluid Typography */
+  --text-xs: clamp(0.625rem, 0.8vw, 0.75rem);
+  --text-sm: clamp(0.75rem, 0.9vw, 0.875rem);
+  --text-base: clamp(0.875rem, 1vw, 1rem);
+  --text-lg: clamp(1rem, 1.2vw, 1.125rem);
+  --text-xl: clamp(1.125rem, 1.5vw, 1.25rem);
+  --text-2xl: clamp(1.25rem, 2vw, 1.5rem);
+  --text-3xl: clamp(1.5rem, 2.5vw, 2rem);
+  --text-4xl: clamp(1.75rem, 3vw, 2.5rem);
+  --text-5xl: clamp(2rem, 4vw, 3.5rem);
+  --text-6xl: clamp(2.5rem, 5vw, 4.5rem);
+  --text-7xl: clamp(3rem, 6vw, 6rem);
+  
+  /* TV Specific - Large fonts for distance viewing */
+  --text-tv-xs: clamp(0.875rem, 1.5vw, 1.25rem);
+  --text-tv-sm: clamp(1rem, 2vw, 1.5rem);
+  --text-tv-base: clamp(1.125rem, 2.5vw, 1.75rem);
+  --text-tv-lg: clamp(1.25rem, 3vw, 2rem);
+  --text-tv-xl: clamp(1.5rem, 3.5vw, 2.5rem);
+  --text-tv-2xl: clamp(2rem, 4.5vw, 3.5rem);
+  --text-tv-3xl: clamp(2.5rem, 5.5vw, 4.5rem);
+  
+  /* Component Dimensions */
+  --header-height: clamp(3.5rem, 8vh, 5rem);
+  --sidebar-width: clamp(240px, 20vw, 320px);
+  --card-radius: clamp(0.5rem, 1vw, 1rem);
+  --button-height: clamp(2.25rem, 5vh, 3rem);
+  
+  /* TV Touch Targets - Minimum 48px for remote navigation */
+  --touch-target-min: clamp(44px, 8vh, 64px);
+  --touch-target-lg: clamp(48px, 10vh, 80px);
+  
+  /* Grid Columns */
+  --grid-cols-mobile: 2;
+  --grid-cols-tablet: 3;
+  --grid-cols-laptop: 4;
+  --grid-cols-desktop: 5;
+  --grid-cols-tv: 6;
+  
+  /* Content Max Width */
+  --content-max-width: min(100% - 2rem, 1400px);
+  --content-max-width-tv: min(100% - 4rem, 2000px);
+}
+
+/* ============================================
+   2. BASE RESPONSIVE UTILITIES
+   ============================================ */
+
+/* Fluid Container */
+.container-fluid {
+  width: 100%;
+  margin-left: auto;
+  margin-right: auto;
+  padding-left: var(--space-md);
+  padding-right: var(--space-md);
+}
+
+/* Responsive Grid System */
+.responsive-grid {
+  display: grid;
+  gap: var(--space-md);
+  grid-template-columns: repeat(var(--grid-cols-mobile), 1fr);
+}
+
+/* Hide on specific breakpoints */
+@media (max-width: 479px) {
+  .hide-mobile { display: none !important; }
+}
+
+@media (min-width: 480px) and (max-width: 767px) {
+  .hide-mobile-lg { display: none !important; }
+}
+
+@media (min-width: 768px) and (max-width: 1023px) {
+  .hide-tablet { display: none !important; }
+}
+
+@media (min-width: 1024px) and (max-width: 1279px) {
+  .hide-laptop { display: none !important; }
+}
+
+@media (min-width: 1280px) and (max-width: 1919px) {
+  .hide-desktop { display: none !important; }
+}
+
+@media (min-width: 1920px) {
+  .hide-tv { display: none !important; }
+}
+
+/* Show only on specific breakpoints */
+@media (max-width: 479px) {
+  .show-mobile-only { display: block !important; }
+}
+
+@media (min-width: 768px) and (max-width: 1023px) {
+  .show-tablet-only { display: block !important; }
+}
+
+@media (min-width: 1920px) {
+  .show-tv-only { display: block !important; }
+}
+
+/* ============================================
+   3. MOBILE FIRST - BASE STYLES (360px+)
+   ============================================ */
+
+@media (max-width: 479px) {
+  :root {
+    --header-height: 3.5rem;
+    --sidebar-width: 100%;
+  }
+  
+  /* Typography adjustments */
+  body {
+    font-size: var(--text-sm);
+  }
+  
+  /* Cards stack vertically */
+  .card-grid {
+    grid-template-columns: repeat(2, 1fr);
+    gap: var(--space-sm);
+  }
+  
+  /* Compact spacing */
+  .section-padding {
+    padding: var(--space-lg) 0;
+  }
+  
+  /* Full-width buttons on mobile */
+  .btn-responsive {
+    width: 100%;
+    justify-content: center;
+  }
+  
+  /* Hero adjustments */
+  .hero-title {
+    font-size: var(--text-4xl);
+    line-height: 1.1;
+  }
+  
+  /* Navigation - Bottom sheet style */
+  .nav-sidebar {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    top: auto;
+    width: 100%;
+    height: auto;
+    border-top: 1px solid rgba(255,255,255,0.1);
+    border-right: none;
+    z-index: 50;
+    padding: var(--space-xs) 0;
+  }
+  
+  .nav-sidebar .nav-items {
+    display: flex;
+    flex-direction: row;
+    justify-content: space-around;
+    overflow-x: auto;
+    padding: 0 var(--space-sm);
+  }
+  
+  /* Hide text in bottom nav, show icons only */
+  .nav-sidebar .nav-label {
+    display: none;
+  }
+  
+  /* Content area with bottom nav offset */
+  .main-content {
+    margin-left: 0;
+    margin-bottom: calc(var(--header-height) + var(--space-md));
+    padding: var(--space-md);
+  }
+}
+
+/* ============================================
+   4. LARGE MOBILE (480px - 767px)
+   ============================================ */
+
+@media (min-width: 480px) and (max-width: 767px) {
+  .responsive-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+  
+  .card-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+  
+  .hero-title {
+    font-size: var(--text-5xl);
+  }
+  
+  /* Two column layouts possible */
+  .two-col-mobile {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: var(--space-md);
+  }
+}
+
+/* ============================================
+   5. TABLET (768px - 1023px)
+   ============================================ */
+
+@media (min-width: 768px) and (max-width: 1023px) {
+  :root {
+    --header-height: 4rem;
+    --sidebar-width: 260px;
+  }
+  
+  .responsive-grid {
+    grid-template-columns: repeat(var(--grid-cols-tablet), 1fr);
+    gap: var(--space-lg);
+  }
+  
+  .card-grid {
+    grid-template-columns: repeat(4, 1fr);
+  }
+  
+  /* Sidebar as overlay on tablet */
+  .nav-sidebar {
+    position: fixed;
+    left: 0;
+    top: var(--header-height);
+    bottom: 0;
+    width: var(--sidebar-width);
+    transform: translateX(-100%);
+    transition: transform 0.3s ease;
+    z-index: 40;
+  }
+  
+  .nav-sidebar.open {
+    transform: translateX(0);
+  }
+  
+  .main-content {
+    margin-left: 0;
+    padding: var(--space-lg);
+  }
+  
+  .hero-title {
+    font-size: var(--text-5xl);
+  }
+  
+  /* Touch-friendly on tablet */
+  .touch-target {
+    min-height: 44px;
+    min-width: 44px;
+  }
+}
+
+/* ============================================
+   6. LAPTOP (1024px - 1279px)
+   ============================================ */
+
+@media (min-width: 1024px) and (max-width: 1279px) {
+  :root {
+    --sidebar-width: 280px;
+  }
+  
+  .responsive-grid {
+    grid-template-columns: repeat(var(--grid-cols-laptop), 1fr);
+  }
+  
+  .card-grid {
+    grid-template-columns: repeat(4, 1fr);
+  }
+  
+  .nav-sidebar {
+    position: fixed;
+    left: 0;
+    top: var(--header-height);
+    bottom: 0;
+    width: var(--sidebar-width);
+  }
+  
+  .main-content {
+    margin-left: var(--sidebar-width);
+    padding: var(--space-xl);
+  }
+}
+
+/* ============================================
+   7. DESKTOP (1280px - 1919px)
+   ============================================ */
+
+@media (min-width: 1280px) and (max-width: 1919px) {
+  :root {
+    --sidebar-width: 300px;
+  }
+  
+  .container-fluid {
+    max-width: var(--content-max-width);
+    padding-left: var(--space-xl);
+    padding-right: var(--space-xl);
+  }
+  
+  .responsive-grid {
+    grid-template-columns: repeat(var(--grid-cols-desktop), 1fr);
+    gap: var(--space-xl);
+  }
+  
+  .card-grid {
+    grid-template-columns: repeat(5, 1fr);
+  }
+  
+  .hero-title {
+    font-size: var(--text-6xl);
+  }
+  
+  /* Larger cards on desktop */
+  .content-card {
+    aspect-ratio: 16/9;
+  }
+  
+  .movie-card {
+    aspect-ratio: 2/3;
+  }
+}
+
+/* ============================================
+   8. TV SCREENS - FHD (1920px+)
+   ============================================ */
+
+@media (min-width: 1920px) {
+  :root {
+    --header-height: 5rem;
+    --sidebar-width: 350px;
+  }
+  
+  /* TV-optimized typography */
+  body {
+    font-size: var(--text-tv-base);
+  }
+  
+  .container-fluid {
+    max-width: var(--content-max-width-tv);
+    padding-left: var(--space-2xl);
+    padding-right: var(--space-2xl);
+  }
+  
+  /* Larger grid for TV */
+  .responsive-grid {
+    grid-template-columns: repeat(var(--grid-cols-tv), 1fr);
+    gap: var(--space-xl);
+  }
+  
+  .card-grid {
+    grid-template-columns: repeat(6, 1fr);
+  }
+  
+  /* TV Hero */
+  .hero-title {
+    font-size: var(--text-tv-3xl);
+    letter-spacing: -0.02em;
+  }
+  
+  .hero-subtitle {
+    font-size: var(--text-tv-lg);
+  }
+  
+  /* TV Sidebar - Wider for remote navigation */
+  .nav-sidebar {
+    width: var(--sidebar-width);
+    padding: var(--space-xl);
+  }
+  
+  /* Larger touch targets for TV remote */
+  .nav-item {
+    padding: var(--space-lg);
+    font-size: var(--text-tv-base);
+    border-radius: var(--card-radius);
+    margin-bottom: var(--space-sm);
+  }
+  
+  .nav-item svg {
+    width: 1.5rem;
+    height: 1.5rem;
+  }
+  
+  /* TV Buttons - Larger */
+  .btn {
+    padding: var(--space-md) var(--space-xl);
+    font-size: var(--text-tv-base);
+    min-height: var(--touch-target-lg);
+    border-radius: var(--card-radius);
+  }
+  
+  /* TV Cards - Larger for visibility */
+  .content-card {
+    border-radius: calc(var(--card-radius) * 1.5);
+  }
+  
+  .content-card:hover {
+    transform: scale(1.15);
+  }
+  
+  /* TV Focus indicators for remote */
+  .focusable:focus-visible,
+  .focusable:focus {
+    outline: 4px solid var(--flix-primary);
+    outline-offset: 4px;
+    box-shadow: 0 0 0 8px rgba(229, 9, 20, 0.2);
+  }
+  
+  /* TV Section spacing */
+  .section-padding {
+    padding: var(--space-4xl) 0;
+  }
+  
+  /* TV Modal - Centered and larger */
+  .modal {
+    max-width: 600px;
+    padding: var(--space-3xl);
+  }
+  
+  .modal-title {
+    font-size: var(--text-tv-xl);
+  }
+}
+
+/* ============================================
+   9. 2K/QHD TV (2560px+)
+   ============================================ */
+
+@media (min-width: 2560px) {
+  :root {
+    --sidebar-width: 400px;
+    --header-height: 6rem;
+  }
+  
+  .card-grid {
+    grid-template-columns: repeat(7, 1fr);
+    gap: var(--space-2xl);
+  }
+  
+  .hero-title {
+    font-size: clamp(4rem, 6vw, 8rem);
+  }
+  
+  /* Even larger touch targets */
+  .nav-item {
+    padding: var(--space-xl);
+    font-size: var(--text-tv-lg);
+  }
+  
+  .btn {
+    min-height: 80px;
+    font-size: var(--text-tv-lg);
+  }
+}
+
+/* ============================================
+   10. 4K TV (3840px+)
+   ============================================ */
+
+@media (min-width: 3840px) {
+  :root {
+    --sidebar-width: 500px;
+    --header-height: 7rem;
+  }
+  
+  .container-fluid {
+    max-width: 2800px;
+  }
+  
+  .card-grid {
+    grid-template-columns: repeat(8, 1fr);
+    gap: var(--space-3xl);
+  }
+  
+  .hero-title {
+    font-size: clamp(5rem, 8vw, 12rem);
+  }
+  
+  /* Massive touch targets for 4K */
+  .nav-item {
+    padding: calc(var(--space-xl) * 1.5);
+    font-size: var(--text-tv-xl);
+  }
+  
+  .nav-item svg {
+    width: 2.5rem;
+    height: 2.5rem;
+  }
+  
+  .btn {
+    min-height: 100px;
+    font-size: var(--text-tv-xl);
+    padding: var(--space-lg) var(--space-3xl);
+    border-radius: calc(var(--card-radius) * 1.5);
+  }
+}
+
+/* ============================================
+   11. CONTAINER QUERIES (Modern Responsive)
+   ============================================ */
+
+@supports (container-type: inline-size) {
+  /* Card container queries */
+  .card-container {
+    container-type: inline-size;
+    container-name: card;
+  }
+  
+  @container card (max-width: 200px) {
+    .card-title {
+      font-size: var(--text-xs);
+    }
+    
+    .card-meta {
+      display: none;
+    }
+  }
+  
+  @container card (min-width: 201px) and (max-width: 300px) {
+    .card-title {
+      font-size: var(--text-sm);
+    }
+  }
+  
+  @container card (min-width: 301px) {
+    .card-title {
+      font-size: var(--text-base);
+    }
+    
+    .card-description {
+      display: block;
+    }
+  }
+  
+  /* Sidebar container queries */
+  .sidebar-container {
+    container-type: inline-size;
+    container-name: sidebar;
+  }
+  
+  @container sidebar (max-width: 280px) {
+    .sidebar-label {
+      display: none;
+    }
+    
+    .sidebar-icon {
+      margin: 0 auto;
+    }
+  }
+}
+
+/* ============================================
+   12. ORIENTATION SPECIFIC
+   ============================================ */
+
+/* Landscape on mobile */
+@media (max-height: 500px) and (orientation: landscape) {
+  .hero-section {
+    min-height: auto;
+    padding: var(--space-xl) 0;
+  }
+  
+  .hero-title {
+    font-size: var(--text-3xl);
+  }
+  
+  /* Compact bottom nav in landscape */
+  .nav-sidebar {
+    padding: var(--space-xs) 0;
+  }
+}
+
+/* ============================================
+   13. HIGH DPI / RETINA DISPLAYS
+   ============================================ */
+
+@media (-webkit-min-device-pixel-ratio: 2), (min-resolution: 192dpi) {
+  /* Sharper images on retina */
+  img {
+    image-rendering: -webkit-optimize-contrast;
+  }
+  
+  /* Thinner borders on high DPI */
+  .border-hairline {
+    border-width: 0.5px;
+  }
+}
+
+/* ============================================
+   14. REDUCED MOTION (Accessibility)
+   ============================================ */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  
+  .content-card:hover {
+    transform: none;
+  }
+}
+
+/* ============================================
+   15. PRINT STYLES
+   ============================================ */
+
+@media print {
+  .nav-sidebar,
+  .btn,
+  .modal {
+    display: none !important;
+  }
+  
+  .main-content {
+    margin: 0;
+    padding: 0;
+  }
+  
+  body {
+    background: white;
+    color: black;
+  }
+}
+
+/* ============================================
+   16. UTILITY CLASSES
+   ============================================ */
+
+/* Responsive text alignment */
+.text-center-mobile { text-align: center; }
+@media (min-width: 768px) {
+  .text-center-mobile { text-align: left; }
+}
+
+/* Responsive padding */
+.p-responsive {
+  padding: var(--space-md);
+}
+
+@media (min-width: 768px) {
+  .p-responsive {
+    padding: var(--space-xl);
+  }
+}
+
+@media (min-width: 1920px) {
+  .p-responsive {
+    padding: var(--space-2xl);
+  }
+}
+
+/* Responsive gap */
+.gap-responsive {
+  gap: var(--space-sm);
+}
+
+@media (min-width: 768px) {
+  .gap-responsive {
+    gap: var(--space-md);
+  }
+}
+
+@media (min-width: 1280px) {
+  .gap-responsive {
+    gap: var(--space-lg);
+  }
+}
+
+/* Aspect ratios for different screens */
+.aspect-video-responsive {
+  aspect-ratio: 16/9;
+}
+
+@media (max-width: 767px) {
+  .aspect-video-responsive {
+    aspect-ratio: 4/3;
+  }
+}
+
+/* Safe area for notched phones */
+@supports (padding-top: env(safe-area-inset-top)) {
+  .safe-area-top {
+    padding-top: env(safe-area-inset-top);
+  }
+  
+  .safe-area-bottom {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+}

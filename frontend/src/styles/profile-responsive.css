@@ -1,0 +1,149 @@
+/* ============================================
+   PROFILE PAGE - COMPREHENSIVE RESPONSIVE
+   ============================================ */
+
+/* Mobile First - Small Phones */
+@media (max-width: 479px) {
+  .profile-layout {
+    flex-direction: column;
+    padding-top: 60px;
+  }
+  
+  .profile-sidebar {
+    width: 100%;
+    position: fixed;
+    top: auto;
+    bottom: 0;
+    left: 0;
+    right: 0;
+    height: auto;
+    border-right: none;
+    border-top: 1px solid rgba(255,255,255,0.08);
+    background: rgba(20, 20, 20, 0.98);
+    backdrop-filter: blur(20px);
+    z-index: 100;
+    padding: 0;
+  }
+  
+  .sidebar-header { display: none; }
+  
+  .sidebar-nav {
+    flex-direction: row;
+    justify-content: space-around;
+    padding: 8px 4px;
+    gap: 0;
+    overflow-x: auto;
+  }
+  
+  .sidebar-nav-item {
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    padding: 8px 12px;
+    font-size: 0.625rem;
+    min-width: 56px;
+  }
+  
+  .sidebar-nav-item svg { width: 20px; height: 20px; }
+  .sidebar-footer { display: none; }
+  
+  .profile-main {
+    margin-left: 0;
+    padding: 16px;
+    padding-bottom: 80px;
+    min-height: calc(100vh - 140px);
+  }
+  
+  .summary-cards { grid-template-columns: repeat(2, 1fr); gap: 12px; }
+  .packages-grid { grid-template-columns: 1fr; gap: 16px; }
+  .device-limits-grid { grid-template-columns: repeat(2, 1fr); gap: 12px; }
+}
+
+/* Mobile Large */
+@media (min-width: 480px) and (max-width: 767px) {
+  .profile-sidebar {
+    width: 100%;
+    position: relative;
+    border-right: none;
+    border-bottom: 1px solid rgba(255,255,255,0.08);
+  }
+  
+  .sidebar-nav {
+    flex-direction: row;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 8px;
+  }
+  
+  .profile-main { margin-left: 0; padding: 24px; }
+  .summary-cards { grid-template-columns: repeat(2, 1fr); }
+  .packages-grid { grid-template-columns: repeat(2, 1fr); }
+}
+
+/* Tablet */
+@media (min-width: 768px) and (max-width: 1023px) {
+  .profile-sidebar { width: 260px; }
+  .profile-main { margin-left: 260px; padding: 24px; }
+  .packages-grid { grid-template-columns: repeat(2, 1fr); }
+}
+
+/* Laptop */
+@media (min-width: 1024px) and (max-width: 1279px) {
+  .profile-sidebar { width: 280px; }
+  .profile-main { margin-left: 280px; padding: 24px 32px; }
+}
+
+/* Desktop */
+@media (min-width: 1280px) and (max-width: 1919px) {
+  .profile-sidebar { width: 300px; }
+  .profile-main { margin-left: 300px; padding: 32px 40px; }
+  .packages-grid { grid-template-columns: repeat(3, 1fr); }
+}
+
+/* FHD TV 1920px+ */
+@media (min-width: 1920px) {
+  .profile-layout { padding-top: 80px; }
+  .profile-sidebar { width: 360px; top: 80px; }
+  .sidebar-header { padding: 28px 24px; }
+  .profile-avatar-large { width: 56px; height: 56px; }
+  .code-title { padding: 14px 20px; margin-bottom: 12px; }
+  .code-title-text { font-size: 1.125rem; letter-spacing: 0.15em; }
+  .copy-btn-full { min-width: 140px; padding: 10px 16px; font-size: 0.875rem; }
+  .sidebar-nav { padding: 20px 16px; }
+  .sidebar-nav-item { padding: 16px 20px; font-size: 1.125rem; border-radius: 12px; }
+  .sidebar-nav-item svg { width: 24px; height: 24px; }
+  .profile-main { margin-left: 360px; padding: 32px 40px; max-width: 1600px; }
+  .summary-cards { grid-template-columns: repeat(4, 1fr); gap: 24px; }
+  .packages-grid { grid-template-columns: repeat(3, 1fr); gap: 32px; }
+  .section-title-row h1 { font-size: 2.25rem; }
+  .setting-item { padding: 24px 32px; }
+}
+
+/* 2K TV 2560px+ */
+@media (min-width: 2560px) {
+  .profile-sidebar { width: 420px; }
+  .profile-main { margin-left: 420px; padding: 40px 56px; }
+  .profile-avatar-large { width: 72px; height: 72px; }
+  .code-title-text { font-size: 1.375rem; }
+  .copy-btn-full { min-width: 170px; padding: 12px 20px; font-size: 1rem; }
+  .sidebar-nav-item { padding: 18px 22px; font-size: 1.25rem; }
+  .packages-grid { grid-template-columns: repeat(4, 1fr); }
+  .section-title-row h1 { font-size: 2.5rem; }
+}
+
+/* 4K TV 3840px+ */
+@media (min-width: 3840px) {
+  .profile-sidebar { width: 500px; }
+  .profile-main { margin-left: 500px; padding: 48px 72px; max-width: 2400px; }
+  .profile-avatar-large { width: 88px; height: 88px; }
+  .code-title { padding: 18px 28px; }
+  .code-title-text { font-size: 1.625rem; letter-spacing: 0.18em; }
+  .copy-btn-full { min-width: 200px; padding: 16px 28px; font-size: 1.125rem; }
+  .sidebar-nav-item { padding: 22px 26px; font-size: 1.5rem; }
+  .sidebar-nav-item svg { width: 28px; height: 28px; }
+  .packages-grid { grid-template-columns: repeat(4, 1fr); gap: 48px; }
+  .package-card { padding: 40px; border-radius: 24px; }
+  .summary-cards { gap: 32px; }
+  .section-title-row h1 { font-size: 3rem; }
+  .setting-item { padding: 28px 36px; }
+}

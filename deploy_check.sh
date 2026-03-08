@@ -1,0 +1,20 @@
+#!/bin/bash
+# Deploy ve log kontrolü
+
+echo "=== Deploy Script ==="
+echo ""
+echo "1. Sunucuya bağlan ve deploy et:"
+echo "   ssh root@46.225.183.57"
+echo "   cd /var/www/flixify-pro"
+echo "   git pull origin main"
+echo "   docker-compose restart backend"
+echo ""
+echo "2. Logları izle (yeni terminalde):"
+echo "   docker logs -f flixify-backend 2>&1 | grep -E 'M3U|axios|response|Starting|Axios'"
+echo ""
+echo "3. Frontend'den istek yap (tarayıcıda):"
+echo "   Canlı TV sayfasına git ve hata al"
+echo ""
+echo "4. Log dosyasını kaydet:"
+echo "   docker logs flixify-backend --tail 100 > /tmp/m3u_debug.log"
+echo "   cat /tmp/m3u_debug.log"

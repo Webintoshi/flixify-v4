@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: flixify-backend
+    restart: unless-stopped
+    ports:
+      - "9199:9199"
+    environment:
+      - NODE_ENV=production
+      - PORT=9199
+    env_file:
+      - .env.production
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:9199/health', (r) => r.statusCode === 200 ? process.exit(0) : process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - flixify-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: flixify-frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    networks:
+      - flixify-network
+
+networks:
+  flixify-network:
+    driver: bridge
