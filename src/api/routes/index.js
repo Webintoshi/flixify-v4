@@ -349,7 +349,7 @@ function createRoutes({
   // GET /api/v1/m3u/:code.m3u - Real M3U proxy (requires subscription)
   router.get(
     '/m3u/:code.m3u',
-    rateLimiters.m3u,
+    rateLimiters.playlist,
     authMiddleware,
     subscriptionCheckMiddleware,
     validators.m3uProxy,
@@ -389,14 +389,14 @@ function createRoutes({
   // GET /api/v1/stream/:code - Proxy TS segments (CORS bypass)
   router.get(
     '/stream/:code',
-    rateLimiters.m3u,
+    rateLimiters.media,
     m3uController.proxyStream
   );
 
   // GET /api/v1/m3u/logo/:code - Proxy channel logos through same-origin HTTPS
   router.get(
     '/m3u/logo/:code',
-    rateLimiters.m3u,
+    rateLimiters.media,
     m3uController.proxyLogo
   );
   

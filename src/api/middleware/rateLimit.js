@@ -21,6 +21,62 @@ try {
   RedisStore = null;
 }
 
+function getClientIp(req) {
+  const forwardedFor = req.headers['x-forwarded-for'];
+  if (typeof forwardedFor === 'string' && forwardedFor.trim()) {
+    return forwardedFor.split(',')[0].trim();
+  }
+
+  return req.ip || req.connection?.remoteAddress || 'unknown';
+}
+
+function decodeTokenCode(token) {
+  if (!token || typeof token !== 'string') {
+    return '';
+  }
+
+  try {
+    const [, payload] = token.split('.');
+    if (!payload) {
+      return '';
+    }
+
+    const decoded = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8'));
+    return decoded.code || decoded.adminId || '';
+  } catch {
+    return '';
+  }
+}
+
+function getRequestIdentity(req) {
+  if (req.user?.code || req.user?.adminId) {
+    return req.user.code || req.user.adminId;
+  }
+
+  if (req.params?.code) {
+    return req.params.code;
+  }
+
+  if (req.body?.code) {
+    return req.body.code;
+  }
+
+  if (req.query?.code) {
+    return req.query.code;
+  }
+
+  const authHeader = req.headers.authorization;
+  if (authHeader?.startsWith('Bearer ')) {
+    return decodeTokenCode(authHeader.substring(7));
+  }
+
+  if (req.query?.token) {
+    return decodeTokenCode(req.query.token);
+  }
+
+  return '';
+}
+
 /**
  * Create rate limiter with Redis store
  */
@@ -33,16 +89,15 @@ function createRateLimiter(options) {
     standardHeaders: true, // Return rate limit info in `RateLimit-*` headers
     legacyHeaders: false, // Disable `X-RateLimit-*` headers
     keyGenerator: (req) => {
-      // Use IP + user code if authenticated
-      const userCode = req.user?.code || '';
-      const ip = req.ip || req.connection.remoteAddress || 'unknown';
-      return `${keyPrefix}${ip}:${userCode}`;
+      const requestIdentity = getRequestIdentity(req);
+      const ip = getClientIp(req);
+      return `${keyPrefix}${ip}:${requestIdentity}`;
     },
     handler: (req, res, next, options) => {
       logger.warn('Rate limit exceeded', {
-        ip: req.ip,
+        ip: getClientIp(req),
         path: req.path,
-        userCode: req.user?.code ? req.user.code.substring(0, 4) + '****' : null
+        userCode: getRequestIdentity(req)?.toString()?.slice(0, 4) ? `${getRequestIdentity(req).toString().slice(0, 4)}****` : null
       });
       
       res.status(429).json({
@@ -54,7 +109,12 @@ function createRateLimiter(options) {
     },
     skip: (req) => {
       // Skip rate limiting for health checks
-      return req.path === '/health' || req.path === '/api/health';
+      return (
+        req.path === '/health' ||
+        req.path === '/api/health' ||
+        req.path.startsWith('/api/v1/stream/') ||
+        req.path.startsWith('/api/v1/m3u/logo/')
+      );
     }
   };
 
@@ -80,11 +140,11 @@ function createRateLimiters(redisClient) {
   return {
     /**
      * Global API rate limiter
-     * 100 requests per 15 minutes per IP
+     * 600 requests per 15 minutes per client
      */
     global: createRateLimiter({
       windowMs: 15 * 60 * 1000, // 15 minutes
-      max: 100,
+      max: 600,
       keyPrefix: 'rl:global:',
       redisClient
     }),
@@ -103,15 +163,26 @@ function createRateLimiters(redisClient) {
     }),
 
     /**
-     * M3U proxy rate limiter
-     * 60 requests per minute per user
-     * Allows frequent playlist refreshes but prevents abuse
+     * Playlist fetch limiter
+     * 120 requests per minute per user/device
      */
-    m3u: createRateLimiter({
+    playlist: createRateLimiter({
       windowMs: 60 * 1000, // 1 minute
-      max: 60,
-      keyPrefix: 'rl:m3u:',
-      message: 'Too many M3U requests. Please slow down.',
+      max: 120,
+      keyPrefix: 'rl:playlist:',
+      message: 'Too many playlist requests. Please slow down.',
+      redisClient
+    }),
+
+    /**
+     * Media proxy limiter
+     * Allows bursty logo and TS segment traffic per viewer.
+     */
+    media: createRateLimiter({
+      windowMs: 60 * 1000, // 1 minute
+      max: 2400,
+      keyPrefix: 'rl:media:',
+      message: 'Too many media requests. Please slow down.',
       redisClient
     }),
 
