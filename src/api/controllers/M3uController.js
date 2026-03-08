@@ -10,6 +10,12 @@
 const axios = require('axios');
 const CircuitBreaker = require('opossum');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
+const fs = require('fs');
+const fsp = fs.promises;
+const os = require('os');
+const path = require('path');
+const { spawn } = require('child_process');
 const logger = require('../../config/logger');
 const { asyncHandler } = require('../middleware/errorHandler');
 
@@ -20,6 +26,10 @@ class M3uController {
     this._jwtSecret = jwtSecret;
     this._userProviderOrigins = new Map();
     this._userAllowedOrigins = new Map();
+    this._vodSessions = new Map();
+    this._vodSessionTtlMs = parseInt(process.env.VOD_SESSION_TTL_MS, 10) || 60 * 60 * 1000;
+    this._ffmpegPath = process.env.FFMPEG_PATH || 'ffmpeg';
+    this._ffprobePath = process.env.FFPROBE_PATH || 'ffprobe';
 
     this._circuitBreaker = new CircuitBreaker(this._fetchM3u.bind(this), {
       timeout: parseInt(process.env.PROXY_TIMEOUT_MS, 10) || 30000,
@@ -78,6 +88,38 @@ class M3uController {
       .filter(Boolean)
       .map((value) => this._parseProxyUrl(value))
       .filter(Boolean);
+  }
+
+  _getProviderProxyUrls() {
+    const proxyList = process.env.PROVIDER_HTTP_PROXIES || process.env.PROVIDER_HTTP_PROXY || '';
+    if (!proxyList.trim()) {
+      return [];
+    }
+
+    return proxyList
+      .split(',')
+      .map((value) => value.trim())
+      .filter(Boolean);
+  }
+
+  _getPreferredProviderProxyUrl() {
+    return this._getProviderProxyUrls()[0] || null;
+  }
+
+  _getVodBaseDir() {
+    return path.join(os.tmpdir(), 'flixify-v4-vod');
+  }
+
+  _getVodSessionId(code, targetUrl) {
+    return crypto
+      .createHash('sha1')
+      .update(`${code}:${targetUrl}`)
+      .digest('hex')
+      .slice(0, 24);
+  }
+
+  _getVodSessionDir(sessionId) {
+    return path.join(this._getVodBaseDir(), sessionId);
   }
 
   _createAxiosConfig(overrides = {}, proxy = null) {
@@ -241,6 +283,118 @@ class M3uController {
     };
   }
 
+  _canDirectPlayProbe(probe) {
+    if (!probe) {
+      return false;
+    }
+
+    const supportedContainers = new Set(['hls', 'mp4', 'webm']);
+    return supportedContainers.has(probe.containerType) && !probe.codecRisk;
+  }
+
+  _buildPlaybackProbePayload(targetUrl, probe) {
+    const containerType = probe?.containerType || this._getContainerType(targetUrl);
+    const shouldRemux = ['mkv', 'ts', 'unknown'].includes(containerType) || probe?.codecRisk;
+
+    return {
+      ...(probe || {}),
+      playbackStrategy: shouldRemux ? 'remux-hls' : (containerType === 'hls' ? 'hls' : 'native'),
+      remuxRecommended: shouldRemux,
+      directPlayLikely: this._canDirectPlayProbe(probe)
+    };
+  }
+
+  async _isCommandAvailable(command) {
+    return new Promise((resolve) => {
+      const checker = process.platform === 'win32' ? 'where' : 'which';
+      const child = spawn(checker, [command], {
+        stdio: 'ignore'
+      });
+
+      child.on('error', () => resolve(false));
+      child.on('close', (code) => resolve(code === 0));
+    });
+  }
+
+  async _runProcess(command, args, options = {}) {
+    return new Promise((resolve, reject) => {
+      const child = spawn(command, args, {
+        ...options,
+        stdio: ['ignore', 'pipe', 'pipe']
+      });
+
+      let stdout = '';
+      let stderr = '';
+
+      child.stdout.on('data', (chunk) => {
+        stdout += chunk.toString();
+      });
+
+      child.stderr.on('data', (chunk) => {
+        stderr += chunk.toString();
+      });
+
+      child.on('error', reject);
+      child.on('close', (code) => {
+        if (code === 0) {
+          resolve({ stdout, stderr });
+          return;
+        }
+
+        const error = new Error(stderr.trim() || `${command} exited with code ${code}`);
+        error.code = code;
+        reject(error);
+      });
+    });
+  }
+
+  async _probeSourceWithFfprobe(targetUrl) {
+    const isAvailable = await this._isCommandAvailable(this._ffprobePath);
+    if (!isAvailable) {
+      return null;
+    }
+
+    const args = ['-v', 'quiet', '-print_format', 'json', '-show_streams'];
+    const proxyUrl = this._getPreferredProviderProxyUrl();
+    if (proxyUrl) {
+      args.push('-http_proxy', proxyUrl);
+    }
+    args.push(targetUrl);
+
+    try {
+      const result = await this._runProcess(this._ffprobePath, args, {
+        env: process.env
+      });
+
+      const payload = JSON.parse(result.stdout || '{}');
+      const videoStream = payload.streams?.find((stream) => stream.codec_type === 'video') || null;
+      const audioStream = payload.streams?.find((stream) => stream.codec_type === 'audio') || null;
+
+      return {
+        videoCodec: videoStream?.codec_name || null,
+        audioCodec: audioStream?.codec_name || null
+      };
+    } catch (error) {
+      logger.warn('ffprobe analysis failed, continuing with conservative defaults', {
+        targetUrl,
+        error: error.message
+      });
+      return null;
+    }
+  }
+
+  _getVodTranscodeProfile(mediaAnalysis) {
+    const videoCodec = mediaAnalysis?.videoCodec || null;
+    const audioCodec = mediaAnalysis?.audioCodec || null;
+
+    return {
+      videoCodec,
+      audioCodec,
+      transcodeVideo: videoCodec !== 'h264',
+      transcodeAudio: audioCodec !== 'aac'
+    };
+  }
+
   _validateStreamResponse(response) {
     if (!response) {
       throw new Error('Provider returned an empty stream response');
@@ -351,8 +505,217 @@ class M3uController {
     return `${baseApiUrl}/stream/${encodeURIComponent(code)}?token=${encodeURIComponent(token)}&url=${encodeURIComponent(targetUrl)}`;
   }
 
+  _buildVodManifestUrl(baseApiUrl, code, token, targetUrl) {
+    return `${baseApiUrl}/vod/${encodeURIComponent(code)}/manifest.m3u8?token=${encodeURIComponent(token)}&url=${encodeURIComponent(targetUrl)}`;
+  }
+
   _buildLogoProxyUrl(baseApiUrl, code, token, targetUrl) {
     return `${baseApiUrl}/m3u/logo/${encodeURIComponent(code)}?token=${encodeURIComponent(token)}&url=${encodeURIComponent(targetUrl)}`;
+  }
+
+  async _cleanupVodSession(sessionId) {
+    const session = this._vodSessions.get(sessionId);
+    if (session?.process && !session.process.killed) {
+      session.process.kill('SIGTERM');
+    }
+
+    this._vodSessions.delete(sessionId);
+
+    try {
+      await fsp.rm(this._getVodSessionDir(sessionId), {
+        recursive: true,
+        force: true
+      });
+    } catch (error) {
+      logger.warn('Failed to remove VOD session directory', {
+        sessionId,
+        error: error.message
+      });
+    }
+  }
+
+  async _cleanupExpiredVodSessions() {
+    const now = Date.now();
+    const expiredSessionIds = Array.from(this._vodSessions.values())
+      .filter((session) => now - session.lastAccessAt > this._vodSessionTtlMs)
+      .map((session) => session.id);
+
+    for (const sessionId of expiredSessionIds) {
+      await this._cleanupVodSession(sessionId);
+    }
+  }
+
+  async _waitForFile(filePath, validator = null, timeoutMs = 15000) {
+    const startedAt = Date.now();
+
+    while (Date.now() - startedAt < timeoutMs) {
+      try {
+        if (!validator) {
+          await fsp.access(filePath);
+          return true;
+        }
+
+        const content = await fsp.readFile(filePath, 'utf8');
+        if (validator(content)) {
+          return content;
+        }
+      } catch {
+        // File not ready yet.
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+
+    return false;
+  }
+
+  _rewriteVodManifest(content, context) {
+    return content
+      .split(/\r?\n/)
+      .map((line) => {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) {
+          return line;
+        }
+
+        return `${context.baseApiUrl}/vod/${encodeURIComponent(context.code)}/${encodeURIComponent(context.sessionId)}/${encodeURIComponent(trimmed)}?token=${encodeURIComponent(context.token)}`;
+      })
+      .join('\n');
+  }
+
+  _getVodAssetContentType(fileName) {
+    if (fileName.endsWith('.m3u8')) {
+      return 'application/vnd.apple.mpegurl';
+    }
+
+    if (fileName.endsWith('.m4s')) {
+      return 'video/iso.segment';
+    }
+
+    if (fileName.endsWith('.mp4')) {
+      return 'video/mp4';
+    }
+
+    return 'application/octet-stream';
+  }
+
+  async _createVodSession(code, targetUrl) {
+    const sessionId = this._getVodSessionId(code, targetUrl);
+    const sessionDir = this._getVodSessionDir(sessionId);
+    const manifestPath = path.join(sessionDir, 'index.m3u8');
+
+    await this._cleanupExpiredVodSessions();
+
+    const existingSession = this._vodSessions.get(sessionId);
+    if (existingSession) {
+      existingSession.lastAccessAt = Date.now();
+      return existingSession;
+    }
+
+    const ffmpegAvailable = await this._isCommandAvailable(this._ffmpegPath);
+    if (!ffmpegAvailable) {
+      const error = new Error('FFmpeg is not installed on the server');
+      error.statusCode = 503;
+      throw error;
+    }
+
+    await fsp.rm(sessionDir, { recursive: true, force: true });
+    await fsp.mkdir(sessionDir, { recursive: true });
+
+    const mediaAnalysis = await this._probeSourceWithFfprobe(targetUrl);
+    const profile = this._getVodTranscodeProfile(mediaAnalysis);
+    const proxyUrl = this._getPreferredProviderProxyUrl();
+
+    const args = ['-hide_banner', '-loglevel', 'error'];
+    if (proxyUrl) {
+      args.push('-http_proxy', proxyUrl);
+    }
+
+    args.push(
+      '-reconnect', '1',
+      '-reconnect_streamed', '1',
+      '-reconnect_delay_max', '2',
+      '-i', targetUrl,
+      '-map', '0:v:0?',
+      '-map', '0:a:0?',
+      '-sn',
+      '-dn',
+      '-map_metadata', '-1'
+    );
+
+    if (profile.transcodeVideo) {
+      args.push(
+        '-c:v', 'libx264',
+        '-preset', 'veryfast',
+        '-crf', '22',
+        '-pix_fmt', 'yuv420p'
+      );
+    } else {
+      args.push('-c:v', 'copy');
+    }
+
+    if (profile.transcodeAudio) {
+      args.push(
+        '-c:a', 'aac',
+        '-b:a', '128k',
+        '-ac', '2'
+      );
+    } else {
+      args.push('-c:a', 'copy');
+    }
+
+    args.push(
+      '-max_muxing_queue_size', '1024',
+      '-f', 'hls',
+      '-hls_time', '4',
+      '-hls_list_size', '0',
+      '-hls_playlist_type', 'event',
+      '-hls_segment_type', 'fmp4',
+      '-hls_fmp4_init_filename', 'init.mp4',
+      '-hls_flags', 'independent_segments+append_list+temp_file',
+      '-hls_segment_filename', path.join(sessionDir, 'segment_%05d.m4s'),
+      manifestPath
+    );
+
+    const ffmpegProcess = spawn(this._ffmpegPath, args, {
+      cwd: sessionDir,
+      env: process.env,
+      stdio: ['ignore', 'ignore', 'pipe']
+    });
+
+    const session = {
+      id: sessionId,
+      code,
+      targetUrl,
+      dir: sessionDir,
+      manifestPath,
+      process: ffmpegProcess,
+      lastAccessAt: Date.now(),
+      lastError: null
+    };
+
+    ffmpegProcess.stderr.on('data', (chunk) => {
+      const message = chunk.toString().trim();
+      if (message) {
+        session.lastError = message;
+      }
+    });
+
+    ffmpegProcess.on('close', (code) => {
+      session.process = null;
+      if (code !== 0) {
+        session.lastError = session.lastError || `ffmpeg exited with code ${code}`;
+        logger.error('VOD remux session ended unexpectedly', {
+          sessionId,
+          code,
+          targetUrl,
+          error: session.lastError
+        });
+      }
+    });
+
+    this._vodSessions.set(sessionId, session);
+    return session;
   }
 
   _isHttpUrl(value) {
@@ -725,7 +1088,10 @@ class M3uController {
         throw error;
       }
 
-      const probe = this._buildProbePayload(targetUrl, upstream);
+      const probe = this._buildPlaybackProbePayload(
+        targetUrl,
+        this._buildProbePayload(targetUrl, upstream)
+      );
       this._destroyResponseStream(upstream);
 
       res.json({
@@ -742,6 +1108,109 @@ class M3uController {
 
       res.status(statusCode).json({
         error: 'Stream probe failed',
+        message: error.message
+      });
+    }
+  });
+
+  proxyVodManifest = asyncHandler(async (req, res) => {
+    const { code } = req.params;
+    const targetUrl = req.query.url;
+
+    try {
+      const accessToken = this._resolveAccessToken(req);
+      this._verifyAccessToken(accessToken, code);
+      await this._assertAllowedProxyTarget(code, targetUrl);
+
+      const session = await this._createVodSession(code, targetUrl);
+      const manifestContent = await this._waitForFile(
+        session.manifestPath,
+        (content) => content.includes('#EXTM3U') && (content.includes('.m4s') || content.includes('init.mp4')),
+        25000
+      );
+
+      if (!manifestContent) {
+        const error = new Error(session.lastError || 'VOD remux playlist is not ready yet');
+        error.statusCode = 504;
+        throw error;
+      }
+
+      session.lastAccessAt = Date.now();
+
+      res.set({
+        'Content-Type': 'application/vnd.apple.mpegurl',
+        'Cache-Control': 'private, no-store'
+      });
+
+      res.send(this._rewriteVodManifest(manifestContent, {
+        baseApiUrl: this._getBaseApiUrl(req),
+        code,
+        sessionId: session.id,
+        token: accessToken
+      }));
+    } catch (error) {
+      const statusCode = error.statusCode || 502;
+      logger.error('VOD manifest proxy error', {
+        code,
+        targetUrl,
+        error: error.message,
+        statusCode
+      });
+
+      res.status(statusCode).json({
+        error: 'VOD manifest fetch failed',
+        message: error.message
+      });
+    }
+  });
+
+  proxyVodAsset = asyncHandler(async (req, res) => {
+    const { code, sessionId, assetName } = req.params;
+
+    try {
+      const accessToken = this._resolveAccessToken(req);
+      this._verifyAccessToken(accessToken, code);
+
+      const session = this._vodSessions.get(sessionId);
+      if (!session || session.code !== code) {
+        return res.status(404).json({
+          error: 'VOD session not found',
+          message: 'Requested playback session does not exist'
+        });
+      }
+
+      session.lastAccessAt = Date.now();
+
+      const sanitizedName = path.basename(assetName);
+      const assetPath = path.join(session.dir, sanitizedName);
+      const fileExists = await fsp.access(assetPath).then(() => true).catch(() => false);
+
+      if (!fileExists) {
+        const maybeReady = await this._waitForFile(assetPath, null, 10000);
+        if (!maybeReady) {
+          return res.status(404).json({
+            error: 'VOD asset not ready',
+            message: 'Playback asset is still being generated'
+          });
+        }
+      }
+
+      res.set({
+        'Content-Type': this._getVodAssetContentType(sanitizedName),
+        'Cache-Control': 'private, no-store'
+      });
+
+      fs.createReadStream(assetPath).pipe(res);
+    } catch (error) {
+      logger.error('VOD asset proxy error', {
+        code,
+        sessionId,
+        assetName,
+        error: error.message
+      });
+
+      res.status(error.statusCode || 502).json({
+        error: 'VOD asset fetch failed',
         message: error.message
       });
     }

@@ -403,6 +403,18 @@ function createRoutes({
     m3uController.probeStream
   );
 
+  router.get(
+    '/vod/:code/manifest.m3u8',
+    rateLimiters.media,
+    m3uController.proxyVodManifest
+  );
+
+  router.get(
+    '/vod/:code/:sessionId/:assetName',
+    rateLimiters.media,
+    m3uController.proxyVodAsset
+  );
+
   // GET /api/v1/m3u/logo/:code - Proxy channel logos through same-origin HTTPS
   router.get(
     '/m3u/logo/:code',

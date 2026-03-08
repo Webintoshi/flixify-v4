@@ -55,6 +55,25 @@ function getFallbackStrategy(streamUrl) {
   return inferContainerFromUrl(streamUrl) === 'hls' ? 'hls' : 'native'
 }
 
+function buildRemuxManifestUrl(streamUrl) {
+  if (!streamUrl) {
+    return null
+  }
+
+  try {
+    const parsed = new URL(streamUrl, window.location.origin)
+    const match = parsed.pathname.match(/\/api\/v1\/stream\/([^/]+)/)
+    if (!match) {
+      return null
+    }
+
+    parsed.pathname = `/api/v1/vod/${match[1]}/manifest.m3u8`
+    return parsed.toString()
+  } catch {
+    return null
+  }
+}
+
 export default function VodPlayer({
   mode,
   videoUrl,
@@ -81,37 +100,37 @@ export default function VodPlayer({
 
   const { loading: probeLoading, data: probe } = useVodSourceProbe(videoUrl, Boolean(videoUrl))
 
+  const resolvedVideoUrl = useMemo(() => {
+    if (probe?.remuxRecommended) {
+      return buildRemuxManifestUrl(videoUrl) || videoUrl
+    }
+
+    return videoUrl
+  }, [probe?.remuxRecommended, videoUrl])
+
   const playbackStrategy = useMemo(() => {
+    if (probe?.playbackStrategy === 'remux-hls') {
+      return 'hls'
+    }
+
     if (probe?.containerType === 'hls') {
       return 'hls'
     }
 
-    return getFallbackStrategy(videoUrl)
-  }, [probe?.containerType, videoUrl])
+    return getFallbackStrategy(resolvedVideoUrl)
+  }, [probe?.containerType, probe?.playbackStrategy, resolvedVideoUrl])
 
   const canSeek = useMemo(() => {
+    if (probe?.remuxRecommended) {
+      return true
+    }
+
     if (!probe) {
-      return playbackStrategy !== 'native' || inferContainerFromUrl(videoUrl) !== 'ts'
+      return playbackStrategy !== 'native' || inferContainerFromUrl(resolvedVideoUrl) !== 'ts'
     }
 
     return Boolean(probe.seekableGuess)
-  }, [probe, playbackStrategy, videoUrl])
-
-  const helperMessage = useMemo(() => {
-    if (!probe) {
-      return null
-    }
-
-    if (!probe.seekableGuess) {
-      return 'Bu kaynakta ileri/geri sarma desteklenmiyor.'
-    }
-
-    if (probe.codecRisk) {
-      return 'Bu kaynak tarayicida sinirli uyumlulukla calisabilir.'
-    }
-
-    return null
-  }, [probe])
+  }, [probe, playbackStrategy, resolvedVideoUrl])
 
   const clearControlsTimeout = useCallback(() => {
     if (controlsTimeoutRef.current) {
@@ -336,7 +355,7 @@ export default function VodPlayer({
   }, [clearControlsTimeout, clearStartupTimeout])
 
   useEffect(() => {
-    if (!videoUrl || probeLoading || !videoRef.current) {
+    if (!resolvedVideoUrl || probeLoading || !videoRef.current) {
       return undefined
     }
 
@@ -412,10 +431,8 @@ export default function VodPlayer({
     video.addEventListener('playing', handleReady)
     video.addEventListener('error', handleError)
 
-    video.volume = volume
-    video.muted = isMuted
     video.playsInline = true
-    video.preload = 'metadata'
+    video.preload = playbackStrategy === 'native' ? 'auto' : 'metadata'
     video.crossOrigin = 'anonymous'
 
     startupTimeoutRef.current = setTimeout(() => {
@@ -424,7 +441,7 @@ export default function VodPlayer({
       }
       setLoading(false)
       setError('Video belirtilen surede baslatilamadi. Kaynak gecici olarak yanit vermiyor olabilir.')
-    }, 12000)
+    }, probe?.remuxRecommended ? 25000 : 12000)
 
     if (playbackStrategy === 'hls') {
       if (Hls.isSupported()) {
@@ -433,7 +450,7 @@ export default function VodPlayer({
           lowLatencyMode: false
         })
         hlsRef.current = hls
-        hls.loadSource(videoUrl)
+        hls.loadSource(resolvedVideoUrl)
         hls.attachMedia(video)
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
           clearStartupTimeout()
@@ -448,7 +465,7 @@ export default function VodPlayer({
           }
         })
       } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-        video.src = videoUrl
+        video.src = resolvedVideoUrl
         video.load()
         video.play().catch(() => {})
       } else {
@@ -457,7 +474,7 @@ export default function VodPlayer({
         setError('Bu HLS kaynagi mevcut tarayicida desteklenmiyor.')
       }
     } else {
-      video.src = videoUrl
+      video.src = resolvedVideoUrl
       video.load()
       video.play().catch(() => {})
     }
@@ -483,13 +500,23 @@ export default function VodPlayer({
   }, [
     clearStartupTimeout,
     destroyPlaybackEngine,
-    isMuted,
     playbackStrategy,
+    probe?.remuxRecommended,
     probeLoading,
+    resolvedVideoUrl,
     syncTimeline,
-    videoUrl,
-    volume
+    videoUrl
   ])
+
+  useEffect(() => {
+    const video = videoRef.current
+    if (!video) {
+      return
+    }
+
+    video.volume = volume
+    video.muted = isMuted
+  }, [isMuted, volume])
 
   const titlePrefix = mode === 'series' ? 'Dizi' : 'Film'
 
@@ -517,14 +544,6 @@ export default function VodPlayer({
             <div className="text-center text-white p-8 max-w-md">
               <AlertCircle className="w-16 h-16 mx-auto mb-4" style={{ color: PRIMARY }} />
               <p className="mb-4">{error}</p>
-              {helperMessage && (
-                <div
-                  className="mb-4 p-4 rounded-xl text-sm"
-                  style={{ backgroundColor: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.14)' }}
-                >
-                  {helperMessage}
-                </div>
-              )}
               <div className="flex items-center justify-center gap-3">
                 <button
                   onClick={onBack}
@@ -567,17 +586,6 @@ export default function VodPlayer({
                 </div>
               </div>
 
-              {helperMessage && (
-                <div
-                  className="max-w-md rounded-2xl px-4 py-3 text-sm text-white/85"
-                  style={{ backgroundColor: 'rgba(255,255,255,0.08)', border: '1px solid rgba(255,255,255,0.12)' }}
-                >
-                  <div className="flex items-start gap-3">
-                    <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" style={{ color: PRIMARY }} />
-                    <span>{helperMessage}</span>
-                  </div>
-                </div>
-              )}
             </div>
 
             {!isPlaying && !loading && (
