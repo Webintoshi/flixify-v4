@@ -6,8 +6,9 @@ import {
   Tv, X, Loader2, Radio, Sparkles, RefreshCw, AlertCircle, Volume2, VolumeX, Maximize
 } from 'lucide-react'
 import mpegts from 'mpegts.js'
+import Hls from 'hls.js'
 import { fetchParsedPlaylist, hasValidSubscription } from '../services/playlist'
-import { parseLiveChannels } from '../utils/playlistParser'
+import { inferStreamContainer, parseLiveChannels } from '../utils/playlistParser'
 import VodPlayer from '../components/player/VodPlayer'
 
 const PRIMARY = '#E50914'
@@ -126,6 +127,7 @@ function PlayerPage() {
   const [searchParams] = useSearchParams()
   const videoRef = useRef(null)
   const playerRef = useRef(null)
+  const hlsPlayerRef = useRef(null)
   const observerRef = useRef(null)
   const liveStartupTimeoutRef = useRef(null)
   
@@ -393,6 +395,21 @@ function PlayerPage() {
     }
   }, [])
 
+  const destroyLivePlayers = useCallback(() => {
+    if (hlsPlayerRef.current) {
+      hlsPlayerRef.current.destroy()
+      hlsPlayerRef.current = null
+    }
+
+    if (playerRef.current) {
+      playerRef.current.pause()
+      playerRef.current.unload()
+      playerRef.current.detachMediaElement()
+      playerRef.current.destroy()
+      playerRef.current = null
+    }
+  }, [])
+
   useEffect(() => {
     const handleFullscreenChange = () => {
       setIsFullscreen(!!document.fullscreenElement)
@@ -450,6 +467,7 @@ function PlayerPage() {
 
     const video = videoRef.current
     const streamUrl = currentChannel.url
+    const streamType = currentChannel.sourceType || inferStreamContainer(currentChannel.originalUrl || currentChannel.url)
     const clearStartupTimeout = () => {
       if (liveStartupTimeoutRef.current) {
         clearTimeout(liveStartupTimeoutRef.current)
@@ -465,16 +483,65 @@ function PlayerPage() {
     setIsMuted(false)
     setError(null)
     setLoading(true)
+    destroyLivePlayers()
+    video.pause()
+    video.removeAttribute('src')
+    video.load()
 
-    if (mpegts.getFeatureList().mseLivePlayback) {
-      if (playerRef.current) {
-        playerRef.current.pause()
-        playerRef.current.unload()
-        playerRef.current.detachMediaElement()
-        playerRef.current.destroy()
-        playerRef.current = null
+    if (streamType === 'hls') {
+      liveStartupTimeoutRef.current = setTimeout(() => {
+        if (video.readyState >= 2) {
+          return
+        }
+
+        destroyLivePlayers()
+        setError('HLS kanal yuklenemedi')
+        setLoading(false)
+      }, 10000)
+
+      video.addEventListener('loadeddata', finishLoading)
+      video.addEventListener('playing', finishLoading)
+      video.addEventListener('canplay', finishLoading)
+
+      if (Hls.isSupported()) {
+        const hls = new Hls({
+          enableWorker: true,
+          lowLatencyMode: true
+        })
+        hlsPlayerRef.current = hls
+        hls.loadSource(streamUrl)
+        hls.attachMedia(video)
+        hls.on(Hls.Events.MANIFEST_PARSED, () => {
+          finishLoading()
+          video.play().catch(() => {})
+        })
+        hls.on(Hls.Events.ERROR, (_, data) => {
+          console.error('[HLS Player Error]', data)
+          if (data?.fatal) {
+            destroyLivePlayers()
+            setError('HLS kanal yuklenemedi')
+            finishLoading()
+          }
+        })
+      } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+        video.src = streamUrl
+        video.load()
+        video.play().catch(() => {})
+      } else {
+        setError('Bu kanal formati mevcut tarayicida desteklenmiyor.')
+        finishLoading()
       }
 
+      return () => {
+        clearStartupTimeout()
+        video.removeEventListener('loadeddata', finishLoading)
+        video.removeEventListener('playing', finishLoading)
+        video.removeEventListener('canplay', finishLoading)
+        destroyLivePlayers()
+      }
+    }
+
+    if (mpegts.getFeatureList().mseLivePlayback) {
       try {
         // ⚠️ LOW LATENCY MODE - Gecikmeyi minimize et
         playerRef.current = mpegts.createPlayer({
@@ -517,7 +584,7 @@ function PlayerPage() {
 
           setError('Yayin baslatilamadi. Bu kanal su an gecersiz veya yanit vermiyor.')
           setLoading(false)
-        }, 8000)
+        }, 10000)
 
         video.addEventListener('loadeddata', finishLoading)
         video.addEventListener('playing', finishLoading)
@@ -554,16 +621,9 @@ function PlayerPage() {
       clearStartupTimeout()
       video.removeEventListener('loadeddata', finishLoading)
       video.removeEventListener('playing', finishLoading)
-
-      if (playerRef.current) {
-        playerRef.current.pause()
-        playerRef.current.unload()
-        playerRef.current.detachMediaElement()
-        playerRef.current.destroy()
-        playerRef.current = null
-      }
+      destroyLivePlayers()
     }
-  }, [currentChannel, videoMode, user?.code])
+  }, [currentChannel, videoMode, user?.code, destroyLivePlayers])
 
   // Loading
   if (videoMode === 'loading') {

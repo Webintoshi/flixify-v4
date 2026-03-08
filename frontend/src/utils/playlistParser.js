@@ -48,6 +48,28 @@ export function unwrapProxyTargetUrl(value) {
   }
 }
 
+export function inferStreamContainer(value = '') {
+  const lowered = String(value || '').toLowerCase()
+
+  if (!lowered) {
+    return 'unknown'
+  }
+
+  if (lowered.includes('.m3u8')) {
+    return 'hls'
+  }
+
+  if (lowered.includes('.ts')) {
+    return 'mpegts'
+  }
+
+  if (/\.(mp4|m4v|mkv|webm|mov|avi)(\?|$)/i.test(lowered)) {
+    return 'file'
+  }
+
+  return 'unknown'
+}
+
 export function normalizePlaylistGroup(rawGroup) {
   return (rawGroup || 'Diger').replace(/^[A-Z]{2}:/, '').replace('INT:', '').replace('TR | ', '').trim() || 'Diger'
 }
@@ -111,7 +133,9 @@ export function parseLiveChannels(content) {
     logo: entry.logo,
     group: normalizePlaylistGroup(entry.rawGroup),
     country: inferCountry(entry.rawGroup, entry.title, entry.tvgCountry),
-    url: entry.url
+    url: entry.url,
+    originalUrl: entry.originalUrl,
+    sourceType: inferStreamContainer(entry.originalUrl)
   }))
 }
 
