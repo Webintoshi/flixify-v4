@@ -23,6 +23,7 @@ export const useAuthStore = create(
           set({
             token,
             user,
+            hasHydrated: true,
             isLoading: false,
             error: null
           })
@@ -52,6 +53,7 @@ export const useAuthStore = create(
         set({
           token: null,
           user: null,
+          hasHydrated: true,
           error: null
         })
       },
@@ -84,7 +86,7 @@ export const useAuthStore = create(
         if (!token) return
 
         api.defaults.headers.common.Authorization = `Bearer ${token}`
-        set({ token, user })
+        set({ token, user, hasHydrated: true })
       },
 
       markHydrated: () => set({ hasHydrated: true }),

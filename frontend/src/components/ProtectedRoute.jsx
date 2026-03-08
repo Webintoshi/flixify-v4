@@ -6,8 +6,17 @@ function ProtectedRoute({ children }) {
   const location = useLocation()
   const token = useAuthStore((state) => state.token)
   const hasHydrated = useAuthStore((state) => state.hasHydrated)
+  const persistHydrated = (() => {
+    try {
+      return typeof useAuthStore.persist?.hasHydrated === 'function'
+        ? useAuthStore.persist.hasHydrated()
+        : false
+    } catch {
+      return false
+    }
+  })()
 
-  if (!hasHydrated) {
+  if (!hasHydrated && !persistHydrated) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center bg-[#0a0a0a] gap-4">
         <Logo size="large" to={null} />

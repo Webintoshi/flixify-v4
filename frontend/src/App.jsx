@@ -1,4 +1,4 @@
-import { Suspense, lazy, useEffect } from 'react'
+import { Suspense, lazy, useEffect, useState } from 'react'
 import { Navigate, Route, Routes } from 'react-router-dom'
 import { useAuthStore } from './stores/authStore'
 import Logo from './components/Logo'
@@ -56,14 +56,60 @@ function App() {
   const user = useAuthStore((state) => state.user)
   const hasHydrated = useAuthStore((state) => state.hasHydrated)
   const fetchUser = useAuthStore((state) => state.fetchUser)
+  const [hydrationReady, setHydrationReady] = useState(() => {
+    try {
+      return typeof useAuthStore.persist?.hasHydrated === 'function'
+        ? useAuthStore.persist.hasHydrated()
+        : false
+    } catch {
+      return false
+    }
+  })
 
   useEffect(() => {
-    if (hasHydrated && token && !user) {
+    const persistApi = useAuthStore.persist
+    if (!persistApi) {
+      setHydrationReady(true)
+      return undefined
+    }
+
+    const markReady = () => {
+      useAuthStore.setState({ hasHydrated: true })
+      setHydrationReady(true)
+    }
+
+    const unsubscribeHydrate = persistApi.onHydrate?.(() => {
+      setHydrationReady(false)
+    })
+
+    const unsubscribeFinish = persistApi.onFinishHydration?.(() => {
+      markReady()
+    })
+
+    if (persistApi.hasHydrated?.()) {
+      markReady()
+    } else {
+      persistApi.rehydrate?.()
+    }
+
+    const fallbackTimer = setTimeout(() => {
+      markReady()
+    }, 1500)
+
+    return () => {
+      clearTimeout(fallbackTimer)
+      unsubscribeHydrate?.()
+      unsubscribeFinish?.()
+    }
+  }, [])
+
+  useEffect(() => {
+    if ((hasHydrated || hydrationReady) && token && !user) {
       fetchUser()
     }
-  }, [hasHydrated, token, user, fetchUser])
+  }, [hasHydrated, hydrationReady, token, user, fetchUser])
 
-  if (!hasHydrated) {
+  if (!hasHydrated && !hydrationReady) {
     return <AppLoader />
   }
 
