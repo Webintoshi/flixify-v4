@@ -79,7 +79,7 @@ export default function VodPlayer({
   const [showControls, setShowControls] = useState(true)
   const [isFullscreen, setIsFullscreen] = useState(false)
 
-  const { loading: probeLoading, error: probeError, data: probe } = useVodSourceProbe(videoUrl, Boolean(videoUrl))
+  const { loading: probeLoading, data: probe } = useVodSourceProbe(videoUrl, Boolean(videoUrl))
 
   const playbackStrategy = useMemo(() => {
     if (probe?.containerType === 'hls') {
@@ -98,10 +98,6 @@ export default function VodPlayer({
   }, [probe, playbackStrategy, videoUrl])
 
   const helperMessage = useMemo(() => {
-    if (probeError) {
-      return 'Kaynak analizi sinirli. Oynatma tarayici uyumluluguna gore denenecek.'
-    }
-
     if (!probe) {
       return null
     }
@@ -115,7 +111,7 @@ export default function VodPlayer({
     }
 
     return null
-  }, [probe, probeError])
+  }, [probe])
 
   const clearControlsTimeout = useCallback(() => {
     if (controlsTimeoutRef.current) {
