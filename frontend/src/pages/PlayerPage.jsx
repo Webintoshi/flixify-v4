@@ -34,6 +34,7 @@ function useDebounce(value, delay) {
 class M3UCache {
   static CACHE_KEY = 'iptv_m3u_cache'
   static TTL_MS = 5 * 60 * 1000 // 5 dakika
+  static MAX_CACHE_BYTES = 1024 * 1024 // 1 MB
 
   static get(userCode) {
     try {
@@ -61,7 +62,14 @@ class M3UCache {
         data: channels,
         timestamp: Date.now()
       }
-      sessionStorage.setItem(`${this.CACHE_KEY}_${userCode}`, JSON.stringify(cacheData))
+      const serialized = JSON.stringify(cacheData)
+
+      // Large IPTV lists easily exceed browser storage quotas.
+      if (serialized.length > this.MAX_CACHE_BYTES) {
+        return
+      }
+
+      sessionStorage.setItem(`${this.CACHE_KEY}_${userCode}`, serialized)
     } catch (error) {
       console.warn('M3U cache write failed:', error)
     }
