@@ -66,6 +66,7 @@ export default function VodPlayer({
   const hlsRef = useRef(null)
   const controlsTimeoutRef = useRef(null)
   const startupTimeoutRef = useRef(null)
+  const playbackStartedRef = useRef(false)
 
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
@@ -344,6 +345,7 @@ export default function VodPlayer({
     }
 
     const video = videoRef.current
+    playbackStartedRef.current = false
     setLoading(true)
     setError(null)
     setIsPlaying(false)
@@ -352,17 +354,29 @@ export default function VodPlayer({
     setDuration(0)
 
     const handleLoadedMetadata = () => {
+      clearStartupTimeout()
       syncTimeline()
       setLoading(false)
     }
 
     const handleCanPlay = () => {
+      clearStartupTimeout()
       syncTimeline()
       setLoading(false)
     }
 
-    const handleTimeUpdate = () => syncTimeline()
-    const handlePlay = () => setIsPlaying(true)
+    const handleTimeUpdate = () => {
+      if (video.currentTime > 0) {
+        playbackStartedRef.current = true
+        clearStartupTimeout()
+      }
+      syncTimeline()
+    }
+    const handlePlay = () => {
+      playbackStartedRef.current = true
+      clearStartupTimeout()
+      setIsPlaying(true)
+    }
     const handlePause = () => setIsPlaying(false)
     const handleVolumeSync = () => {
       setVolume(video.volume)
@@ -372,9 +386,18 @@ export default function VodPlayer({
       setIsPlaying(false)
       setProgress(100)
     }
-    const handleWaiting = () => setLoading(true)
-    const handleReady = () => setLoading(false)
+    const handleWaiting = () => {
+      if (playbackStartedRef.current) {
+        setLoading(true)
+      }
+    }
+    const handleReady = () => {
+      playbackStartedRef.current = true
+      clearStartupTimeout()
+      setLoading(false)
+    }
     const handleError = () => {
+      clearStartupTimeout()
       setLoading(false)
       setError('Video baslatilamadi veya bu format tarayicida desteklenmiyor.')
     }
@@ -400,6 +423,9 @@ export default function VodPlayer({
     video.crossOrigin = 'anonymous'
 
     startupTimeoutRef.current = setTimeout(() => {
+      if (playbackStartedRef.current || !video.paused || video.currentTime > 0) {
+        return
+      }
       setLoading(false)
       setError('Video belirtilen surede baslatilamadi. Kaynak gecici olarak yanit vermiyor olabilir.')
     }, 12000)
@@ -420,6 +446,7 @@ export default function VodPlayer({
         })
         hls.on(Hls.Events.ERROR, (_, data) => {
           if (data?.fatal) {
+            clearStartupTimeout()
             setLoading(false)
             setError('HLS video oynatimi basarisiz oldu.')
           }
@@ -441,6 +468,7 @@ export default function VodPlayer({
 
     return () => {
       clearStartupTimeout()
+      playbackStartedRef.current = false
       video.removeEventListener('loadedmetadata', handleLoadedMetadata)
       video.removeEventListener('durationchange', syncTimeline)
       video.removeEventListener('canplay', handleCanPlay)
