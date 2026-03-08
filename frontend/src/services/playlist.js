@@ -21,7 +21,9 @@ export async function fetchUserPlaylist(user, token, options = {}) {
     throw new Error('Oturum bulunamadi')
   }
 
-  const playlistUrl = user.m3uProxyUrl || buildApiUrl(`/m3u/${user.code}.m3u`)
+  // Always use same-origin API routing from the frontend domain.
+  // This avoids stale/cross-origin proxy URLs stored in persisted auth state.
+  const playlistUrl = buildApiUrl(`/m3u/${user.code}.m3u`)
 
   const response = await fetch(playlistUrl, {
     signal,
