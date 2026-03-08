@@ -410,6 +410,12 @@ function createRoutes({
   );
 
   router.get(
+    '/vod/:code/:assetName',
+    rateLimiters.media,
+    m3uController.proxyLatestVodAsset
+  );
+
+  router.get(
     '/vod/:code/:sessionId/:assetName',
     rateLimiters.media,
     m3uController.proxyVodAsset

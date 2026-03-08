@@ -574,8 +574,21 @@ class M3uController {
       .split(/\r?\n/)
       .map((line) => {
         const trimmed = line.trim();
-        if (!trimmed || trimmed.startsWith('#')) {
+        if (!trimmed) {
           return line;
+        }
+
+        if (trimmed.startsWith('#')) {
+          const mapMatch = trimmed.match(/^#EXT-X-MAP:URI="([^"]+)"/i);
+          if (mapMatch) {
+            const assetName = path.basename(mapMatch[1]);
+            return `#EXT-X-MAP:URI="${context.baseApiUrl}/vod/${encodeURIComponent(context.code)}/${encodeURIComponent(context.sessionId)}/${encodeURIComponent(assetName)}?token=${encodeURIComponent(context.token)}"`;
+          }
+
+          return line.replace(/URI="([^"]+)"/gi, (match, rawValue) => {
+            const assetName = path.basename(rawValue);
+            return `URI="${context.baseApiUrl}/vod/${encodeURIComponent(context.code)}/${encodeURIComponent(context.sessionId)}/${encodeURIComponent(assetName)}?token=${encodeURIComponent(context.token)}"`;
+          });
         }
 
         return `${context.baseApiUrl}/vod/${encodeURIComponent(context.code)}/${encodeURIComponent(context.sessionId)}/${encodeURIComponent(trimmed)}?token=${encodeURIComponent(context.token)}`;
@@ -597,6 +610,40 @@ class M3uController {
     }
 
     return 'application/octet-stream';
+  }
+
+  _getLatestVodSessionForCode(code) {
+    const candidates = Array.from(this._vodSessions.values())
+      .filter((session) => session.code === code)
+      .sort((left, right) => right.lastAccessAt - left.lastAccessAt);
+
+    return candidates[0] || null;
+  }
+
+  async _sendVodAssetFromSession(res, session, assetName) {
+    session.lastAccessAt = Date.now();
+
+    const sanitizedName = path.basename(assetName);
+    const assetPath = path.join(session.dir, sanitizedName);
+    const fileExists = await fsp.access(assetPath).then(() => true).catch(() => false);
+
+    if (!fileExists) {
+      const maybeReady = await this._waitForFile(assetPath, null, 10000);
+      if (!maybeReady) {
+        return res.status(404).json({
+          error: 'VOD asset not ready',
+          message: 'Playback asset is still being generated'
+        });
+      }
+    }
+
+    res.set({
+      'Content-Type': this._getVodAssetContentType(sanitizedName),
+      'Cache-Control': 'private, no-store'
+    });
+
+    fs.createReadStream(assetPath).pipe(res);
+    return undefined;
   }
 
   async _createVodSession(code, targetUrl) {
@@ -1179,28 +1226,7 @@ class M3uController {
         });
       }
 
-      session.lastAccessAt = Date.now();
-
-      const sanitizedName = path.basename(assetName);
-      const assetPath = path.join(session.dir, sanitizedName);
-      const fileExists = await fsp.access(assetPath).then(() => true).catch(() => false);
-
-      if (!fileExists) {
-        const maybeReady = await this._waitForFile(assetPath, null, 10000);
-        if (!maybeReady) {
-          return res.status(404).json({
-            error: 'VOD asset not ready',
-            message: 'Playback asset is still being generated'
-          });
-        }
-      }
-
-      res.set({
-        'Content-Type': this._getVodAssetContentType(sanitizedName),
-        'Cache-Control': 'private, no-store'
-      });
-
-      fs.createReadStream(assetPath).pipe(res);
+      return this._sendVodAssetFromSession(res, session, assetName);
     } catch (error) {
       logger.error('VOD asset proxy error', {
         code,
@@ -1211,6 +1237,36 @@ class M3uController {
 
       res.status(error.statusCode || 502).json({
         error: 'VOD asset fetch failed',
+        message: error.message
+      });
+    }
+  });
+
+  proxyLatestVodAsset = asyncHandler(async (req, res) => {
+    const { code, assetName } = req.params;
+
+    try {
+      const accessToken = this._resolveAccessToken(req);
+      this._verifyAccessToken(accessToken, code);
+
+      const session = this._getLatestVodSessionForCode(code);
+      if (!session) {
+        return res.status(404).json({
+          error: 'VOD session not found',
+          message: 'No active playback session was found for this user'
+        });
+      }
+
+      return this._sendVodAssetFromSession(res, session, assetName);
+    } catch (error) {
+      logger.error('VOD latest asset proxy error', {
+        code,
+        assetName,
+        error: error.message
+      });
+
+      res.status(error.statusCode || 502).json({
+        error: 'VOD latest asset fetch failed',
         message: error.message
       });
     }
