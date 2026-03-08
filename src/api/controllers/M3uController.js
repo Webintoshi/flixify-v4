@@ -110,6 +110,137 @@ class M3uController {
     }
   }
 
+  _buildUpstreamStreamHeaders(req, fallbackAccept = '*/*') {
+    const headers = {
+      'User-Agent': req.headers['user-agent'] || 'Flixify-V4-Proxy/1.0',
+      'Accept': req.headers.accept || fallbackAccept
+    };
+
+    if (req.headers.range) {
+      headers.Range = req.headers.range;
+    }
+
+    if (req.headers['if-range']) {
+      headers['If-Range'] = req.headers['if-range'];
+    }
+
+    return headers;
+  }
+
+  _setProxyMediaHeaders(res, upstreamHeaders, req, fallbackContentType = null) {
+    res.setHeader('Cache-Control', 'private, no-store');
+    this._copyHeaderIfPresent(res, upstreamHeaders, 'Content-Type', fallbackContentType);
+    this._copyHeaderIfPresent(res, upstreamHeaders, 'Content-Length');
+    this._copyHeaderIfPresent(res, upstreamHeaders, 'Content-Range');
+    this._copyHeaderIfPresent(res, upstreamHeaders, 'Accept-Ranges', req.headers.range ? 'bytes' : null);
+    this._copyHeaderIfPresent(res, upstreamHeaders, 'Last-Modified');
+    this._copyHeaderIfPresent(res, upstreamHeaders, 'ETag');
+  }
+
+  _getContainerType(targetUrl, contentType = '') {
+    const normalizedType = String(contentType || '').toLowerCase();
+    const pathname = (() => {
+      try {
+        return new URL(targetUrl).pathname.toLowerCase();
+      } catch {
+        return String(targetUrl || '').toLowerCase();
+      }
+    })();
+
+    if (
+      normalizedType.includes('application/vnd.apple.mpegurl') ||
+      normalizedType.includes('application/x-mpegurl') ||
+      pathname.endsWith('.m3u8')
+    ) {
+      return 'hls';
+    }
+
+    if (normalizedType.includes('video/mp4') || pathname.endsWith('.mp4') || pathname.endsWith('.m4v')) {
+      return 'mp4';
+    }
+
+    if (normalizedType.includes('video/webm') || pathname.endsWith('.webm')) {
+      return 'webm';
+    }
+
+    if (
+      normalizedType.includes('video/x-matroska') ||
+      normalizedType.includes('video/matroska') ||
+      pathname.endsWith('.mkv')
+    ) {
+      return 'mkv';
+    }
+
+    if (normalizedType.includes('video/mp2t') || pathname.endsWith('.ts')) {
+      return 'ts';
+    }
+
+    return 'unknown';
+  }
+
+  _isPlaylistResponse(targetUrl, contentType = '') {
+    return this._getContainerType(targetUrl, contentType) === 'hls';
+  }
+
+  _rewriteTaggedUri(line, context) {
+    return line.replace(/URI="([^"]+)"/gi, (match, rawValue) => {
+      try {
+        const resolved = new URL(rawValue, context.baseTargetUrl).toString();
+        return `URI="${this._buildStreamProxyUrl(context.baseApiUrl, context.code, context.token, resolved)}"`;
+      } catch {
+        return match;
+      }
+    });
+  }
+
+  _rewriteHlsPlaylist(content, context) {
+    return content
+      .split(/\r?\n/)
+      .map((line) => {
+        const trimmed = line.trim();
+
+        if (!trimmed) {
+          return line;
+        }
+
+        if (trimmed.startsWith('#')) {
+          return this._rewriteTaggedUri(line, context);
+        }
+
+        try {
+          const resolved = new URL(trimmed, context.baseTargetUrl).toString();
+          return this._buildStreamProxyUrl(
+            context.baseApiUrl,
+            context.code,
+            context.token,
+            resolved
+          );
+        } catch {
+          return line;
+        }
+      })
+      .join('\n');
+  }
+
+  _buildProbePayload(targetUrl, upstream) {
+    const headers = upstream?.headers || {};
+    const contentType = headers['content-type'] || 'application/octet-stream';
+    const contentLength = headers['content-length'] ? parseInt(headers['content-length'], 10) : null;
+    const containerType = this._getContainerType(targetUrl, contentType);
+    const acceptRangesHeader = String(headers['accept-ranges'] || '').toLowerCase();
+    const acceptRanges = acceptRangesHeader.includes('bytes');
+    const seekableGuess = acceptRanges || ['mp4', 'webm', 'mkv', 'hls'].includes(containerType);
+
+    return {
+      contentType,
+      acceptRanges,
+      contentLength: Number.isFinite(contentLength) ? contentLength : null,
+      seekableGuess,
+      containerType,
+      codecRisk: containerType === 'ts' || contentType.toLowerCase().includes('video/mp2t')
+    };
+  }
+
   _validateStreamResponse(response) {
     if (!response) {
       throw new Error('Provider returned an empty stream response');
@@ -492,37 +623,53 @@ class M3uController {
       const accessToken = this._resolveAccessToken(req);
       this._verifyAccessToken(accessToken, code);
       await this._assertAllowedProxyTarget(code, targetUrl);
-
-      const upstreamRequestHeaders = {
-        'User-Agent': req.headers['user-agent'] || 'Flixify-V4-Proxy/1.0',
-        'Accept': req.headers.accept || '*/*'
-      };
-
-      if (req.headers.range) {
-        upstreamRequestHeaders.Range = req.headers.range;
-      }
-
-      if (req.headers['if-range']) {
-        upstreamRequestHeaders['If-Range'] = req.headers['if-range'];
-      }
+      const requestMethod = req.method === 'HEAD' ? 'head' : 'get';
+      const upstreamRequestHeaders = this._buildUpstreamStreamHeaders(req);
 
       const upstream = await this._requestViaProviderProxy({
-        method: 'get',
+        method: requestMethod,
         url: targetUrl,
-        responseType: 'stream',
+        responseType: requestMethod === 'get' ? 'stream' : undefined,
         headers: upstreamRequestHeaders,
         validateStatus: () => true
       }, this._validateStreamResponse.bind(this));
       this._validateStreamResponse(upstream);
 
       res.status(upstream.status);
-      res.setHeader('Cache-Control', 'private, no-store');
-      this._copyHeaderIfPresent(res, upstream.headers, 'Content-Type', 'video/MP2T');
-      this._copyHeaderIfPresent(res, upstream.headers, 'Content-Length');
-      this._copyHeaderIfPresent(res, upstream.headers, 'Content-Range');
-      this._copyHeaderIfPresent(res, upstream.headers, 'Accept-Ranges', req.headers.range ? 'bytes' : null);
-      this._copyHeaderIfPresent(res, upstream.headers, 'Last-Modified');
-      this._copyHeaderIfPresent(res, upstream.headers, 'ETag');
+      this._setProxyMediaHeaders(res, upstream.headers, req, 'video/MP2T');
+
+      if (requestMethod === 'head') {
+        return res.end();
+      }
+
+      const upstreamContentType = upstream.headers['content-type'] || '';
+      if (this._isPlaylistResponse(targetUrl, upstreamContentType)) {
+        this._destroyResponseStream(upstream);
+
+        const playlistResponse = await this._requestViaProviderProxy({
+          method: 'get',
+          url: targetUrl,
+          responseType: 'text',
+          headers: this._buildUpstreamStreamHeaders(req, 'application/vnd.apple.mpegurl,*/*'),
+          validateStatus: () => true
+        });
+        this._validateStreamResponse(playlistResponse);
+
+        res.status(playlistResponse.status);
+        this._setProxyMediaHeaders(
+          res,
+          playlistResponse.headers,
+          req,
+          'application/vnd.apple.mpegurl'
+        );
+
+        return res.send(this._rewriteHlsPlaylist(playlistResponse.data, {
+          baseApiUrl: this._getBaseApiUrl(req),
+          baseTargetUrl: targetUrl,
+          code,
+          token: accessToken
+        }));
+      }
 
       res.on('close', () => {
         this._destroyResponseStream(upstream);
@@ -538,6 +685,63 @@ class M3uController {
 
       res.status(statusCode).json({
         error: 'Stream fetch failed',
+        message: error.message
+      });
+    }
+  });
+
+  probeStream = asyncHandler(async (req, res) => {
+    const { code } = req.params;
+    const targetUrl = req.query.url;
+
+    try {
+      const accessToken = this._resolveAccessToken(req);
+      this._verifyAccessToken(accessToken, code);
+      await this._assertAllowedProxyTarget(code, targetUrl);
+
+      let upstream = await this._requestViaProviderProxy({
+        method: 'head',
+        url: targetUrl,
+        headers: this._buildUpstreamStreamHeaders(req),
+        validateStatus: () => true
+      });
+
+      if ([405, 501].includes(upstream.status)) {
+        upstream = await this._requestViaProviderProxy({
+          method: 'get',
+          url: targetUrl,
+          responseType: 'stream',
+          headers: {
+            ...this._buildUpstreamStreamHeaders(req),
+            Range: 'bytes=0-1'
+          },
+          validateStatus: () => true
+        });
+      }
+
+      if (upstream.status >= 400) {
+        const error = new Error(`Provider returned HTTP ${upstream.status}`);
+        error.statusCode = upstream.status;
+        throw error;
+      }
+
+      const probe = this._buildProbePayload(targetUrl, upstream);
+      this._destroyResponseStream(upstream);
+
+      res.json({
+        status: 'success',
+        data: probe
+      });
+    } catch (error) {
+      const statusCode = error.statusCode || error.response?.status || 502;
+      logger.error('Stream probe error', {
+        code,
+        error: error.message,
+        statusCode
+      });
+
+      res.status(statusCode).json({
+        error: 'Stream probe failed',
         message: error.message
       });
     }

@@ -2,13 +2,13 @@ import { useEffect, useRef, useState, useMemo, useCallback } from 'react'
 import { useSearchParams, useNavigate } from 'react-router-dom'
 import { useAuthStore } from '../stores/authStore'
 import { 
-  Play, Pause, Volume2, VolumeX, Maximize, Search,
-  Tv, X, ArrowLeft, SkipBack, SkipForward, AlertCircle,
-  Volume1, Volume, Loader2, Radio, Sparkles, RefreshCw
+  Search,
+  Tv, X, Loader2, Radio, Sparkles, RefreshCw, AlertCircle, Volume2, VolumeX, Maximize
 } from 'lucide-react'
 import mpegts from 'mpegts.js'
 import { fetchParsedPlaylist, hasValidSubscription } from '../services/playlist'
 import { parseLiveChannels } from '../utils/playlistParser'
+import VodPlayer from '../components/player/VodPlayer'
 
 const PRIMARY = '#E50914'
 const BG_DARK = '#0a0a0a'
@@ -125,7 +125,6 @@ function PlayerPage() {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const videoRef = useRef(null)
-  const playerShellRef = useRef(null)
   const playerRef = useRef(null)
   const observerRef = useRef(null)
   const liveStartupTimeoutRef = useRef(null)
@@ -150,15 +149,10 @@ function PlayerPage() {
   }, [type, user, navigate])
   
   const [videoMode, setVideoMode] = useState('loading')
-  const [isPlaying, setIsPlaying] = useState(false)
-  const [isMuted, setIsMuted] = useState(false)
-  const [progress, setProgress] = useState(0)
-  const [duration, setDuration] = useState(0)
-  const [currentTime, setCurrentTime] = useState(0)
   const [showControls, setShowControls] = useState(true)
   const controlsTimeoutRef = useRef(null)
   const [volume, setVolume] = useState(1)
-  const [audioError, setAudioError] = useState(null)
+  const [isMuted, setIsMuted] = useState(false)
   const [isFullscreen, setIsFullscreen] = useState(false)
   
   // Live TV states
@@ -174,8 +168,6 @@ function PlayerPage() {
   const [page, setPage] = useState(1)
   const [showFilters, setShowFilters] = useState(false)
   const ITEMS_PER_PAGE = 20
-
-  const isVodMode = videoMode === 'movie' || videoMode === 'series'
 
   // Debounce search query - 300ms gecikme
   const debouncedSearchQuery = useDebounce(searchQuery, 300)
@@ -193,16 +185,6 @@ function PlayerPage() {
     }
   }, [type, videoUrl])
 
-  useEffect(() => {
-    if (!isVodMode) return
-
-    const focusTimer = setTimeout(() => {
-      playerShellRef.current?.focus()
-    }, 0)
-
-    return () => clearTimeout(focusTimer)
-  }, [isVodMode, videoUrl])
-  
   // Fetch channels when in live mode and user is available
   useEffect(() => {
     if (videoMode === 'live') {
@@ -232,193 +214,6 @@ function PlayerPage() {
       }
     }
   }, [videoMode, user, token, user?.hasM3U, user?.code])
-
-  // Video Player (Movie/Series)
-  useEffect(() => {
-    if (videoMode === 'live' || !videoRef.current || !videoUrl) return
-
-    const video = videoRef.current
-    setError(null)
-    setAudioError(null)
-    setLoading(true)
-    setProgress(0)
-    setCurrentTime(0)
-    setDuration(0)
-    setIsPlaying(false)
-    video.crossOrigin = 'anonymous'
-    video.src = videoUrl
-    video.volume = volume
-    video.muted = isMuted
-    video.preload = 'metadata'
-    video.load()
-
-    const syncDuration = () => {
-      const seekableEnd = video.seekable?.length ? video.seekable.end(video.seekable.length - 1) : 0
-      const nextDuration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : seekableEnd
-      setDuration(nextDuration || 0)
-    }
-
-    const handleLoadedMetadata = () => {
-      syncDuration()
-      setLoading(false)
-    }
-
-    const handleCanPlay = () => {
-      syncDuration()
-      setLoading(false)
-    }
-
-    const handleTimeUpdate = () => {
-      setCurrentTime(video.currentTime)
-      const effectiveDuration = Number.isFinite(video.duration) && video.duration > 0
-        ? video.duration
-        : (video.seekable?.length ? video.seekable.end(video.seekable.length - 1) : 0)
-
-      if (effectiveDuration > 0) {
-        setProgress((video.currentTime / effectiveDuration) * 100)
-      }
-    }
-
-    const handlePlay = () => setIsPlaying(true)
-    const handlePause = () => setIsPlaying(false)
-    const handleVolumeSync = () => {
-      setVolume(video.volume)
-      setIsMuted(video.muted || video.volume === 0)
-    }
-    const handleEnded = () => {
-      setIsPlaying(false)
-      setProgress(100)
-    }
-
-    const handleError = () => {
-      const errorCode = video.error?.code
-      let errorMsg = 'Video yuklenirken hata olustu'
-      if (errorCode === 3) {
-        errorMsg = 'Video formati desteklenmiyor'
-        setAudioError('Ses codec i desteklenmiyor. Baska tarayici deneyin.')
-      } else if (errorCode === 2) {
-        errorMsg = 'Internet baglantinizi kontrol edin'
-      }
-      setError(errorMsg)
-      setLoading(false)
-    }
-
-    video.addEventListener('loadedmetadata', handleLoadedMetadata)
-    video.addEventListener('durationchange', syncDuration)
-    video.addEventListener('canplay', handleCanPlay)
-    video.addEventListener('timeupdate', handleTimeUpdate)
-    video.addEventListener('play', handlePlay)
-    video.addEventListener('pause', handlePause)
-    video.addEventListener('volumechange', handleVolumeSync)
-    video.addEventListener('ended', handleEnded)
-    video.addEventListener('error', handleError)
-
-    const attemptPlay = async () => {
-      try {
-        await video.play()
-      } catch (err) {
-        setIsPlaying(false)
-      }
-    }
-
-    const playTimeout = setTimeout(attemptPlay, 100)
-
-    return () => {
-      clearTimeout(playTimeout)
-      video.removeEventListener('loadedmetadata', handleLoadedMetadata)
-      video.removeEventListener('durationchange', syncDuration)
-      video.removeEventListener('canplay', handleCanPlay)
-      video.removeEventListener('timeupdate', handleTimeUpdate)
-      video.removeEventListener('play', handlePlay)
-      video.removeEventListener('pause', handlePause)
-      video.removeEventListener('volumechange', handleVolumeSync)
-      video.removeEventListener('ended', handleEnded)
-      video.removeEventListener('error', handleError)
-      video.pause()
-      video.removeAttribute('src')
-      video.load()
-    }
-  }, [videoMode, videoUrl, volume, isMuted])
-
-  // Controls visibility - 3 seconds auto-hide
-  const handleMouseMove = () => {
-    setShowControls(true)
-    if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current)
-    controlsTimeoutRef.current = setTimeout(() => {
-      setShowControls(false)
-    }, 3000)
-  }
-
-  const togglePlay = () => {
-    const video = videoRef.current
-    if (!video) return
-    if (isPlaying) video.pause()
-    else video.play()
-  }
-
-  const toggleMute = () => {
-    const video = videoRef.current
-    if (!video) return
-    video.muted = !isMuted
-    setIsMuted(!isMuted)
-  }
-
-  const handleVolumeChange = (e) => {
-    const video = videoRef.current
-    if (!video) return
-    const newVolume = parseFloat(e.target.value)
-    video.volume = newVolume
-    setVolume(newVolume)
-    setIsMuted(newVolume === 0)
-  }
-
-  const handleSeek = (e) => {
-    const video = videoRef.current
-    if (!video) return
-
-    const seekableEnd = video.seekable?.length ? video.seekable.end(video.seekable.length - 1) : 0
-    const effectiveDuration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : seekableEnd
-    if (!effectiveDuration) return
-
-    const nextProgress = Number(e.target.value)
-    const seekTime = (nextProgress / 100) * effectiveDuration
-    setProgress(nextProgress)
-    video.currentTime = seekTime
-  }
-
-  const skip = (seconds) => {
-    const video = videoRef.current
-    if (!video) return
-    const seekableEnd = video.seekable?.length ? video.seekable.end(video.seekable.length - 1) : 0
-    const effectiveDuration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : seekableEnd
-    const upperBound = effectiveDuration > 0 ? effectiveDuration : video.currentTime + seconds
-    video.currentTime = Math.max(0, Math.min(upperBound, video.currentTime + seconds))
-  }
-
-  const toggleFullscreen = () => {
-    const videoContainer = document.getElementById('video-player-wrapper')
-    if (!videoContainer) return
-    if (!document.fullscreenElement) {
-      videoContainer.requestFullscreen().catch(() => {})
-    } else {
-      document.exitFullscreen().catch(() => {})
-    }
-  }
-
-  useEffect(() => {
-    const handleFullscreenChange = () => {
-      setIsFullscreen(!!document.fullscreenElement)
-    }
-    document.addEventListener('fullscreenchange', handleFullscreenChange)
-    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange)
-  }, [])
-
-  const formatTime = (seconds) => {
-    if (!seconds) return '0:00'
-    const mins = Math.floor(seconds / 60)
-    const secs = Math.floor(seconds % 60)
-    return `${mins}:${secs.toString().padStart(2, '0')}`
-  }
 
   // Live TV
   // silent = true: Arka plan yenilemesi, loading UI gösterme
@@ -561,110 +356,93 @@ function PlayerPage() {
     if (node) observerRef.current.observe(node)
   }, [loading, hasMore, loadMore])
 
-  // Keyboard controls
+  const handleMouseMove = useCallback(() => {
+    setShowControls(true)
+    if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current)
+    controlsTimeoutRef.current = setTimeout(() => {
+      setShowControls(false)
+    }, 3000)
+  }, [])
+
+  const toggleMute = useCallback(() => {
+    const video = videoRef.current
+    if (!video) return
+    video.muted = !video.muted
+    setIsMuted(video.muted)
+  }, [])
+
+  const handleVolumeChange = useCallback((e) => {
+    const video = videoRef.current
+    if (!video) return
+    const newVolume = parseFloat(e.target.value)
+    video.volume = newVolume
+    if (newVolume > 0 && video.muted) {
+      video.muted = false
+    }
+    setVolume(video.volume)
+    setIsMuted(video.muted || newVolume === 0)
+  }, [])
+
+  const toggleFullscreen = useCallback(() => {
+    const videoContainer = document.getElementById('video-player-wrapper')
+    if (!videoContainer) return
+    if (!document.fullscreenElement) {
+      videoContainer.requestFullscreen().catch(() => {})
+    } else {
+      document.exitFullscreen().catch(() => {})
+    }
+  }, [])
+
   useEffect(() => {
+    const handleFullscreenChange = () => {
+      setIsFullscreen(!!document.fullscreenElement)
+    }
+    document.addEventListener('fullscreenchange', handleFullscreenChange)
+    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange)
+  }, [])
+
+  useEffect(() => {
+    if (videoMode !== 'live') {
+      return undefined
+    }
+
     const handleKeyDown = (e) => {
       const video = videoRef.current
       const activeTag = document.activeElement?.tagName
       const isTypingTarget = ['INPUT', 'TEXTAREA', 'SELECT'].includes(activeTag) || document.activeElement?.isContentEditable
-      
-      // Live TV mode - Channel switching with arrow keys
-      if (videoMode === 'live') {
-        if (isTypingTarget) return
-        if (e.code === 'ArrowRight') {
-          e.preventDefault()
-          // Next channel
-          const currentIndex = channels.findIndex(ch => ch.name === currentChannel?.name)
-          if (currentIndex < channels.length - 1) {
-            setCurrentChannel(channels[currentIndex + 1])
-            setLoading(true)
-            setError(null)
-          }
-        } else if (e.code === 'ArrowLeft') {
-          e.preventDefault()
-          // Previous channel
-          const currentIndex = channels.findIndex(ch => ch.name === currentChannel?.name)
-          if (currentIndex > 0) {
-            setCurrentChannel(channels[currentIndex - 1])
-            setLoading(true)
-            setError(null)
-          }
-        } else if (e.code === 'KeyF') {
-          e.preventDefault()
-          toggleFullscreen()
-        } else if (e.code === 'KeyM' && video) {
-          e.preventDefault()
-          video.muted = !video.muted
-          setIsMuted(video.muted)
-        } else if (e.code === 'Escape') {
-          if (document.fullscreenElement) document.exitFullscreen()
-        }
-        return
-      }
-      
-      // Movie/Series mode
-      if (!video) return
-      if (videoMode !== 'movie' && videoMode !== 'series') return
       if (isTypingTarget) return
 
-      handleMouseMove()
-
-      switch(e.code) {
-        case 'Space':
-        case 'KeyK':
-          e.preventDefault()
-          isPlaying ? video.pause() : video.play().catch(() => {})
-          break
-        case 'ArrowRight':
-        case 'KeyL':
-          e.preventDefault()
-          skip(10)
-          break
-        case 'ArrowLeft':
-        case 'KeyJ':
-          e.preventDefault()
-          skip(-10)
-          break
-        case 'ArrowUp':
-          e.preventDefault()
-          video.volume = Math.min(1, video.volume + 0.1)
-          setVolume(video.volume)
-          break
-        case 'ArrowDown':
-          e.preventDefault()
-          video.volume = Math.max(0, video.volume - 0.1)
-          setVolume(video.volume)
-          break
-        case 'KeyF':
-          e.preventDefault()
-          toggleFullscreen()
-          break
-        case 'KeyM':
-          e.preventDefault()
-          video.muted = !video.muted
-          setIsMuted(video.muted)
-          break
-        case 'Escape':
-          if (document.fullscreenElement) document.exitFullscreen()
-          break
-        case 'Home':
-          e.preventDefault()
-          video.currentTime = 0
-          break
-        case 'End':
-          if (Number.isFinite(video.duration) && video.duration > 0) {
-            e.preventDefault()
-            video.currentTime = video.duration
-          } else if (video.seekable?.length) {
-            e.preventDefault()
-            video.currentTime = video.seekable.end(video.seekable.length - 1)
-          }
-          break
+      if (e.code === 'ArrowRight') {
+        e.preventDefault()
+        const currentIndex = channels.findIndex(ch => ch.name === currentChannel?.name)
+        if (currentIndex < channels.length - 1) {
+          setCurrentChannel(channels[currentIndex + 1])
+          setLoading(true)
+          setError(null)
+        }
+      } else if (e.code === 'ArrowLeft') {
+        e.preventDefault()
+        const currentIndex = channels.findIndex(ch => ch.name === currentChannel?.name)
+        if (currentIndex > 0) {
+          setCurrentChannel(channels[currentIndex - 1])
+          setLoading(true)
+          setError(null)
+        }
+      } else if (e.code === 'KeyF') {
+        e.preventDefault()
+        toggleFullscreen()
+      } else if (e.code === 'KeyM' && video) {
+        e.preventDefault()
+        video.muted = !video.muted
+        setIsMuted(video.muted)
+      } else if (e.code === 'Escape' && document.fullscreenElement) {
+        document.exitFullscreen().catch(() => {})
       }
     }
+
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [videoMode, isPlaying, channels, currentChannel])
+  }, [videoMode, channels, currentChannel, toggleFullscreen])
 
   // Live TV Player
   useEffect(() => {
@@ -802,136 +580,12 @@ function PlayerPage() {
   // Movie/Series Player
   if (videoMode === 'movie' || videoMode === 'series') {
     return (
-      <div 
-        ref={playerShellRef}
-        className="fixed inset-0 bg-black z-50"
-        tabIndex={-1}
-        onMouseMove={handleMouseMove}
-        onDoubleClick={toggleFullscreen}
-        onClick={() => !showControls && setShowControls(true)}
-      >
-        <div id="video-player-wrapper" className="relative w-full h-full">
-          {loading && (
-            <div className="absolute inset-0 flex items-center justify-center bg-black z-20">
-              <div className="w-16 h-16 border-4 border-t-transparent rounded-full animate-spin" style={{ borderColor: PRIMARY }} />
-            </div>
-          )}
-
-          {error && (
-            <div className="absolute inset-0 flex items-center justify-center bg-black z-20">
-              <div className="text-center text-white p-8 max-w-md">
-                <AlertCircle className="w-16 h-16 mx-auto mb-4" style={{ color: PRIMARY }} />
-                <p className="mb-4">{error}</p>
-                {audioError && (
-                  <div className="mb-4 p-4 rounded-xl" style={{ backgroundColor: 'rgba(245,158,11,0.1)', border: '1px solid rgba(245,158,11,0.3)' }}>
-                    <p className="text-sm">{audioError}</p>
-                  </div>
-                )}
-                <button 
-                  onClick={() => navigate(-1)}
-                  className="px-6 py-3 rounded-xl font-bold text-white"
-                  style={{ backgroundColor: PRIMARY }}
-                >
-                  Geri Don
-                </button>
-              </div>
-            </div>
-          )}
-
-          <video ref={videoRef} className="w-full h-full object-contain" playsInline preload="metadata" />
-          
-          {showControls && !error && (
-            <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-black/40">
-              {/* Top Bar */}
-              <div className="absolute top-0 left-0 right-0 p-6 flex items-center gap-4">
-                <button 
-                  onClick={() => navigate(-1)}
-                  className="w-12 h-12 rounded-full flex items-center justify-center text-white hover:bg-white/20 transition-colors"
-                  style={{ backgroundColor: 'rgba(255,255,255,0.1)' }}
-                >
-                  <ArrowLeft className="w-6 h-6" />
-                </button>
-                <div>
-                  <h1 className="text-white text-xl font-bold">{videoTitle || 'Video'}</h1>
-                </div>
-              </div>
-
-              {/* Center Play */}
-              {!isPlaying && !loading && (
-                <div className="absolute inset-0 flex items-center justify-center">
-                  <button 
-                    onClick={togglePlay}
-                    className="w-24 h-24 rounded-full flex items-center justify-center text-white transition-transform hover:scale-110"
-                    style={{ backgroundColor: PRIMARY }}
-                  >
-                    <Play className="w-12 h-12 ml-1" fill="currentColor" />
-                  </button>
-                </div>
-              )}
-
-              {/* Bottom Controls */}
-              <div className="absolute bottom-0 left-0 right-0 p-6">
-                <input
-                  type="range"
-                  min="0"
-                  max="100"
-                  step="0.1"
-                  value={progress}
-                  onInput={handleSeek}
-                  onChange={handleSeek}
-                  className="w-full h-2 rounded-full appearance-none cursor-pointer mb-4"
-                  style={{ 
-                    background: `linear-gradient(to right, ${PRIMARY} ${progress}%, rgba(255,255,255,0.2) ${progress}%)`
-                  }}
-                />
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-4">
-                    <button onClick={togglePlay} className="text-white hover:opacity-70">
-                      {isPlaying ? <Pause className="w-8 h-8" /> : <Play className="w-8 h-8" />}
-                    </button>
-                    <button onClick={() => skip(-10)} className="text-white hover:opacity-70">
-                      <SkipBack className="w-6 h-6" />
-                    </button>
-                    <button onClick={() => skip(10)} className="text-white hover:opacity-70">
-                      <SkipForward className="w-6 h-6" />
-                    </button>
-                    
-                    <div className="flex items-center gap-2 group">
-                      <button onClick={toggleMute} className="text-white hover:opacity-70">
-                        {isMuted || volume === 0 ? <VolumeX className="w-6 h-6" /> : 
-                         volume < 0.3 ? <Volume className="w-6 h-6" /> : 
-                         volume < 0.7 ? <Volume1 className="w-6 h-6" /> : <Volume2 className="w-6 h-6" />}
-                      </button>
-                      <div className="w-0 overflow-hidden group-hover:w-24 transition-all duration-300">
-                        <input
-                          type="range"
-                          min="0"
-                          max="1"
-                          step="0.01"
-                          value={isMuted ? 0 : volume}
-                          onChange={handleVolumeChange}
-                          className="w-20 h-1 rounded-full appearance-none cursor-pointer"
-                          style={{ 
-                            background: `linear-gradient(to right, ${PRIMARY} ${(isMuted ? 0 : volume) * 100}%, rgba(255,255,255,0.2) ${(isMuted ? 0 : volume) * 100}%)` 
-                          }}
-                        />
-                      </div>
-                    </div>
-
-                    <div className="text-sm text-white/80 tabular-nums">
-                      {formatTime(currentTime)} / {formatTime(duration)}
-                    </div>
-                  </div>
-                  
-                  <button onClick={toggleFullscreen} className="text-white hover:opacity-70">
-                    <Maximize className="w-6 h-6" />
-                  </button>
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-      </div>
+      <VodPlayer
+        mode={videoMode}
+        videoUrl={videoUrl}
+        videoTitle={videoTitle}
+        onBack={() => navigate(-1)}
+      />
     )
   }
 

@@ -385,10 +385,22 @@ function createRoutes({
   );
   
   // GET /api/v1/stream/:code - Proxy TS segments (CORS bypass)
+  router.head(
+    '/stream/:code',
+    rateLimiters.media,
+    m3uController.proxyStream
+  );
+
   router.get(
     '/stream/:code',
     rateLimiters.media,
     m3uController.proxyStream
+  );
+
+  router.get(
+    '/stream/:code/probe',
+    rateLimiters.media,
+    m3uController.probeStream
   );
 
   // GET /api/v1/m3u/logo/:code - Proxy channel logos through same-origin HTTPS
