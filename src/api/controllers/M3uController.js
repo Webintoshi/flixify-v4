@@ -37,6 +37,7 @@ class M3uController {
       resetTimeout: parseInt(process.env.CIRCUIT_BREAKER_RESET_TIMEOUT, 10) || 30000,
       rollingCountTimeout: 10000,
       rollingCountBuckets: 10,
+      errorFilter: (error) => error?.statusCode >= 400 && error?.statusCode < 500,
       name: 'm3u-fetcher'
     });
 
@@ -438,6 +439,26 @@ class M3uController {
     }
   }
 
+  _validatePlaylistResponse(response) {
+    if (!response) {
+      const error = new Error('Provider returned an empty playlist response');
+      error.statusCode = 502;
+      throw error;
+    }
+
+    if (response.status >= 400) {
+      const error = new Error(`Provider returned HTTP ${response.status}`);
+      error.statusCode = response.status;
+      throw error;
+    }
+
+    if (!response.data || !String(response.data).trim()) {
+      const error = new Error('Provider returned empty playlist');
+      error.statusCode = 502;
+      throw error;
+    }
+  }
+
   async _requestViaProviderProxy(overrides = {}, responseValidator = null) {
     const proxies = this._getProxyConfigs();
     const candidates = proxies.length ? proxies : [null];
@@ -491,31 +512,33 @@ class M3uController {
     const normalizedUrl = this._normalizeProviderPlaylistUrl(url);
     const candidates = normalizedUrl === url ? [url] : [normalizedUrl, url];
     let lastStatus = null;
+    let lastError = null;
 
     for (const candidateUrl of candidates) {
-      const response = await this._requestViaProviderProxy({
-        method: 'get',
-        url: candidateUrl,
-        timeout: 60000,
-        responseType: 'text',
-        maxRedirects: 5,
-        validateStatus: () => true
-      });
+      try {
+        const response = await this._requestViaProviderProxy({
+          method: 'get',
+          url: candidateUrl,
+          timeout: 60000,
+          responseType: 'text',
+          maxRedirects: 5,
+          validateStatus: () => true
+        }, this._validatePlaylistResponse.bind(this));
 
-      lastStatus = response.status;
-
-      if (response.status >= 400) {
-        continue;
+        return response.data;
+      } catch (error) {
+        lastError = error;
+        lastStatus = error.statusCode || error.response?.status || lastStatus;
       }
-
-      if (!response.data || !response.data.trim()) {
-        continue;
-      }
-
-      return response.data;
     }
 
-    throw new Error(`Provider returned HTTP ${lastStatus || 502}`);
+    if (lastError) {
+      throw lastError;
+    }
+
+    const error = new Error(`Provider returned HTTP ${lastStatus || 502}`);
+    error.statusCode = lastStatus || 502;
+    throw error;
   }
 
   _getBaseApiUrl(req) {
