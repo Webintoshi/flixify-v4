@@ -122,6 +122,17 @@ class M3uController {
     return path.join(this._getVodBaseDir(), sessionId);
   }
 
+  _normalizeProviderPlaylistUrl(value) {
+    if (!value || typeof value !== 'string') {
+      return value;
+    }
+
+    return value
+      .trim()
+      .replace('/playlisth/', '/playlist/')
+      .replace('/playlists/', '/playlist/');
+  }
+
   _createAxiosConfig(overrides = {}, proxy = null) {
     const config = {
       timeout: 30000,
@@ -477,24 +488,34 @@ class M3uController {
   }
 
   async _fetchM3u(url) {
-    const response = await this._requestViaProviderProxy({
-      method: 'get',
-      url,
-      timeout: 60000,
-      responseType: 'text',
-      maxRedirects: 5,
-      validateStatus: () => true
-    });
+    const normalizedUrl = this._normalizeProviderPlaylistUrl(url);
+    const candidates = normalizedUrl === url ? [url] : [normalizedUrl, url];
+    let lastStatus = null;
 
-    if (response.status >= 400) {
-      throw new Error(`Provider returned HTTP ${response.status}`);
+    for (const candidateUrl of candidates) {
+      const response = await this._requestViaProviderProxy({
+        method: 'get',
+        url: candidateUrl,
+        timeout: 60000,
+        responseType: 'text',
+        maxRedirects: 5,
+        validateStatus: () => true
+      });
+
+      lastStatus = response.status;
+
+      if (response.status >= 400) {
+        continue;
+      }
+
+      if (!response.data || !response.data.trim()) {
+        continue;
+      }
+
+      return response.data;
     }
 
-    if (!response.data || !response.data.trim()) {
-      throw new Error('Provider returned empty playlist');
-    }
-
-    return response.data;
+    throw new Error(`Provider returned HTTP ${lastStatus || 502}`);
   }
 
   _getBaseApiUrl(req) {
@@ -980,6 +1001,8 @@ class M3uController {
           message: 'No M3U URL assigned'
         });
       }
+
+      m3uUrl = this._normalizeProviderPlaylistUrl(m3uUrl);
 
       this._userProviderOrigins.set(code, new URL(m3uUrl).origin);
     } catch (error) {

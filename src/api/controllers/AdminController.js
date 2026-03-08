@@ -17,6 +17,17 @@ const logger = require('../../config/logger');
 const { asyncHandler } = require('../middleware/errorHandler');
 const Code = require('../../domain/value-objects/Code');
 
+function normalizeProviderPlaylistUrl(value) {
+  if (!value || typeof value !== 'string') {
+    return value;
+  }
+
+  return value
+    .trim()
+    .replace('/playlisth/', '/playlist/')
+    .replace('/playlists/', '/playlist/');
+}
+
 class AdminController {
   constructor(userRepository, activateUser, cacheService, adminRepository) {
     this._userRepository = userRepository;
@@ -194,7 +205,7 @@ class AdminController {
 
     const activatedUser = await this._activateUser.execute({
       code,
-      m3uUrl,
+      m3uUrl: normalizeProviderPlaylistUrl(m3uUrl),
       expiresAt,
       adminNotes
     });
@@ -374,7 +385,7 @@ class AdminController {
     }
 
     // Update user M3U URL
-    await this._userRepository.updateById(user.id, { m3u_url: m3uUrl });
+    await this._userRepository.updateById(user.id, { m3u_url: normalizeProviderPlaylistUrl(m3uUrl) });
 
     // Invalidate cache
     await this._cacheService.invalidateUser(code);
