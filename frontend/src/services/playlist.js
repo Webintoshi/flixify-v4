@@ -28,10 +28,14 @@ function getFreshCacheEntry(cacheMap, key, ttlMs) {
   const entry = cacheMap.get(key)
   if (!entry) return null
   if (now() - entry.timestamp > ttlMs) {
-    cacheMap.delete(key)
     return null
   }
   return entry.value
+}
+
+function getStaleMemoryCacheEntry(cacheMap, key) {
+  const entry = cacheMap.get(key)
+  return entry?.value || null
 }
 
 function setMemoryCacheEntry(cacheMap, key, value) {
@@ -56,6 +60,20 @@ function getSessionCacheEntry(key, ttlMs) {
     }
 
     return parsed.value
+  } catch {
+    return null
+  }
+}
+
+function getStaleSessionCacheEntry(key) {
+  if (!canUseSessionStorage()) return null
+
+  try {
+    const raw = sessionStorage.getItem(key)
+    if (!raw) return null
+
+    const parsed = JSON.parse(raw)
+    return parsed?.value || null
   } catch {
     return null
   }
@@ -93,6 +111,20 @@ function getCachedRawPlaylist(userCode, ttlMs) {
   return null
 }
 
+function getAnyCachedRawPlaylist(userCode) {
+  const memoryKey = buildRawCacheKey(userCode)
+  const memoryValue = getStaleMemoryCacheEntry(rawMemoryCache, memoryKey)
+  if (memoryValue) return memoryValue
+
+  const sessionValue = getStaleSessionCacheEntry(memoryKey)
+  if (sessionValue) {
+    setMemoryCacheEntry(rawMemoryCache, memoryKey, sessionValue)
+    return sessionValue
+  }
+
+  return null
+}
+
 function cacheRawPlaylist(userCode, value) {
   const key = buildRawCacheKey(userCode)
   setMemoryCacheEntry(rawMemoryCache, key, value)
@@ -112,6 +144,24 @@ function getCachedParsedPlaylist(userCode, cacheKey, ttlMs) {
   }
 
   return null
+}
+
+function getAnyCachedParsedPlaylist(userCode, cacheKey) {
+  const key = buildParsedCacheKey(userCode, cacheKey)
+  const memoryValue = getStaleMemoryCacheEntry(parsedMemoryCache, key)
+  if (memoryValue) return memoryValue
+
+  const sessionValue = getStaleSessionCacheEntry(key)
+  if (sessionValue) {
+    setMemoryCacheEntry(parsedMemoryCache, key, sessionValue)
+    return sessionValue
+  }
+
+  return null
+}
+
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 function cacheParsedPlaylist(userCode, cacheKey, value) {
@@ -159,7 +209,8 @@ export async function fetchUserPlaylist(user, token, options = {}) {
   const {
     signal,
     forceRefresh = false,
-    ttlMs = DEFAULT_TTL_MS
+    ttlMs = DEFAULT_TTL_MS,
+    retries = 1
   } = options
 
   if (!user?.code) {
@@ -174,6 +225,7 @@ export async function fetchUserPlaylist(user, token, options = {}) {
   // This avoids stale/cross-origin proxy URLs stored in persisted auth state.
   const playlistUrl = buildApiUrl(`/m3u/${user.code}.m3u`)
   const cached = !forceRefresh ? getCachedRawPlaylist(user.code, ttlMs) : null
+  const staleCached = getAnyCachedRawPlaylist(user.code)
 
   if (cached) {
     return cached
@@ -185,35 +237,68 @@ export async function fetchUserPlaylist(user, token, options = {}) {
   }
 
   const requestPromise = (async () => {
-    const response = await fetch(playlistUrl, {
-      signal,
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'User-Agent': 'VLC/3.0.18 LibVLC/3.0.18'
-      }
-    })
+    let lastError = null
 
-    if (!response.ok) {
-      if (response.status === 401) {
-        throw new Error('Oturum suresi dolmus. Lutfen tekrar giris yapin.')
-      }
-      if (response.status === 403) {
-        throw new Error('Aktif paket veya M3U atamasi gerekiyor.')
-      }
-      if (response.status === 404) {
-        throw new Error('Playlist bulunamadi.')
-      }
+    for (let attempt = 0; attempt <= retries; attempt += 1) {
+      try {
+        const response = await fetch(playlistUrl, {
+          signal,
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'User-Agent': 'VLC/3.0.18 LibVLC/3.0.18'
+          }
+        })
 
-      throw new Error(`Playlist yuklenemedi (HTTP ${response.status})`)
+        if (!response.ok) {
+          if (response.status === 401) {
+            throw new Error('Oturum suresi dolmus. Lutfen tekrar giris yapin.')
+          }
+          if (response.status === 403) {
+            throw new Error('Aktif paket veya M3U atamasi gerekiyor.')
+          }
+          if (response.status === 404) {
+            throw new Error('Playlist bulunamadi.')
+          }
+
+          const transientError = new Error(`Playlist yuklenemedi (HTTP ${response.status})`)
+          transientError.status = response.status
+          throw transientError
+        }
+
+        const text = await response.text()
+
+        if (!text || !text.trim()) {
+          throw new Error('Playlist bos dondu')
+        }
+
+        return cacheRawPlaylist(user.code, text)
+      } catch (error) {
+        lastError = error
+
+        const isAbort = signal?.aborted
+        const isTransient =
+          error?.status >= 500 ||
+          /Failed to fetch/i.test(error?.message || '') ||
+          /bos dondu/i.test(error?.message || '')
+
+        if (isAbort) {
+          throw error
+        }
+
+        if (attempt < retries && isTransient) {
+          await delay(600)
+          continue
+        }
+
+        if (staleCached && isTransient) {
+          return staleCached
+        }
+
+        throw error
+      }
     }
 
-    const text = await response.text()
-
-    if (!text || !text.trim()) {
-      throw new Error('Playlist bos dondu')
-    }
-
-    return cacheRawPlaylist(user.code, text)
+    throw lastError || new Error('Playlist yuklenemedi')
   })()
 
   inflightPlaylistRequests.set(inflightKey, requestPromise)
@@ -247,16 +332,25 @@ export async function fetchParsedPlaylist(user, token, options = {}) {
   }
 
   const cached = !forceRefresh ? getCachedParsedPlaylist(user.code, cacheKey, ttlMs) : null
+  const staleCached = getAnyCachedParsedPlaylist(user.code, cacheKey)
   if (cached) {
     return cached
   }
 
-  const text = await fetchUserPlaylist(user, token, {
-    forceRefresh,
-    ttlMs,
-    signal
-  })
+  try {
+    const text = await fetchUserPlaylist(user, token, {
+      forceRefresh,
+      ttlMs,
+      signal
+    })
 
-  const parsed = parser(text)
-  return cacheParsedPlaylist(user.code, cacheKey, parsed)
+    const parsed = parser(text)
+    return cacheParsedPlaylist(user.code, cacheKey, parsed)
+  } catch (error) {
+    if (staleCached) {
+      return staleCached
+    }
+
+    throw error
+  }
 }
