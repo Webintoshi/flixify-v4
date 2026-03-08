@@ -5,7 +5,7 @@ import {
   Play, Plus, Info, Search, ChevronDown, X, Star, 
   TrendingUp, Clock, Calendar, ChevronLeft, ChevronRight
 } from 'lucide-react';
-import { fetchUserPlaylist, hasValidSubscription } from '../services/playlist';
+import { fetchParsedPlaylist, hasValidSubscription } from '../services/playlist';
 import { groupSeriesEpisodes, parseSeriesFromPlaylist } from '../utils/playlistParser';
 
 const PRIMARY = '#E50914';
@@ -558,14 +558,10 @@ function SeriesPage() {
         return;
       }
       
-      const text = await fetchUserPlaylist(user, token);
-
-      if (!text || text.trim().length === 0) {
-        throw new Error('M3U playlist bos veya gecersiz icerik');
-      }
-
-      const parsedEpisodes = parseSeriesFromM3U(text);
-      const groupedSeries = groupBySeries(parsedEpisodes);
+      const groupedSeries = await fetchParsedPlaylist(user, token, {
+        cacheKey: 'series:v1',
+        parser: (playlistText) => groupBySeries(parseSeriesFromM3U(playlistText))
+      });
 
       if (groupedSeries.length === 0) {
         throw new Error('Playlistte gosterilecek dizi kaydi bulunamadi.');

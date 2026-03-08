@@ -103,6 +103,13 @@ class M3uController {
     }
   }
 
+  _copyHeaderIfPresent(res, upstreamHeaders, headerName, fallbackValue = null) {
+    const value = upstreamHeaders?.[headerName.toLowerCase()] ?? fallbackValue;
+    if (value !== undefined && value !== null && value !== '') {
+      res.setHeader(headerName, value);
+    }
+  }
+
   _validateStreamResponse(response) {
     if (!response) {
       throw new Error('Provider returned an empty stream response');
@@ -486,23 +493,40 @@ class M3uController {
       this._verifyAccessToken(accessToken, code);
       await this._assertAllowedProxyTarget(code, targetUrl);
 
+      const upstreamRequestHeaders = {
+        'User-Agent': req.headers['user-agent'] || 'Flixify-V4-Proxy/1.0',
+        'Accept': req.headers.accept || '*/*'
+      };
+
+      if (req.headers.range) {
+        upstreamRequestHeaders.Range = req.headers.range;
+      }
+
+      if (req.headers['if-range']) {
+        upstreamRequestHeaders['If-Range'] = req.headers['if-range'];
+      }
+
       const upstream = await this._requestViaProviderProxy({
         method: 'get',
         url: targetUrl,
         responseType: 'stream',
+        headers: upstreamRequestHeaders,
         validateStatus: () => true
       }, this._validateStreamResponse.bind(this));
       this._validateStreamResponse(upstream);
 
-      res.set({
-        'Content-Type': upstream.headers['content-type'] || 'video/MP2T',
-        'Cache-Control': 'private, no-store'
+      res.status(upstream.status);
+      res.setHeader('Cache-Control', 'private, no-store');
+      this._copyHeaderIfPresent(res, upstream.headers, 'Content-Type', 'video/MP2T');
+      this._copyHeaderIfPresent(res, upstream.headers, 'Content-Length');
+      this._copyHeaderIfPresent(res, upstream.headers, 'Content-Range');
+      this._copyHeaderIfPresent(res, upstream.headers, 'Accept-Ranges', req.headers.range ? 'bytes' : null);
+      this._copyHeaderIfPresent(res, upstream.headers, 'Last-Modified');
+      this._copyHeaderIfPresent(res, upstream.headers, 'ETag');
+
+      res.on('close', () => {
+        this._destroyResponseStream(upstream);
       });
-
-      if (upstream.headers['content-length']) {
-        res.setHeader('Content-Length', upstream.headers['content-length']);
-      }
-
       upstream.data.pipe(res);
     } catch (error) {
       const statusCode = error.statusCode || error.response?.status || 502;

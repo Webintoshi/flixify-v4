@@ -7,7 +7,7 @@ import {
   Volume1, Volume, Loader2, Radio, Sparkles, RefreshCw
 } from 'lucide-react'
 import mpegts from 'mpegts.js'
-import { fetchUserPlaylist, hasValidSubscription } from '../services/playlist'
+import { fetchParsedPlaylist, hasValidSubscription } from '../services/playlist'
 import { parseLiveChannels } from '../utils/playlistParser'
 
 const PRIMARY = '#E50914'
@@ -125,6 +125,7 @@ function PlayerPage() {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
   const videoRef = useRef(null)
+  const playerShellRef = useRef(null)
   const playerRef = useRef(null)
   const observerRef = useRef(null)
   const liveStartupTimeoutRef = useRef(null)
@@ -174,6 +175,8 @@ function PlayerPage() {
   const [showFilters, setShowFilters] = useState(false)
   const ITEMS_PER_PAGE = 20
 
+  const isVodMode = videoMode === 'movie' || videoMode === 'series'
+
   // Debounce search query - 300ms gecikme
   const debouncedSearchQuery = useDebounce(searchQuery, 300)
 
@@ -189,6 +192,16 @@ function PlayerPage() {
       setVideoMode('live')
     }
   }, [type, videoUrl])
+
+  useEffect(() => {
+    if (!isVodMode) return
+
+    const focusTimer = setTimeout(() => {
+      playerShellRef.current?.focus()
+    }, 0)
+
+    return () => clearTimeout(focusTimer)
+  }, [isVodMode, videoUrl])
   
   // Fetch channels when in live mode and user is available
   useEffect(() => {
@@ -225,27 +238,58 @@ function PlayerPage() {
     if (videoMode === 'live' || !videoRef.current || !videoUrl) return
 
     const video = videoRef.current
+    setError(null)
+    setAudioError(null)
+    setLoading(true)
+    setProgress(0)
+    setCurrentTime(0)
+    setDuration(0)
+    setIsPlaying(false)
     video.crossOrigin = 'anonymous'
     video.src = videoUrl
     video.volume = volume
     video.muted = isMuted
+    video.preload = 'metadata'
     video.load()
-    
+
+    const syncDuration = () => {
+      const seekableEnd = video.seekable?.length ? video.seekable.end(video.seekable.length - 1) : 0
+      const nextDuration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : seekableEnd
+      setDuration(nextDuration || 0)
+    }
+
     const handleLoadedMetadata = () => {
-      setDuration(video.duration)
+      syncDuration()
       setLoading(false)
     }
-    
+
+    const handleCanPlay = () => {
+      syncDuration()
+      setLoading(false)
+    }
+
     const handleTimeUpdate = () => {
       setCurrentTime(video.currentTime)
-      if (video.duration) {
-        setProgress((video.currentTime / video.duration) * 100)
+      const effectiveDuration = Number.isFinite(video.duration) && video.duration > 0
+        ? video.duration
+        : (video.seekable?.length ? video.seekable.end(video.seekable.length - 1) : 0)
+
+      if (effectiveDuration > 0) {
+        setProgress((video.currentTime / effectiveDuration) * 100)
       }
     }
-    
+
     const handlePlay = () => setIsPlaying(true)
     const handlePause = () => setIsPlaying(false)
-    
+    const handleVolumeSync = () => {
+      setVolume(video.volume)
+      setIsMuted(video.muted || video.volume === 0)
+    }
+    const handleEnded = () => {
+      setIsPlaying(false)
+      setProgress(100)
+    }
+
     const handleError = () => {
       const errorCode = video.error?.code
       let errorMsg = 'Video yuklenirken hata olustu'
@@ -258,36 +302,43 @@ function PlayerPage() {
       setError(errorMsg)
       setLoading(false)
     }
-    
+
     video.addEventListener('loadedmetadata', handleLoadedMetadata)
+    video.addEventListener('durationchange', syncDuration)
+    video.addEventListener('canplay', handleCanPlay)
     video.addEventListener('timeupdate', handleTimeUpdate)
     video.addEventListener('play', handlePlay)
     video.addEventListener('pause', handlePause)
+    video.addEventListener('volumechange', handleVolumeSync)
+    video.addEventListener('ended', handleEnded)
     video.addEventListener('error', handleError)
-    
+
     const attemptPlay = async () => {
       try {
         await video.play()
-        if (video.muted) {
-          video.muted = false
-          setIsMuted(false)
-        }
       } catch (err) {
         setIsPlaying(false)
       }
     }
-    
+
     const playTimeout = setTimeout(attemptPlay, 100)
-    
+
     return () => {
       clearTimeout(playTimeout)
       video.removeEventListener('loadedmetadata', handleLoadedMetadata)
+      video.removeEventListener('durationchange', syncDuration)
+      video.removeEventListener('canplay', handleCanPlay)
       video.removeEventListener('timeupdate', handleTimeUpdate)
       video.removeEventListener('play', handlePlay)
       video.removeEventListener('pause', handlePause)
+      video.removeEventListener('volumechange', handleVolumeSync)
+      video.removeEventListener('ended', handleEnded)
       video.removeEventListener('error', handleError)
+      video.pause()
+      video.removeAttribute('src')
+      video.load()
     }
-  }, [videoMode, videoUrl])
+  }, [videoMode, videoUrl, volume, isMuted])
 
   // Controls visibility - 3 seconds auto-hide
   const handleMouseMove = () => {
@@ -323,15 +374,25 @@ function PlayerPage() {
 
   const handleSeek = (e) => {
     const video = videoRef.current
-    if (!video || !video.duration) return
-    const seekTime = (e.target.value / 100) * video.duration
+    if (!video) return
+
+    const seekableEnd = video.seekable?.length ? video.seekable.end(video.seekable.length - 1) : 0
+    const effectiveDuration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : seekableEnd
+    if (!effectiveDuration) return
+
+    const nextProgress = Number(e.target.value)
+    const seekTime = (nextProgress / 100) * effectiveDuration
+    setProgress(nextProgress)
     video.currentTime = seekTime
   }
 
   const skip = (seconds) => {
     const video = videoRef.current
     if (!video) return
-    video.currentTime = Math.max(0, Math.min(duration, video.currentTime + seconds))
+    const seekableEnd = video.seekable?.length ? video.seekable.end(video.seekable.length - 1) : 0
+    const effectiveDuration = Number.isFinite(video.duration) && video.duration > 0 ? video.duration : seekableEnd
+    const upperBound = effectiveDuration > 0 ? effectiveDuration : video.currentTime + seconds
+    video.currentTime = Math.max(0, Math.min(upperBound, video.currentTime + seconds))
   }
 
   const toggleFullscreen = () => {
@@ -374,13 +435,11 @@ function PlayerPage() {
       
       if (!silent) setLoading(true)
 
-      const text = await fetchUserPlaylist(user, token)
-
-      if (!text || text.trim().length === 0) {
-        throw new Error('M3U playlist bos veya gecersiz icerik')
-      }
-
-      const parsed = parseLiveChannels(text)
+      const parsed = await fetchParsedPlaylist(user, token, {
+        cacheKey: 'live-channels:v1',
+        parser: parseLiveChannels,
+        forceRefresh: silent === false && !M3UCache.get(user.code)
+      })
 
       M3UCache.set(user.code, parsed)
 
@@ -506,9 +565,12 @@ function PlayerPage() {
   useEffect(() => {
     const handleKeyDown = (e) => {
       const video = videoRef.current
+      const activeTag = document.activeElement?.tagName
+      const isTypingTarget = ['INPUT', 'TEXTAREA', 'SELECT'].includes(activeTag) || document.activeElement?.isContentEditable
       
       // Live TV mode - Channel switching with arrow keys
       if (videoMode === 'live') {
+        if (isTypingTarget) return
         if (e.code === 'ArrowRight') {
           e.preventDefault()
           // Next channel
@@ -543,19 +605,25 @@ function PlayerPage() {
       // Movie/Series mode
       if (!video) return
       if (videoMode !== 'movie' && videoMode !== 'series') return
-      
+      if (isTypingTarget) return
+
+      handleMouseMove()
+
       switch(e.code) {
         case 'Space':
+        case 'KeyK':
           e.preventDefault()
           isPlaying ? video.pause() : video.play().catch(() => {})
           break
         case 'ArrowRight':
+        case 'KeyL':
           e.preventDefault()
-          video.currentTime = Math.min(video.duration || 0, video.currentTime + 10)
+          skip(10)
           break
         case 'ArrowLeft':
+        case 'KeyJ':
           e.preventDefault()
-          video.currentTime = Math.max(0, video.currentTime - 10)
+          skip(-10)
           break
         case 'ArrowUp':
           e.preventDefault()
@@ -578,6 +646,19 @@ function PlayerPage() {
           break
         case 'Escape':
           if (document.fullscreenElement) document.exitFullscreen()
+          break
+        case 'Home':
+          e.preventDefault()
+          video.currentTime = 0
+          break
+        case 'End':
+          if (Number.isFinite(video.duration) && video.duration > 0) {
+            e.preventDefault()
+            video.currentTime = video.duration
+          } else if (video.seekable?.length) {
+            e.preventDefault()
+            video.currentTime = video.seekable.end(video.seekable.length - 1)
+          }
           break
       }
     }
@@ -722,8 +803,11 @@ function PlayerPage() {
   if (videoMode === 'movie' || videoMode === 'series') {
     return (
       <div 
+        ref={playerShellRef}
         className="fixed inset-0 bg-black z-50"
+        tabIndex={-1}
         onMouseMove={handleMouseMove}
+        onDoubleClick={toggleFullscreen}
         onClick={() => !showControls && setShowControls(true)}
       >
         <div id="video-player-wrapper" className="relative w-full h-full">
@@ -754,7 +838,7 @@ function PlayerPage() {
             </div>
           )}
 
-          <video ref={videoRef} className="w-full h-full object-contain" playsInline />
+          <video ref={videoRef} className="w-full h-full object-contain" playsInline preload="metadata" />
           
           {showControls && !error && (
             <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-black/40">
@@ -791,7 +875,9 @@ function PlayerPage() {
                   type="range"
                   min="0"
                   max="100"
+                  step="0.1"
                   value={progress}
+                  onInput={handleSeek}
                   onChange={handleSeek}
                   className="w-full h-2 rounded-full appearance-none cursor-pointer mb-4"
                   style={{ 
@@ -830,6 +916,10 @@ function PlayerPage() {
                           }}
                         />
                       </div>
+                    </div>
+
+                    <div className="text-sm text-white/80 tabular-nums">
+                      {formatTime(currentTime)} / {formatTime(duration)}
                     </div>
                   </div>
                   

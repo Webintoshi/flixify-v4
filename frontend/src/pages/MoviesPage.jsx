@@ -5,7 +5,7 @@ import {
   Play, Plus, Info, Search, X, Star, TrendingUp, 
   ChevronLeft, ChevronRight, Film
 } from 'lucide-react'
-import { fetchUserPlaylist, hasValidSubscription } from '../services/playlist'
+import { fetchParsedPlaylist, hasValidSubscription } from '../services/playlist'
 import { dedupeByTitle, parseMoviesFromPlaylist } from '../utils/playlistParser'
 
 const PRIMARY = '#E50914'
@@ -347,14 +347,10 @@ function MoviesPage() {
         return
       }
       
-      const text = await fetchUserPlaylist(user, token)
-
-      if (!text || text.trim().length === 0) {
-        throw new Error('M3U playlist bos veya gecersiz icerik')
-      }
-
-      let parsedMovies = parseMoviesFromPlaylist(text)
-      parsedMovies = dedupeByTitle(parsedMovies)
+      const parsedMovies = await fetchParsedPlaylist(user, token, {
+        cacheKey: 'movies:v1',
+        parser: (playlistText) => dedupeByTitle(parseMoviesFromPlaylist(playlistText))
+      })
 
       setMovies(parsedMovies)
 
