@@ -96,7 +96,45 @@ class M3uController {
     return config;
   }
 
-  async _requestViaProviderProxy(overrides = {}) {
+  _destroyResponseStream(response) {
+    if (response?.data && typeof response.data.destroy === 'function') {
+      response.data.destroy();
+    }
+  }
+
+  _validateStreamResponse(response) {
+    if (!response) {
+      throw new Error('Provider returned an empty stream response');
+    }
+
+    if (response.status >= 400) {
+      const error = new Error(`Provider returned HTTP ${response.status}`);
+      error.statusCode = response.status;
+      throw error;
+    }
+
+    const contentType = (response.headers['content-type'] || '').toLowerCase();
+    const contentLength = response.headers['content-length'];
+
+    if (contentLength === '0') {
+      const error = new Error('Provider returned an empty stream');
+      error.statusCode = 502;
+      throw error;
+    }
+
+    // Some dead IPTV entries return an HTML landing page with 200 OK.
+    if (
+      contentType.includes('text/html') ||
+      contentType.includes('application/json') ||
+      contentType.includes('text/plain')
+    ) {
+      const error = new Error(`Provider returned invalid stream content-type: ${contentType || 'unknown'}`);
+      error.statusCode = 502;
+      throw error;
+    }
+  }
+
+  async _requestViaProviderProxy(overrides = {}, responseValidator = null) {
     const proxies = this._getProxyConfigs();
     const candidates = proxies.length ? proxies : [null];
     let lastError = null;
@@ -105,7 +143,18 @@ class M3uController {
       const proxyLabel = proxy ? `${proxy.host}:${proxy.port}` : 'DIRECT';
 
       try {
-        return await axios(this._createAxiosConfig(overrides, proxy));
+        const response = await axios(this._createAxiosConfig(overrides, proxy));
+
+        if (typeof responseValidator === 'function') {
+          try {
+            responseValidator(response);
+          } catch (validationError) {
+            this._destroyResponseStream(response);
+            throw validationError;
+          }
+        }
+
+        return response;
       } catch (error) {
         lastError = error;
         logger.warn('Provider upstream attempt failed', {
@@ -359,8 +408,10 @@ class M3uController {
       const upstream = await this._requestViaProviderProxy({
         method: 'get',
         url: targetUrl,
-        responseType: 'stream'
-      });
+        responseType: 'stream',
+        validateStatus: () => true
+      }, this._validateStreamResponse.bind(this));
+      this._validateStreamResponse(upstream);
 
       res.set({
         'Content-Type': upstream.headers['content-type'] || 'video/MP2T',

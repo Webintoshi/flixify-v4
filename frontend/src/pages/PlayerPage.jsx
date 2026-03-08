@@ -126,6 +126,7 @@ function PlayerPage() {
   const videoRef = useRef(null)
   const playerRef = useRef(null)
   const observerRef = useRef(null)
+  const liveStartupTimeoutRef = useRef(null)
   
   const type = searchParams.get('type')
   const videoUrl = searchParams.get('url')
@@ -642,9 +643,21 @@ function PlayerPage() {
 
     const video = videoRef.current
     const streamUrl = currentChannel.url
+    const clearStartupTimeout = () => {
+      if (liveStartupTimeoutRef.current) {
+        clearTimeout(liveStartupTimeoutRef.current)
+        liveStartupTimeoutRef.current = null
+      }
+    }
+    const finishLoading = () => {
+      clearStartupTimeout()
+      setLoading(false)
+    }
 
     video.muted = false
     setIsMuted(false)
+    setError(null)
+    setLoading(true)
 
     if (mpegts.getFeatureList().mseLivePlayback) {
       if (playerRef.current) {
@@ -676,6 +689,32 @@ function PlayerPage() {
           fixAudioTimestampGap: false        // Gereksiz sync önleme
         })
 
+        liveStartupTimeoutRef.current = setTimeout(() => {
+          if (!playerRef.current) return
+
+          console.warn('[Player] Live stream startup timed out', {
+            channel: currentChannel?.name,
+            streamUrl
+          })
+
+          try {
+            playerRef.current.pause()
+            playerRef.current.unload()
+            playerRef.current.detachMediaElement()
+            playerRef.current.destroy()
+          } catch {
+            // ignore cleanup failures
+          } finally {
+            playerRef.current = null
+          }
+
+          setError('Yayin baslatilamadi. Bu kanal su an gecersiz veya yanit vermiyor.')
+          setLoading(false)
+        }, 8000)
+
+        video.addEventListener('loadeddata', finishLoading)
+        video.addEventListener('playing', finishLoading)
+
         playerRef.current.attachMediaElement(video)
         playerRef.current.load()
         playerRef.current.play().catch(() => {})
@@ -692,19 +731,23 @@ function PlayerPage() {
             setError('Kanal yuklenemedi')
           }
           
-          setLoading(false)
+          finishLoading()
         })
 
         playerRef.current.on(mpegts.Events.MEDIA_INFO, () => {
-          setLoading(false)
+          finishLoading()
         })
       } catch {
         setError('Player hatasi')
-        setLoading(false)
+        finishLoading()
       }
     }
 
     return () => {
+      clearStartupTimeout()
+      video.removeEventListener('loadeddata', finishLoading)
+      video.removeEventListener('playing', finishLoading)
+
       if (playerRef.current) {
         playerRef.current.pause()
         playerRef.current.unload()
@@ -713,7 +756,7 @@ function PlayerPage() {
         playerRef.current = null
       }
     }
-  }, [currentChannel, videoMode])
+  }, [currentChannel, videoMode, user?.code])
 
   // Loading
   if (videoMode === 'loading') {
