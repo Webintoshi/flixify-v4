@@ -151,14 +151,14 @@ function createRateLimiters(redisClient) {
 
     /**
      * Authentication rate limiter (strict)
-     * 5 requests per 15 minutes per IP
+     * 20 requests per 15 minutes per client/code
      * Protects against brute force code guessing
      */
     auth: createRateLimiter({
       windowMs: 15 * 60 * 1000, // 15 minutes
-      max: 5,
+      max: 20,
       keyPrefix: 'rl:auth:',
-      message: 'Too many authentication attempts. Please try again in 15 minutes.',
+      message: 'Too many authentication attempts. Please wait a moment and try again.',
       redisClient
     }),
 
