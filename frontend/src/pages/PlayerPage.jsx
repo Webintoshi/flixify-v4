@@ -136,6 +136,7 @@ function PlayerPage() {
   const hlsPlayerRef = useRef(null)
   const observerRef = useRef(null)
   const liveStartupTimeoutRef = useRef(null)
+  const liveRetryRef = useRef({ key: '', count: 0 })
   
   const type = searchParams.get('type')
   const videoUrl = searchParams.get('url')
@@ -475,6 +476,12 @@ function PlayerPage() {
     const video = videoRef.current
     const streamUrl = currentChannel.url
     const streamType = currentChannel.sourceType || inferStreamContainer(currentChannel.originalUrl || currentChannel.url)
+    const streamKey = `${currentChannel?.name || ''}|${currentChannel?.url || ''}`
+    let retryTimer = null
+
+    if (liveRetryRef.current.key !== streamKey) {
+      liveRetryRef.current = { key: streamKey, count: 0 }
+    }
     const clearStartupTimeout = () => {
       if (liveStartupTimeoutRef.current) {
         clearTimeout(liveStartupTimeoutRef.current)
@@ -484,6 +491,33 @@ function PlayerPage() {
     const finishLoading = () => {
       clearStartupTimeout()
       setLoading(false)
+    }
+
+    const retryCurrentChannel = (reason) => {
+      if (liveRetryRef.current.count >= 1) return false
+      liveRetryRef.current.count += 1
+
+      console.warn('[Player] Retrying channel playback', {
+        channel: currentChannel?.name,
+        streamType,
+        reason,
+        attempt: liveRetryRef.current.count
+      })
+
+      clearStartupTimeout()
+      destroyLivePlayers()
+      setError(null)
+      setLoading(true)
+
+      if (retryTimer) {
+        clearTimeout(retryTimer)
+      }
+
+      retryTimer = setTimeout(() => {
+        setCurrentChannel(prev => (prev ? { ...prev } : prev))
+      }, 900)
+
+      return true
     }
 
     video.muted = false
@@ -501,10 +535,12 @@ function PlayerPage() {
           return
         }
 
-        destroyLivePlayers()
-        setError('HLS kanal yuklenemedi')
-        setLoading(false)
-      }, 10000)
+        if (!retryCurrentChannel('hls-startup-timeout')) {
+          destroyLivePlayers()
+          setError('HLS kanal yuklenemedi')
+          setLoading(false)
+        }
+      }, 20000)
 
       video.addEventListener('loadeddata', finishLoading)
       video.addEventListener('playing', finishLoading)
@@ -513,7 +549,16 @@ function PlayerPage() {
       if (Hls.isSupported()) {
         const hls = new Hls({
           enableWorker: true,
-          lowLatencyMode: true
+          lowLatencyMode: false,
+          backBufferLength: 90,
+          maxBufferLength: 30,
+          maxMaxBufferLength: 60,
+          liveSyncDurationCount: 3,
+          liveMaxLatencyDurationCount: 10,
+          manifestLoadingTimeOut: 15000,
+          levelLoadingTimeOut: 15000,
+          fragLoadingTimeOut: 20000,
+          startFragPrefetch: true
         })
         hlsPlayerRef.current = hls
         hls.loadSource(streamUrl)
@@ -524,11 +569,21 @@ function PlayerPage() {
         })
         hls.on(Hls.Events.ERROR, (_, data) => {
           console.error('[HLS Player Error]', data)
-          if (data?.fatal) {
-            destroyLivePlayers()
-            setError('HLS kanal yuklenemedi')
-            finishLoading()
+          if (!data?.fatal) return
+
+          if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+            hls.recoverMediaError()
+            return
           }
+
+          if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+            hls.startLoad()
+            if (retryCurrentChannel('hls-network-error')) return
+          }
+
+          destroyLivePlayers()
+          setError('HLS kanal yuklenemedi')
+          finishLoading()
         })
       } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
         video.src = streamUrl
@@ -541,6 +596,10 @@ function PlayerPage() {
 
       return () => {
         clearStartupTimeout()
+        if (retryTimer) {
+          clearTimeout(retryTimer)
+          retryTimer = null
+        }
         video.removeEventListener('loadeddata', finishLoading)
         video.removeEventListener('playing', finishLoading)
         video.removeEventListener('canplay', finishLoading)
@@ -557,17 +616,20 @@ function PlayerPage() {
           isLive: true,
           enableWorker: true,        // Performans için worker thread
           enableStashBuffer: true,   // Buffer gerekli
-          stashInitialSize: 64,      // Küçük initial buffer
-          lazyLoad: false,           // Anında yükleme
+          stashInitialSize: 256,
+          lazyLoad: true,
+          lazyLoadMaxDuration: 180,
           
           // 🎯 DÜŞÜK GECİKME AYARLARI
           liveBufferLatencyChasing: true,   // Gecikmeyi kovalama
-          liveBufferLatencyMaxLatency: 1.0,  // Max 1 saniye buffer (düşürüldü)
-          liveBufferLatencyMinRemain: 0.3,   // Min 0.3 saniye
+          liveBufferLatencyMaxLatency: 3.0,
+          liveBufferLatencyMinRemain: 1.0,
           
           // Ek optimizasyonlar
-          autoCleanupSourceBuffer: true,     // Bellek yönetimi
-          fixAudioTimestampGap: false        // Gereksiz sync önleme
+          autoCleanupSourceBuffer: true,
+          autoCleanupMaxBackwardDuration: 45,
+          autoCleanupMinBackwardDuration: 20,
+          fixAudioTimestampGap: true
         })
 
         liveStartupTimeoutRef.current = setTimeout(() => {
@@ -589,9 +651,11 @@ function PlayerPage() {
             playerRef.current = null
           }
 
-          setError('Yayin baslatilamadi. Bu kanal su an gecersiz veya yanit vermiyor.')
-          setLoading(false)
-        }, 10000)
+          if (!retryCurrentChannel('mpegts-startup-timeout')) {
+            setError('Yayin baslatilamadi. Bu kanal su an gecersiz veya yanit vermiyor.')
+            setLoading(false)
+          }
+        }, 20000)
 
         video.addEventListener('loadeddata', finishLoading)
         video.addEventListener('playing', finishLoading)
@@ -603,14 +667,23 @@ function PlayerPage() {
         playerRef.current.on(mpegts.Events.ERROR, (errorType, errorDetail, errorInfo) => {
           console.error('[Player Error]', { errorType, errorDetail, errorInfo })
           
+          const statusCode = Number(errorDetail?.status ?? errorDetail?.code ?? 0)
+          const detailMessage = String(errorDetail?.msg || errorDetail?.message || '')
+          const lowered = `${String(errorType || '').toLowerCase()} ${detailMessage.toLowerCase()}`
+          const retryableStatus = [0, 408, 429, 500, 502, 503, 504].includes(statusCode)
+          const retryableError = retryableStatus || /network|timeout|io|eof|disconnect|abort/.test(lowered)
+
           // URL geçersizse veya 404 alındıysa cache'i temizle
           if (errorDetail?.code === 404 || errorDetail?.status === 404) {
             console.warn('[Player] Stream 404 - Clearing cache')
-            M3UCache.clear(user?.code)
-            setError('Kanal bağlantısı eskimiş. Listeyi yenileyin.')
-          } else {
-            setError('Kanal yuklenemedi')
+            M3UCache.clear(user?.code, selectedCountry)
           }
+
+          if (retryableError && retryCurrentChannel('mpegts-retryable-error')) {
+            return
+          }
+
+          setError('Kanal yuklenemedi')
           
           finishLoading()
         })
@@ -626,11 +699,15 @@ function PlayerPage() {
 
     return () => {
       clearStartupTimeout()
+      if (retryTimer) {
+        clearTimeout(retryTimer)
+        retryTimer = null
+      }
       video.removeEventListener('loadeddata', finishLoading)
       video.removeEventListener('playing', finishLoading)
       destroyLivePlayers()
     }
-  }, [currentChannel, videoMode, user?.code, destroyLivePlayers])
+  }, [currentChannel, videoMode, user?.code, selectedCountry, destroyLivePlayers])
 
   // Loading
   if (videoMode === 'loading') {

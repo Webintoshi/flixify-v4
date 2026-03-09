@@ -8,6 +8,8 @@
  */
 
 const axios = require('axios');
+const http = require('http');
+const https = require('https');
 const CircuitBreaker = require('opossum');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
@@ -30,9 +32,23 @@ class M3uController {
     this._vodSessionTtlMs = parseInt(process.env.VOD_SESSION_TTL_MS, 10) || 60 * 60 * 1000;
     this._ffmpegPath = process.env.FFMPEG_PATH || 'ffmpeg';
     this._ffprobePath = process.env.FFPROBE_PATH || 'ffprobe';
+    this._upstreamTimeoutMs = parseInt(process.env.PROXY_TIMEOUT_MS, 10) || 30000;
+    this._streamProxyTimeoutMs = parseInt(process.env.STREAM_PROXY_TIMEOUT_MS, 10) || 120000;
+    this._httpAgent = new http.Agent({
+      keepAlive: true,
+      keepAliveMsecs: 10000,
+      maxSockets: 200,
+      timeout: this._streamProxyTimeoutMs
+    });
+    this._httpsAgent = new https.Agent({
+      keepAlive: true,
+      keepAliveMsecs: 10000,
+      maxSockets: 200,
+      timeout: this._streamProxyTimeoutMs
+    });
 
     this._circuitBreaker = new CircuitBreaker(this._fetchM3u.bind(this), {
-      timeout: parseInt(process.env.PROXY_TIMEOUT_MS, 10) || 30000,
+      timeout: this._upstreamTimeoutMs,
       errorThresholdPercentage: 50,
       resetTimeout: parseInt(process.env.CIRCUIT_BREAKER_RESET_TIMEOUT, 10) || 30000,
       rollingCountTimeout: 10000,
@@ -136,11 +152,13 @@ class M3uController {
 
   _createAxiosConfig(overrides = {}, proxy = null) {
     const config = {
-      timeout: 30000,
+      timeout: this._upstreamTimeoutMs,
       headers: {
         'User-Agent': 'Flixify-V4-Proxy/1.0',
         'Accept': '*/*'
       },
+      httpAgent: this._httpAgent,
+      httpsAgent: this._httpsAgent,
       ...overrides
     };
 
@@ -1096,6 +1114,7 @@ class M3uController {
         method: requestMethod,
         url: targetUrl,
         responseType: requestMethod === 'get' ? 'stream' : undefined,
+        timeout: requestMethod === 'get' ? this._streamProxyTimeoutMs : this._upstreamTimeoutMs,
         headers: upstreamRequestHeaders,
         validateStatus: () => true
       }, this._validateStreamResponse.bind(this));
@@ -1116,6 +1135,7 @@ class M3uController {
           method: 'get',
           url: targetUrl,
           responseType: 'text',
+          timeout: this._streamProxyTimeoutMs,
           headers: this._buildUpstreamStreamHeaders(req, 'application/vnd.apple.mpegurl,*/*'),
           validateStatus: () => true
         });
@@ -1177,6 +1197,7 @@ class M3uController {
           method: 'get',
           url: targetUrl,
           responseType: 'stream',
+          timeout: this._streamProxyTimeoutMs,
           headers: {
             ...this._buildUpstreamStreamHeaders(req),
             Range: 'bytes=0-1'
@@ -1201,6 +1222,7 @@ class M3uController {
             method: 'get',
             url: targetUrl,
             responseType: 'stream',
+            timeout: this._streamProxyTimeoutMs,
             headers: {
               ...this._buildUpstreamStreamHeaders(req),
               Range: 'bytes=0-1'
