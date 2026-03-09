@@ -306,12 +306,22 @@ class M3uController {
 
   _buildPlaybackProbePayload(targetUrl, probe) {
     const containerType = probe?.containerType || this._getContainerType(targetUrl);
-    const shouldRemux = ['mkv', 'ts', 'unknown'].includes(containerType) || probe?.codecRisk;
+    const hasByteRanges = Boolean(probe?.acceptRanges);
+    const shouldUseNativeFirst =
+      containerType === 'mp4' ||
+      containerType === 'webm' ||
+      (containerType === 'mkv' && hasByteRanges && !probe?.codecRisk);
+    const shouldRemux = !shouldUseNativeFirst;
 
     return {
       ...(probe || {}),
-      playbackStrategy: shouldRemux ? 'remux-hls' : (containerType === 'hls' ? 'hls' : 'native'),
+      playbackStrategy: containerType === 'hls'
+        ? 'hls'
+        : shouldRemux
+          ? 'remux-hls'
+          : 'native',
       remuxRecommended: shouldRemux,
+      remuxFallback: containerType === 'mkv',
       directPlayLikely: this._canDirectPlayProbe(probe)
     };
   }

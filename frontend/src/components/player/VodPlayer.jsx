@@ -97,40 +97,57 @@ export default function VodPlayer({
   const [currentTime, setCurrentTime] = useState(0)
   const [showControls, setShowControls] = useState(true)
   const [isFullscreen, setIsFullscreen] = useState(false)
+  const [runtimeStrategy, setRuntimeStrategy] = useState('native')
+  const [useRemuxFallback, setUseRemuxFallback] = useState(false)
 
   const { loading: probeLoading, data: probe } = useVodSourceProbe(videoUrl, Boolean(videoUrl))
 
-  const resolvedVideoUrl = useMemo(() => {
-    if (probe?.remuxRecommended) {
-      return buildRemuxManifestUrl(videoUrl) || videoUrl
+  const remuxManifestUrl = useMemo(() => buildRemuxManifestUrl(videoUrl), [videoUrl])
+
+  const initialPlaybackStrategy = useMemo(() => {
+    if (probe?.playbackStrategy) {
+      return probe.playbackStrategy
+    }
+
+    return getFallbackStrategy(videoUrl)
+  }, [probe?.playbackStrategy, videoUrl])
+
+  useEffect(() => {
+    if (!videoUrl) {
+      return
+    }
+
+    const shouldUseRemux = initialPlaybackStrategy === 'remux-hls'
+    setUseRemuxFallback(shouldUseRemux)
+    setRuntimeStrategy(shouldUseRemux ? 'hls' : initialPlaybackStrategy)
+  }, [initialPlaybackStrategy, videoUrl])
+
+  const playbackSourceUrl = useMemo(() => {
+    if (!videoUrl) {
+      return null
+    }
+
+    if (runtimeStrategy === 'hls') {
+      if (useRemuxFallback) {
+        return remuxManifestUrl || videoUrl
+      }
+      return videoUrl
     }
 
     return videoUrl
-  }, [probe?.remuxRecommended, videoUrl])
-
-  const playbackStrategy = useMemo(() => {
-    if (probe?.playbackStrategy === 'remux-hls') {
-      return 'hls'
-    }
-
-    if (probe?.containerType === 'hls') {
-      return 'hls'
-    }
-
-    return getFallbackStrategy(resolvedVideoUrl)
-  }, [probe?.containerType, probe?.playbackStrategy, resolvedVideoUrl])
+  }, [videoUrl, runtimeStrategy, useRemuxFallback, remuxManifestUrl])
 
   const canSeek = useMemo(() => {
-    if (probe?.remuxRecommended) {
+    if (useRemuxFallback) {
       return true
     }
 
     if (!probe) {
-      return playbackStrategy !== 'native' || inferContainerFromUrl(resolvedVideoUrl) !== 'ts'
+      return runtimeStrategy !== 'native' || inferContainerFromUrl(videoUrl) !== 'ts'
     }
 
     return Boolean(probe.seekableGuess)
-  }, [probe, playbackStrategy, resolvedVideoUrl])
+  }, [probe, runtimeStrategy, useRemuxFallback, videoUrl])
 
   const clearControlsTimeout = useCallback(() => {
     if (controlsTimeoutRef.current) {
@@ -153,6 +170,29 @@ export default function VodPlayer({
       startupTimeoutRef.current = null
     }
   }, [])
+
+  const activateRemuxFallback = useCallback(() => {
+    if (useRemuxFallback || !remuxManifestUrl) {
+      return false
+    }
+
+    const inferredContainer = inferContainerFromUrl(videoUrl)
+    const canUseFallback =
+      probe?.remuxFallback ||
+      probe?.remuxRecommended ||
+      inferredContainer === 'mkv' ||
+      inferredContainer === 'unknown'
+
+    if (!canUseFallback) {
+      return false
+    }
+
+    setError(null)
+    setLoading(true)
+    setUseRemuxFallback(true)
+    setRuntimeStrategy('hls')
+    return true
+  }, [probe?.remuxFallback, probe?.remuxRecommended, remuxManifestUrl, useRemuxFallback, videoUrl])
 
   const getSeekBounds = useCallback(() => {
     const video = videoRef.current
@@ -355,7 +395,7 @@ export default function VodPlayer({
   }, [clearControlsTimeout, clearStartupTimeout])
 
   useEffect(() => {
-    if (!resolvedVideoUrl || probeLoading || !videoRef.current) {
+    if (!playbackSourceUrl || probeLoading || !videoRef.current) {
       return undefined
     }
 
@@ -432,7 +472,7 @@ export default function VodPlayer({
     video.addEventListener('error', handleError)
 
     video.playsInline = true
-    video.preload = playbackStrategy === 'native' ? 'auto' : 'metadata'
+    video.preload = runtimeStrategy === 'native' ? 'auto' : 'metadata'
     video.crossOrigin = 'anonymous'
 
     startupTimeoutRef.current = setTimeout(() => {
@@ -441,42 +481,59 @@ export default function VodPlayer({
       }
       setLoading(false)
       setError('Video belirtilen surede baslatilamadi. Kaynak gecici olarak yanit vermiyor olabilir.')
-    }, probe?.remuxRecommended ? 25000 : 12000)
+    }, useRemuxFallback ? 25000 : 12000)
 
-    if (playbackStrategy === 'hls') {
+    if (runtimeStrategy === 'hls') {
       if (Hls.isSupported()) {
         const hls = new Hls({
           enableWorker: true,
           lowLatencyMode: false
         })
         hlsRef.current = hls
-        hls.loadSource(resolvedVideoUrl)
+        hls.loadSource(playbackSourceUrl)
         hls.attachMedia(video)
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
           clearStartupTimeout()
           setLoading(false)
-          video.play().catch(() => {})
+          video.play().catch(() => {
+            if (!activateRemuxFallback()) {
+              setError('Video baslatilamadi veya bu format tarayicida desteklenmiyor.')
+            }
+          })
         })
         hls.on(Hls.Events.ERROR, (_, data) => {
           if (data?.fatal) {
             clearStartupTimeout()
-            setLoading(false)
-            setError('HLS video oynatimi basarisiz oldu.')
+            if (!activateRemuxFallback()) {
+              setLoading(false)
+              setError('HLS video oynatimi basarisiz oldu.')
+            }
           }
         })
       } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-        video.src = resolvedVideoUrl
+        video.src = playbackSourceUrl
         video.load()
-        video.play().catch(() => {})
+        video.play().catch(() => {
+          if (!activateRemuxFallback()) {
+            setError('Bu HLS kaynagi mevcut tarayicida desteklenmiyor.')
+          }
+        })
       } else {
         clearStartupTimeout()
-        setLoading(false)
-        setError('Bu HLS kaynagi mevcut tarayicida desteklenmiyor.')
+        if (!activateRemuxFallback()) {
+          setLoading(false)
+          setError('Bu HLS kaynagi mevcut tarayicida desteklenmiyor.')
+        }
       }
     } else {
-      video.src = resolvedVideoUrl
+      video.src = playbackSourceUrl
       video.load()
-      video.play().catch(() => {})
+      video.play().catch(() => {
+        if (!activateRemuxFallback()) {
+          setLoading(false)
+          setError('Video baslatilamadi veya bu format tarayicida desteklenmiyor.')
+        }
+      })
     }
 
     return () => {
@@ -500,11 +557,12 @@ export default function VodPlayer({
   }, [
     clearStartupTimeout,
     destroyPlaybackEngine,
-    playbackStrategy,
-    probe?.remuxRecommended,
+    activateRemuxFallback,
+    playbackSourceUrl,
     probeLoading,
-    resolvedVideoUrl,
+    runtimeStrategy,
     syncTimeline,
+    useRemuxFallback,
     videoUrl
   ])
 
@@ -581,7 +639,7 @@ export default function VodPlayer({
                   <p className="text-xs uppercase tracking-[0.3em] text-white/45 mb-1">{titlePrefix}</p>
                   <h1 className="text-white text-xl font-bold">{videoTitle || 'Video'}</h1>
                   <p className="text-white/55 text-sm mt-1">
-                    Oynatma modu: {playbackStrategy === 'hls' ? 'HLS' : 'Native HTML5'}
+                    Oynatma modu: {runtimeStrategy === 'hls' ? (useRemuxFallback ? 'Remux HLS' : 'HLS') : 'Native HTML5'}
                   </p>
                 </div>
               </div>
