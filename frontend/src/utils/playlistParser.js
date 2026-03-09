@@ -139,6 +139,22 @@ export function parseLiveChannels(content) {
   }))
 }
 
+export function parseLiveChannelsByCountry(content, country = 'TR') {
+  const normalizedCountry = String(country || 'TR').toUpperCase()
+
+  return parsePlaylistEntries(content)
+    .map((entry) => ({
+      name: entry.title || entry.tvgName || 'Bilinmiyor',
+      logo: entry.logo,
+      group: normalizePlaylistGroup(entry.rawGroup),
+      country: inferCountry(entry.rawGroup, entry.title, entry.tvgCountry),
+      url: entry.url,
+      originalUrl: entry.originalUrl,
+      sourceType: inferStreamContainer(entry.originalUrl)
+    }))
+    .filter((channel) => channel.country === normalizedCountry)
+}
+
 export function parseMoviesFromPlaylist(content) {
   return parsePlaylistEntries(content)
     .filter((entry) => {

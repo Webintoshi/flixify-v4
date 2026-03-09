@@ -8,7 +8,7 @@ import {
 import mpegts from 'mpegts.js'
 import Hls from 'hls.js'
 import { fetchParsedPlaylist, hasValidSubscription } from '../services/playlist'
-import { inferStreamContainer, parseLiveChannels } from '../utils/playlistParser'
+import { inferStreamContainer, parseLiveChannelsByCountry } from '../utils/playlistParser'
 import VodPlayer from '../components/player/VodPlayer'
 
 const PRIMARY = '#E50914'
@@ -38,27 +38,28 @@ class M3UCache {
   static TTL_MS = 5 * 60 * 1000 // 5 dakika
   static MAX_CACHE_BYTES = 1024 * 1024 // 1 MB
 
-  static get(userCode) {
+  static get(userCode, country = 'TR') {
+    const cacheKey = `${this.CACHE_KEY}_${userCode}_${country}`
     try {
-      const cached = sessionStorage.getItem(`${this.CACHE_KEY}_${userCode}`)
+      const cached = sessionStorage.getItem(cacheKey)
       if (!cached) return null
-      
+
       const { data, timestamp } = JSON.parse(cached)
       const age = Date.now() - timestamp
-      
-      // Cache süresi dolmuşsa temizle
+
       if (age > this.TTL_MS) {
-        sessionStorage.removeItem(`${this.CACHE_KEY}_${userCode}`)
+        sessionStorage.removeItem(cacheKey)
         return null
       }
-      
+
       return { data, age }
     } catch {
       return null
     }
   }
 
-  static set(userCode, channels) {
+  static set(userCode, country, channels) {
+    const cacheKey = `${this.CACHE_KEY}_${userCode}_${country}`
     try {
       const cacheData = {
         data: channels,
@@ -66,20 +67,26 @@ class M3UCache {
       }
       const serialized = JSON.stringify(cacheData)
 
-      // Large IPTV lists easily exceed browser storage quotas.
       if (serialized.length > this.MAX_CACHE_BYTES) {
         return
       }
 
-      sessionStorage.setItem(`${this.CACHE_KEY}_${userCode}`, serialized)
+      sessionStorage.setItem(cacheKey, serialized)
     } catch (error) {
       console.warn('M3U cache write failed:', error)
     }
   }
 
-  static clear(userCode) {
+  static clear(userCode, country = null) {
     try {
-      sessionStorage.removeItem(`${this.CACHE_KEY}_${userCode}`)
+      if (country) {
+        sessionStorage.removeItem(`${this.CACHE_KEY}_${userCode}_${country}`)
+        return
+      }
+
+      Object.keys(sessionStorage)
+        .filter(key => key.startsWith(`${this.CACHE_KEY}_${userCode}_`))
+        .forEach(key => sessionStorage.removeItem(key))
     } catch {
       // ignore
     }
@@ -98,7 +105,6 @@ class M3UCache {
 
 // Ulkeler - Bayraklar ile
 const COUNTRIES = [
-  { id: 'ALL', name: 'Tumu', flag: '🌍' },
   { id: 'TR', name: 'Turkiye', flag: '🇹🇷' },
   { id: 'DE', name: 'Almanya', flag: '🇩🇪' },
   { id: 'GB', name: 'Ingiltere', flag: '🇬🇧' },
@@ -162,7 +168,7 @@ function PlayerPage() {
   const [error, setError] = useState(null)
   const [channels, setChannels] = useState([])
   const [currentChannel, setCurrentChannel] = useState(null)
-  const [selectedCountry, setSelectedCountry] = useState('ALL')
+  const [selectedCountry, setSelectedCountry] = useState('TR')
   const [selectedCategory, setSelectedCategory] = useState('all')
   const [searchQuery, setSearchQuery] = useState('')
   const [displayedChannels, setDisplayedChannels] = useState([])
@@ -201,25 +207,25 @@ function PlayerPage() {
         return
       }
       // Önce cache kontrolü
-      const cached = M3UCache.get(user.code)
+      const cached = M3UCache.get(user.code, selectedCountry)
       if (cached) {
-        console.log(`[M3U Cache] Using cached data (${Math.round(cached.age / 1000)}s old)`)
+        console.log(`[M3U Cache] Using ${selectedCountry} channels (${Math.round(cached.age / 1000)}s old)`)
         setChannels(cached.data)
-        if (cached.data.length > 0 && !currentChannel) {
+        if (cached.data.length > 0) {
           setCurrentChannel(cached.data[0])
         }
         setLoading(false)
         // Arka planda yenile (stale-while-revalidate pattern)
-        fetchChannels(true)
+        fetchChannels(selectedCountry, true)
       } else {
-        fetchChannels()
+        fetchChannels(selectedCountry)
       }
     }
-  }, [videoMode, user, token, user?.hasM3U, user?.code])
+  }, [videoMode, user, token, user?.hasM3U, user?.code, selectedCountry])
 
   // Live TV
   // silent = true: Arka plan yenilemesi, loading UI gösterme
-  const fetchChannels = async (silent = false) => {
+  const fetchChannels = async (countryCode = selectedCountry, silent = false) => {
     try {
       // Kullanıcinin M3U URL'sini kontrol et
       if (!(user?.hasM3U ?? user?.m3uUrl)) {
@@ -232,17 +238,20 @@ function PlayerPage() {
       
       if (!silent) setLoading(true)
 
+      const normalizedCountry = String(countryCode || 'TR').toUpperCase()
       const parsed = await fetchParsedPlaylist(user, token, {
-        cacheKey: 'live-channels:v1',
-        parser: parseLiveChannels,
-        forceRefresh: silent === false && !M3UCache.get(user.code)
+        cacheKey: `live-channels:${normalizedCountry}:v2`,
+        parser: (playlistText) => parseLiveChannelsByCountry(playlistText, normalizedCountry),
+        forceRefresh: silent === false && !M3UCache.get(user.code, normalizedCountry)
       })
 
-      M3UCache.set(user.code, parsed)
+      M3UCache.set(user.code, normalizedCountry, parsed)
 
       setChannels(parsed)
-      if (parsed.length > 0 && (!currentChannel || !silent)) {
+      if (parsed.length > 0) {
         setCurrentChannel(parsed[0])
+      } else {
+        setCurrentChannel(null)
       }
 
       if (!silent) setLoading(false)
@@ -278,7 +287,7 @@ function PlayerPage() {
       const parsed = parseLiveChannels(text)
       
       // Cache'e kaydet
-      M3UCache.set(user.code, parsed)
+      M3UCache.set(user.code, normalizedCountry, parsed)
       
       setChannels(parsed)
       if (parsed.length > 0 && (!currentChannel || !silent)) {
@@ -307,9 +316,7 @@ function PlayerPage() {
     }
     
     // Ulke filtresi
-    if (selectedCountry !== 'ALL') {
-      filtered = filtered.filter(ch => (ch.country || 'TR').toUpperCase() === selectedCountry)
-    }
+    filtered = filtered.filter(ch => (ch.country || 'TR').toUpperCase() === selectedCountry)
     
     // Kategori filtresi
     if (selectedCategory !== 'all') {
@@ -920,8 +927,8 @@ function PlayerPage() {
                     {/* Yenile Butonu */}
                     <button
                       onClick={() => {
-                        M3UCache.clear(user?.code)
-                        fetchChannels()
+                        M3UCache.clear(user?.code, selectedCountry)
+                        fetchChannels(selectedCountry)
                       }}
                       disabled={loading}
                       className="w-10 h-10 rounded-xl flex items-center justify-center transition-all hover:scale-110 disabled:opacity-50"
