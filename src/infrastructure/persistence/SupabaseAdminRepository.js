@@ -145,9 +145,10 @@ class SupabaseAdminRepository {
       const { data, error } = await this._supabase
         .from('payments')
         .update({ 
-          status: 'approved', 
-          approved_by: adminId,
-          approved_at: new Date().toISOString()
+          status: 'approved',
+          processed_by: adminId,
+          processed_at: new Date().toISOString(),
+          reject_reason: null
         })
         .eq('id', id)
         .select()
@@ -166,10 +167,10 @@ class SupabaseAdminRepository {
       const { data, error } = await this._supabase
         .from('payments')
         .update({ 
-          status: 'rejected', 
-          rejected_by: adminId,
-          rejected_at: new Date().toISOString(),
-          rejection_reason: reason
+          status: 'rejected',
+          reject_reason: reason || null,
+          processed_by: adminId,
+          processed_at: new Date().toISOString()
         })
         .eq('id', id)
         .select()

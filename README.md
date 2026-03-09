@@ -176,6 +176,7 @@ VITE_API_URL=http://api.your-domain.com/api/v1
 - [Database Setup](./DATABASE_SETUP.md) - SQL şema ve kurulum
 - [Coolify Deployment](./COOLIFY_DEPLOYMENT.md) - Production deployment
 - [Production Checklist](./PRODUCTION_CHECKLIST.md) - Go-live kontrol listesi
+- [Telegram Bot Setup](./TELEGRAM_BOT_SETUP.md) - Telegram'dan admin kontrol kurulum rehberi
 
 ## 🧪 Testing
 

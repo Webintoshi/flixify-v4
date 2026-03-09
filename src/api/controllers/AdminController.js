@@ -744,8 +744,10 @@ class AdminController {
     const hashedPassword = await bcrypt.hash(adminData.password, 10);
     
     const result = await this._adminRepository.createAdmin({
-      ...adminData,
-      password: hashedPassword
+      name: adminData.name,
+      email: adminData.email,
+      role: adminData.role || 'admin',
+      password_hash: hashedPassword
     });
     
     logger.info('Admin created', { adminId: result.id, email: adminData.email });

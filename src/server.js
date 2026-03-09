@@ -33,6 +33,7 @@ const SupabaseUserRepository = require('./infrastructure/persistence/SupabaseUse
 const SupabaseAdminRepository = require('./infrastructure/persistence/SupabaseAdminRepository');
 const InMemoryUserRepository = require('./infrastructure/persistence/InMemoryUserRepository');
 const RedisCacheService = require('./infrastructure/cache/RedisCacheService');
+const TelegramBotService = require('./infrastructure/external-services/TelegramBotService');
 
 // Use Cases
 const RegisterUser = require('./application/use-cases/RegisterUser');
@@ -188,6 +189,16 @@ async function startServer() {
   const optionalAuthMiddleware = createOptionalAuthMiddleware({ jwtSecret: jwtConfig.secret, cacheService });
   const subscriptionCheckMiddleware = createSubscriptionCheckMiddleware(userRepository);
   const rateLimiters = createRateLimiters(redisClient);
+  const telegramBotService = new TelegramBotService({
+    token: process.env.TELEGRAM_BOT_TOKEN,
+    webhookSecret: process.env.TELEGRAM_WEBHOOK_SECRET,
+    webhookUrl: process.env.TELEGRAM_WEBHOOK_URL,
+    webhookHeaderSecret: process.env.TELEGRAM_WEBHOOK_HEADER_SECRET,
+    allowedChatIds: process.env.TELEGRAM_ALLOWED_CHAT_IDS,
+    actorAdminId: process.env.TELEGRAM_BOT_ADMIN_ID,
+    userRepository,
+    adminRepository
+  });
 
   // ============================================================================
   // EXPRESS APPLICATION
@@ -274,6 +285,32 @@ async function startServer() {
   });
 
   app.use('/api/v1', routes);
+
+  app.post('/api/v1/telegram/webhook/:secret', async (req, res) => {
+    const headerSecret = req.headers['x-telegram-bot-api-secret-token'];
+    const isAuthorized = telegramBotService.isAuthorizedRequest(req.params.secret, headerSecret);
+
+    if (!isAuthorized) {
+      return res.status(401).json({ error: 'Unauthorized Telegram webhook' });
+    }
+
+    res.status(200).json({ ok: true });
+
+    try {
+      await telegramBotService.handleUpdate(req.body);
+    } catch (error) {
+      logger.error('Telegram webhook update handling failed', { error: error.message });
+    }
+  });
+
+  app.get('/api/v1/telegram/health', (_req, res) => {
+    res.json({
+      status: 'success',
+      data: {
+        enabled: telegramBotService.isEnabled()
+      }
+    });
+  });
   
   // Development routes (REMOVE IN PRODUCTION)
   if (process.env.NODE_ENV === 'development') {
@@ -302,6 +339,8 @@ async function startServer() {
 
   const PORT = process.env.PORT || 3000;
   const HOST = process.env.HOST || '0.0.0.0';
+
+  await telegramBotService.start();
 
   const server = app.listen(PORT, HOST, () => {
     logger.info(`Server running on http://${HOST}:${PORT}`, {
