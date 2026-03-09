@@ -1191,11 +1191,43 @@ class M3uController {
         throw error;
       }
 
-      const probe = this._buildPlaybackProbePayload(
-        targetUrl,
-        this._buildProbePayload(targetUrl, upstream)
-      );
+      const baseProbe = this._buildProbePayload(targetUrl, upstream);
       this._destroyResponseStream(upstream);
+
+      // Some providers omit Accept-Ranges on HEAD but still support byte-range GET.
+      if (!baseProbe.acceptRanges && baseProbe.containerType !== 'hls') {
+        try {
+          const rangeProbeResponse = await this._requestViaProviderProxy({
+            method: 'get',
+            url: targetUrl,
+            responseType: 'stream',
+            headers: {
+              ...this._buildUpstreamStreamHeaders(req),
+              Range: 'bytes=0-1'
+            },
+            validateStatus: () => true
+          });
+
+          const hasContentRange = String(rangeProbeResponse.headers['content-range'] || '')
+            .toLowerCase()
+            .startsWith('bytes');
+
+          if (rangeProbeResponse.status === 206 || hasContentRange) {
+            baseProbe.acceptRanges = true;
+            baseProbe.seekableGuess = true;
+          }
+
+          this._destroyResponseStream(rangeProbeResponse);
+        } catch (rangeProbeError) {
+          logger.warn('Range probe fallback failed', {
+            code,
+            targetUrl,
+            error: rangeProbeError.message
+          });
+        }
+      }
+
+      const probe = this._buildPlaybackProbePayload(targetUrl, baseProbe);
 
       res.json({
         status: 'success',
