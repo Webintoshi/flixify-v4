@@ -251,11 +251,11 @@ class TelegramBotService {
     }
 
     const text = String(message.text || '').trim();
-    if (!text.startsWith('/')) {
+    const parsed = this._parseCommand(text);
+    if (!parsed.command) {
       return;
     }
 
-    const parsed = this._parseCommand(text);
     try {
       await this._dispatchCommand(chatId, parsed.command, parsed.args);
     } catch (error) {
@@ -269,12 +269,21 @@ class TelegramBotService {
   }
 
   _parseCommand(text) {
-    const parts = text.split(/\s+/);
-    const rawCommand = parts.shift() || '';
+    const parts = String(text || '').trim().split(/\s+/).filter(Boolean);
+    const commandIndex = parts.findIndex((part) => part.startsWith('/'));
+
+    if (commandIndex === -1) {
+      return {
+        command: '',
+        args: []
+      };
+    }
+
+    const rawCommand = parts[commandIndex] || '';
     const command = rawCommand.split('@')[0].toLowerCase();
     return {
       command,
-      args: parts
+      args: parts.slice(commandIndex + 1)
     };
   }
 
