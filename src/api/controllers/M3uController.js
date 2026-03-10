@@ -40,6 +40,8 @@ class M3uController {
     this._providerUserAgent = process.env.PROVIDER_USER_AGENT || 'VLC/3.0.18 LibVLC/3.0.18';
     this._livePlaylistSnapshotCache = new Map();
     this._livePlaylistSnapshotTtlMs = parseInt(process.env.LIVE_PLAYLIST_SNAPSHOT_TTL_MS, 10) || 12000;
+    this._liveProxyRouteCache = new Map();
+    this._liveProxyRouteTtlMs = parseInt(process.env.LIVE_PROXY_ROUTE_TTL_MS, 10) || 10 * 60 * 1000;
     this._httpAgent = new http.Agent({
       keepAlive: true,
       keepAliveMsecs: 10000,
@@ -275,6 +277,85 @@ class M3uController {
     return true;
   }
 
+  _parsePreferredProxyIndex(value) {
+    if (value === undefined || value === null || value === '') {
+      return null;
+    }
+
+    const parsed = Number.parseInt(String(value), 10);
+    if (!Number.isInteger(parsed) || parsed < 0) {
+      return null;
+    }
+
+    return parsed;
+  }
+
+  _buildProxyCandidates(proxies = [], preferredProxyIndex = null, stickToPreferred = false) {
+    if (!Array.isArray(proxies) || proxies.length === 0) {
+      return [{ proxy: null, proxyIndex: -1 }];
+    }
+
+    const normalizedPreferred = Number.isInteger(preferredProxyIndex) && preferredProxyIndex >= 0
+      ? preferredProxyIndex
+      : null;
+
+    const indexed = proxies.map((proxy, proxyIndex) => ({ proxy, proxyIndex }));
+    if (normalizedPreferred === null || normalizedPreferred >= indexed.length) {
+      return indexed;
+    }
+
+    if (stickToPreferred) {
+      return [indexed[normalizedPreferred]];
+    }
+
+    const preferred = indexed[normalizedPreferred];
+    return [preferred, ...indexed.filter((candidate) => candidate.proxyIndex !== normalizedPreferred)];
+  }
+
+  _buildLiveProxyRouteKey(code, targetUrl) {
+    return crypto
+      .createHash('sha1')
+      .update(`${code}:${targetUrl}`)
+      .digest('hex')
+      .slice(0, 16);
+  }
+
+  _getPinnedProxyIndex(routeKey) {
+    if (!routeKey) {
+      return null;
+    }
+
+    const cached = this._liveProxyRouteCache.get(routeKey);
+    if (!cached) {
+      return null;
+    }
+
+    if (Date.now() - cached.updatedAt > this._liveProxyRouteTtlMs) {
+      this._liveProxyRouteCache.delete(routeKey);
+      return null;
+    }
+
+    return cached.proxyIndex;
+  }
+
+  _setPinnedProxyIndex(routeKey, proxyIndex) {
+    if (!routeKey || !Number.isInteger(proxyIndex) || proxyIndex < 0) {
+      return;
+    }
+
+    if (this._liveProxyRouteCache.size >= 4000) {
+      const oldestKey = this._liveProxyRouteCache.keys().next().value;
+      if (oldestKey) {
+        this._liveProxyRouteCache.delete(oldestKey);
+      }
+    }
+
+    this._liveProxyRouteCache.set(routeKey, {
+      proxyIndex,
+      updatedAt: Date.now()
+    });
+  }
+
   _getContainerType(targetUrl, contentType = '') {
     const normalizedType = String(contentType || '').toLowerCase();
     const pathname = (() => {
@@ -324,7 +405,14 @@ class M3uController {
     return line.replace(/URI="([^"]+)"/gi, (match, rawValue) => {
       try {
         const resolved = new URL(rawValue, context.baseTargetUrl).toString();
-        return `URI="${this._buildStreamProxyUrl(context.baseApiUrl, context.code, context.token, resolved)}"`;
+        return `URI="${this._buildStreamProxyUrl(
+          context.baseApiUrl,
+          context.code,
+          context.token,
+          resolved,
+          context.preferredProxyIndex,
+          context.routeKey
+        )}"`;
       } catch {
         return match;
       }
@@ -351,13 +439,68 @@ class M3uController {
             context.baseApiUrl,
             context.code,
             context.token,
-            resolved
+            resolved,
+            context.preferredProxyIndex,
+            context.routeKey
           );
         } catch {
           return line;
         }
       })
       .join('\n');
+  }
+
+  _pruneLivePlaylistWindow(content, keepLastSegments = 5) {
+    const lines = String(content || '').split(/\r?\n/);
+    const segmentPairs = [];
+
+    for (let i = 0; i < lines.length - 1; i += 1) {
+      const current = lines[i].trim();
+      const next = lines[i + 1].trim();
+
+      if (!current.toUpperCase().startsWith('#EXTINF')) {
+        continue;
+      }
+
+      if (!next || next.startsWith('#')) {
+        continue;
+      }
+
+      segmentPairs.push([i, i + 1]);
+    }
+
+    if (segmentPairs.length <= keepLastSegments) {
+      return content;
+    }
+
+    const removeCount = segmentPairs.length - keepLastSegments;
+    const removeIndexes = new Set();
+    for (let i = 0; i < removeCount; i += 1) {
+      removeIndexes.add(segmentPairs[i][0]);
+      removeIndexes.add(segmentPairs[i][1]);
+    }
+
+    const nextLines = lines
+      .map((line, index) => {
+        if (removeIndexes.has(index)) {
+          return null;
+        }
+
+        const trimmed = line.trim();
+        if (!trimmed.toUpperCase().startsWith('#EXT-X-MEDIA-SEQUENCE:')) {
+          return line;
+        }
+
+        const sequenceValue = Number.parseInt(trimmed.split(':')[1], 10);
+        if (!Number.isFinite(sequenceValue)) {
+          return line;
+        }
+
+        return `#EXT-X-MEDIA-SEQUENCE:${sequenceValue + removeCount}`;
+      })
+      .filter((line) => line !== null);
+
+    return nextLines.join('\n');
   }
 
   _buildProbePayload(targetUrl, upstream) {
@@ -634,12 +777,14 @@ class M3uController {
     }
   }
 
-  async _requestViaProviderProxy(overrides = {}, responseValidator = null) {
+  async _requestViaProviderProxy(overrides = {}, responseValidator = null, options = {}) {
+    const { preferredProxyIndex = null, stickToPreferred = false } = options;
     const proxies = this._getProxyConfigs();
-    const candidates = proxies.length ? proxies : [null];
+    const candidates = this._buildProxyCandidates(proxies, preferredProxyIndex, stickToPreferred);
     let lastError = null;
 
-    for (const proxy of candidates) {
+    for (const candidate of candidates) {
+      const proxy = candidate.proxy;
       const proxyLabel = proxy ? `${proxy.host}:${proxy.port}` : 'DIRECT';
 
       try {
@@ -654,6 +799,8 @@ class M3uController {
           }
         }
 
+        response.__providerProxyIndex = candidate.proxyIndex;
+        response.__providerProxyLabel = proxyLabel;
         return response;
       } catch (error) {
         lastError = error;
@@ -762,8 +909,17 @@ class M3uController {
     return `${req.protocol}://${req.get('host')}/api/v1`;
   }
 
-  _buildStreamProxyUrl(baseApiUrl, code, token, targetUrl) {
-    return `${baseApiUrl}/stream/${encodeURIComponent(code)}?token=${encodeURIComponent(token)}&url=${encodeURIComponent(targetUrl)}`;
+  _buildStreamProxyUrl(baseApiUrl, code, token, targetUrl, preferredProxyIndex = null, routeKey = null) {
+    const baseUrl = `${baseApiUrl}/stream/${encodeURIComponent(code)}?token=${encodeURIComponent(token)}&url=${encodeURIComponent(targetUrl)}`;
+    const withProxyHint = Number.isInteger(preferredProxyIndex) && preferredProxyIndex >= 0
+      ? `${baseUrl}&up=${preferredProxyIndex}`
+      : baseUrl;
+
+    if (routeKey) {
+      return `${withProxyHint}&rk=${encodeURIComponent(routeKey)}`;
+    }
+
+    return withProxyHint;
   }
 
   _buildVodManifestUrl(baseApiUrl, code, token, targetUrl) {
@@ -1365,6 +1521,9 @@ class M3uController {
   proxyStream = asyncHandler(async (req, res) => {
     const { code } = req.params;
     const targetUrl = req.query.url;
+    const preferredProxyIndex = this._parsePreferredProxyIndex(req.query.up);
+    const requestedRouteKey = String(req.query.rk || '').trim();
+    const inferredRouteKey = requestedRouteKey || this._buildLiveProxyRouteKey(code, targetUrl);
 
     try {
       const accessToken = this._resolveAccessToken(req);
@@ -1372,16 +1531,41 @@ class M3uController {
       await this._assertAllowedProxyTarget(code, targetUrl);
       const requestMethod = req.method === 'HEAD' ? 'head' : 'get';
       const upstreamRequestHeaders = this._buildUpstreamStreamHeaders(req);
+      const requestWithRoutePin = async (overrides, validator, fallbackPreferredProxyIndex = null) => {
+        const pinnedProxyIndex = this._getPinnedProxyIndex(inferredRouteKey);
+        const preferredIndex = pinnedProxyIndex ?? fallbackPreferredProxyIndex;
 
-      const upstream = await this._requestViaProviderProxy({
+        try {
+          return await this._requestViaProviderProxy(overrides, validator, {
+            preferredProxyIndex: preferredIndex,
+            stickToPreferred: pinnedProxyIndex !== null
+          });
+        } catch (error) {
+          if (pinnedProxyIndex === null) {
+            throw error;
+          }
+
+          // Route-locked proxy is unhealthy now; unlock once and repin on next success.
+          this._liveProxyRouteCache.delete(inferredRouteKey);
+          return this._requestViaProviderProxy(overrides, validator, {
+            preferredProxyIndex: fallbackPreferredProxyIndex
+          });
+        }
+      };
+
+      const upstream = await requestWithRoutePin({
         method: requestMethod,
         url: targetUrl,
         responseType: requestMethod === 'get' ? 'stream' : undefined,
         timeout: requestMethod === 'get' ? this._streamProxyTimeoutMs : this._upstreamTimeoutMs,
         headers: upstreamRequestHeaders,
         validateStatus: () => true
-      }, this._validateStreamResponse.bind(this));
+      }, this._validateStreamResponse.bind(this), preferredProxyIndex);
       this._validateStreamResponse(upstream);
+
+      if (Number.isInteger(upstream.__providerProxyIndex) && upstream.__providerProxyIndex >= 0) {
+        this._setPinnedProxyIndex(inferredRouteKey, upstream.__providerProxyIndex);
+      }
 
       res.status(upstream.status);
       this._setProxyMediaHeaders(res, upstream.headers, req, 'video/MP2T');
@@ -1393,19 +1577,32 @@ class M3uController {
       const upstreamContentType = upstream.headers['content-type'] || '';
       if (this._isPlaylistResponse(targetUrl, upstreamContentType)) {
         this._destroyResponseStream(upstream);
+        const playlistRouteKey = inferredRouteKey;
         const snapshotKey = this._buildLivePlaylistSnapshotKey(code, targetUrl);
+        const routePinnedProxyIndex = this._getPinnedProxyIndex(playlistRouteKey);
+        const playlistProxyIndex = routePinnedProxyIndex ?? (
+          Number.isInteger(upstream.__providerProxyIndex) && upstream.__providerProxyIndex >= 0
+            ? upstream.__providerProxyIndex
+            : preferredProxyIndex
+        );
 
         try {
-          const playlistResponse = await this._requestViaProviderProxy({
+          const playlistResponse = await requestWithRoutePin({
             method: 'get',
             url: targetUrl,
             responseType: 'text',
             timeout: this._streamProxyTimeoutMs,
             headers: this._buildUpstreamStreamHeaders(req, 'application/vnd.apple.mpegurl,*/*'),
             validateStatus: () => true
-          }, this._validateStreamResponse.bind(this));
+          }, this._validateStreamResponse.bind(this), playlistProxyIndex);
 
-          this._setLivePlaylistSnapshot(snapshotKey, playlistResponse.data);
+          const optimizedPlaylist = this._pruneLivePlaylistWindow(playlistResponse.data);
+          this._setLivePlaylistSnapshot(snapshotKey, optimizedPlaylist);
+
+          const resolvedProxyIndex = Number.isInteger(playlistResponse.__providerProxyIndex) && playlistResponse.__providerProxyIndex >= 0
+            ? playlistResponse.__providerProxyIndex
+            : playlistProxyIndex;
+          this._setPinnedProxyIndex(playlistRouteKey, resolvedProxyIndex);
 
           res.status(playlistResponse.status);
           this._setProxyMediaHeaders(
@@ -1415,11 +1612,13 @@ class M3uController {
             'application/vnd.apple.mpegurl'
           );
 
-          return res.send(this._rewriteHlsPlaylist(playlistResponse.data, {
+          return res.send(this._rewriteHlsPlaylist(optimizedPlaylist, {
             baseApiUrl: this._getBaseApiUrl(req),
             baseTargetUrl: targetUrl,
             code,
-            token: accessToken
+            token: accessToken,
+            preferredProxyIndex: resolvedProxyIndex,
+            routeKey: playlistRouteKey
           }));
         } catch (playlistError) {
           if (!this._shouldServeStalePlaylist(playlistError)) {
@@ -1448,7 +1647,9 @@ class M3uController {
               baseApiUrl: this._getBaseApiUrl(req),
               baseTargetUrl: targetUrl,
               code,
-              token: accessToken
+              token: accessToken,
+              preferredProxyIndex: playlistProxyIndex,
+              routeKey: playlistRouteKey
             }));
           }
 
