@@ -20,7 +20,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 const logger = require('../../config/logger');
 const { asyncHandler } = require('../middleware/errorHandler');
-const { normalizeProviderPlaylistUrl } = require('../../utils/providerPlaylistUrl');
+const { normalizeProviderPlaylistUrl, buildProviderPlaylistFetchCandidates } = require('../../utils/providerPlaylistUrl');
 const { normalizeCodecName, isBrowserSupportedAudioCodec, buildPlaybackDecision } = require('../../utils/playbackDecision');
 const { buildSeriesCatalog, buildMoviesCatalog } = require('../../utils/catalogBuilder');
 
@@ -37,6 +37,7 @@ class M3uController {
     this._ffprobePath = process.env.FFPROBE_PATH || 'ffprobe';
     this._upstreamTimeoutMs = parseInt(process.env.PROXY_TIMEOUT_MS, 10) || 30000;
     this._streamProxyTimeoutMs = parseInt(process.env.STREAM_PROXY_TIMEOUT_MS, 10) || 120000;
+    this._providerUserAgent = process.env.PROVIDER_USER_AGENT || 'VLC/3.0.18 LibVLC/3.0.18';
     this._httpAgent = new http.Agent({
       keepAlive: true,
       keepAliveMsecs: 10000,
@@ -150,7 +151,7 @@ class M3uController {
     const config = {
       timeout: this._upstreamTimeoutMs,
       headers: {
-        'User-Agent': 'Flixify-V4-Proxy/1.0',
+        'User-Agent': this._providerUserAgent,
         'Accept': '*/*'
       },
       httpAgent: this._httpAgent,
@@ -179,8 +180,13 @@ class M3uController {
   }
 
   _buildUpstreamStreamHeaders(req, fallbackAccept = '*/*') {
+    const incomingUserAgent = String(req.headers['user-agent'] || '').trim();
+    const userAgent = incomingUserAgent && !/mozilla\//i.test(incomingUserAgent)
+      ? incomingUserAgent
+      : this._providerUserAgent;
+
     const headers = {
-      'User-Agent': req.headers['user-agent'] || 'Flixify-V4-Proxy/1.0',
+      'User-Agent': userAgent,
       'Accept': req.headers.accept || fallbackAccept
     };
 
@@ -575,8 +581,7 @@ class M3uController {
   }
 
   async _fetchM3u(url) {
-    const normalizedUrl = this._normalizeProviderPlaylistUrl(url);
-    const candidates = normalizedUrl === url ? [url] : [normalizedUrl, url];
+    const candidates = buildProviderPlaylistFetchCandidates(url, { enforceHlsOutput: true });
     let lastStatus = null;
     let lastError = null;
 
