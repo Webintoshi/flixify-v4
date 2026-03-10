@@ -390,6 +390,7 @@ class AdminController {
 
     // Invalidate cache
     await this._cacheService.invalidateUser(code);
+    await this._invalidateM3uCaches(code);
 
     logger.info('User M3U updated by admin', { 
       adminCode: req.user?.code?.substring(0, 4) + '****',

@@ -728,6 +728,10 @@ class TelegramBotService {
 
     if (this._cacheService) {
       await this._cacheService.invalidateUser(codeVo.toString());
+      await this._cacheService.delete(`m3u:content:${codeVo.toString()}`);
+      await this._cacheService.delete(`m3u:allowed-origins:${codeVo.toString()}`);
+      await this._cacheService.delete(`catalog:series:${codeVo.toString()}:v1`);
+      await this._cacheService.delete(`catalog:movies:${codeVo.toString()}:v1`);
     }
 
     this._clearPendingM3uPlan(chatId, codeVo.toString());
