@@ -253,6 +253,28 @@ class M3uController {
     return snapshot.content;
   }
 
+  _deleteLivePlaylistSnapshot(key) {
+    if (!key) {
+      return;
+    }
+
+    this._livePlaylistSnapshotCache.delete(key);
+  }
+
+  _extractStatusCode(error) {
+    const statusCode = Number(error?.statusCode || error?.response?.status || 0);
+    return Number.isFinite(statusCode) && statusCode > 0 ? statusCode : null;
+  }
+
+  _shouldServeStalePlaylist(error) {
+    const statusCode = this._extractStatusCode(error);
+    if (statusCode && statusCode >= 400 && statusCode < 500) {
+      return false;
+    }
+
+    return true;
+  }
+
   _getContainerType(targetUrl, contentType = '') {
     const normalizedType = String(contentType || '').toLowerCase();
     const pathname = (() => {
@@ -1381,8 +1403,7 @@ class M3uController {
             timeout: this._streamProxyTimeoutMs,
             headers: this._buildUpstreamStreamHeaders(req, 'application/vnd.apple.mpegurl,*/*'),
             validateStatus: () => true
-          });
-          this._validateStreamResponse(playlistResponse);
+          }, this._validateStreamResponse.bind(this));
 
           this._setLivePlaylistSnapshot(snapshotKey, playlistResponse.data);
 
@@ -1401,6 +1422,11 @@ class M3uController {
             token: accessToken
           }));
         } catch (playlistError) {
+          if (!this._shouldServeStalePlaylist(playlistError)) {
+            this._deleteLivePlaylistSnapshot(snapshotKey);
+            throw playlistError;
+          }
+
           const stalePlaylist = this._getLivePlaylistSnapshot(snapshotKey);
           if (stalePlaylist) {
             logger.warn('Serving stale HLS playlist snapshot after upstream failure', {

@@ -134,6 +134,56 @@ function inferCountry(rawGroup, title, tvgCountry) {
   return 'TR'
 }
 
+function normalizeLiveChannelName(name = '') {
+  return String(name || '')
+    .toLowerCase()
+    .replace(/[|•·]/g, ' ')
+    .replace(/\b(tr|turkiye|türkiye)\b/g, ' ')
+    .replace(/\b(ultra|uhd|fhd|full\s*hd|hd|sd|4k|8k|raw|hevc|h\.?265|h\.?264)\b/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function getStreamTypeScore(sourceType = '') {
+  if (sourceType === 'hls') return 30
+  if (sourceType === 'mpegts') return 20
+  return 10
+}
+
+function getQualityScore(name = '') {
+  const lowered = String(name || '').toLowerCase()
+  if (/\bfhd\b|full\s*hd/.test(lowered)) return 16
+  if (/\bhd\b/.test(lowered)) return 14
+  if (/\bsd\b/.test(lowered)) return 12
+  if (/\b4k\b|\buhd\b/.test(lowered)) return 10
+  if (/\bhevc\b|h\.?265/.test(lowered)) return 7
+  if (/\braw\b/.test(lowered)) return 5
+  return 8
+}
+
+function collapseLiveVariants(channels = []) {
+  const grouped = new Map()
+
+  channels.forEach((channel, index) => {
+    const baseName = normalizeLiveChannelName(channel?.name)
+    const key = `${channel?.country || 'TR'}:${channel?.group || ''}:${baseName || channel?.name || index}`
+    const candidateScore = getStreamTypeScore(channel?.sourceType) + getQualityScore(channel?.name)
+    const existing = grouped.get(key)
+
+    if (!existing || candidateScore > existing.score) {
+      grouped.set(key, {
+        index,
+        score: candidateScore,
+        channel
+      })
+    }
+  })
+
+  return Array.from(grouped.values())
+    .sort((left, right) => left.index - right.index)
+    .map((item) => item.channel)
+}
+
 export function parsePlaylistEntries(content) {
   const entries = []
   let current = null
@@ -162,7 +212,7 @@ export function parsePlaylistEntries(content) {
 }
 
 export function parseLiveChannels(content) {
-  return parsePlaylistEntries(content)
+  const channels = parsePlaylistEntries(content)
     .filter((entry) => isLikelyLiveEntry(entry))
     .map((entry) => ({
       name: entry.title || entry.tvgName || 'Bilinmiyor',
@@ -173,12 +223,14 @@ export function parseLiveChannels(content) {
       originalUrl: entry.originalUrl,
       sourceType: inferStreamContainer(entry.originalUrl)
     }))
+
+  return collapseLiveVariants(channels)
 }
 
 export function parseLiveChannelsByCountry(content, country = 'TR') {
   const normalizedCountry = String(country || 'TR').toUpperCase()
 
-  return parsePlaylistEntries(content)
+  const channels = parsePlaylistEntries(content)
     .filter((entry) => isLikelyLiveEntry(entry))
     .map((entry) => ({
       name: entry.title || entry.tvgName || 'Bilinmiyor',
@@ -190,6 +242,8 @@ export function parseLiveChannelsByCountry(content, country = 'TR') {
       sourceType: inferStreamContainer(entry.originalUrl)
     }))
     .filter((channel) => channel.country === normalizedCountry)
+
+  return collapseLiveVariants(channels)
 }
 
 export function parseMoviesFromPlaylist(content) {

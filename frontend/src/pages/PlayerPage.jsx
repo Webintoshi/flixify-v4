@@ -129,105 +129,6 @@ const CATEGORIES = [
 ]
 
 
-function buildTsVariantUrl(value) {
-  const source = String(value || '').trim()
-  if (!source) {
-    return ''
-  }
-
-  const applyTsRules = (target) => {
-    let next = String(target || '')
-    if (!next) {
-      return ''
-    }
-
-    next = next.replace(/output=hls/gi, 'output=ts')
-    next = next.replace(/\.m3u8(\?|$)/i, '.ts$1')
-    return next
-  }
-
-  try {
-    const parsed = new URL(source)
-    const nestedTarget = parsed.searchParams.get('url')
-
-    if (nestedTarget) {
-      let decodedTarget = nestedTarget
-      try {
-        decodedTarget = decodeURIComponent(nestedTarget)
-      } catch {
-        decodedTarget = nestedTarget
-      }
-      const tsNestedTarget = applyTsRules(decodedTarget)
-      if (tsNestedTarget && tsNestedTarget !== decodedTarget) {
-        parsed.searchParams.set('url', tsNestedTarget)
-        return parsed.toString()
-      }
-    }
-  } catch {
-    // ignore URL parser errors and continue with plain string replacement
-  }
-
-  const tsSource = applyTsRules(source)
-  return tsSource !== source ? tsSource : ''
-}
-
-function findTsFallbackChannel(currentChannel, allChannels = []) {
-  if (!currentChannel) {
-    return null
-  }
-
-  const currentUrl = String(currentChannel.url || '')
-  const seen = new Set([currentUrl])
-  const candidates = []
-
-  const pushCandidate = (candidate) => {
-    if (!candidate?.url) {
-      return
-    }
-
-    const normalizedUrl = String(candidate.url)
-    if (!normalizedUrl || seen.has(normalizedUrl)) {
-      return
-    }
-
-    seen.add(normalizedUrl)
-    candidates.push(candidate)
-  }
-
-  const derivedCurrentUrl = buildTsVariantUrl(currentChannel.url)
-  if (derivedCurrentUrl) {
-    pushCandidate({
-      ...currentChannel,
-      url: derivedCurrentUrl,
-      originalUrl: derivedCurrentUrl,
-      sourceType: inferStreamContainer(derivedCurrentUrl)
-    })
-  }
-
-  const derivedOriginalUrl = buildTsVariantUrl(currentChannel.originalUrl)
-  if (derivedOriginalUrl) {
-    pushCandidate({
-      ...currentChannel,
-      url: derivedOriginalUrl,
-      originalUrl: derivedOriginalUrl,
-      sourceType: inferStreamContainer(derivedOriginalUrl)
-    })
-  }
-
-  allChannels.forEach((channel) => {
-    const sameName = channel?.name && channel.name === currentChannel.name
-    const sourceType = inferStreamContainer(channel?.originalUrl || channel?.url)
-
-    if (sameName && sourceType !== 'hls') {
-      pushCandidate({
-        ...channel,
-        sourceType: channel.sourceType || sourceType
-      })
-    }
-  })
-
-  return candidates[0] || null
-}
 function PlayerPage() {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
@@ -237,7 +138,6 @@ function PlayerPage() {
   const observerRef = useRef(null)
   const liveStartupTimeoutRef = useRef(null)
   const liveRetryRef = useRef({ key: '', count: 0 })
-  const liveFallbackRef = useRef(new Set())
   
   const type = searchParams.get('type')
   const videoUrl = searchParams.get('url')
@@ -281,10 +181,6 @@ function PlayerPage() {
 
   // Debounce search query - 300ms gecikme
   const debouncedSearchQuery = useDebounce(searchQuery, 300)
-
-  useEffect(() => {
-    liveFallbackRef.current = new Set()
-  }, [selectedCountry, user?.code])
 
   // Determine video mode
   useEffect(() => {
@@ -346,7 +242,7 @@ function PlayerPage() {
 
       const normalizedCountry = String(countryCode || 'TR').toUpperCase()
       const parsed = await fetchParsedPlaylist(user, token, {
-        cacheKey: `live-channels:${normalizedCountry}:v2`,
+        cacheKey: `live-channels:${normalizedCountry}:v3`,
         parser: (playlistText) => parseLiveChannelsByCountry(playlistText, normalizedCountry),
         forceRefresh: silent === false && !M3UCache.get(user.code, normalizedCountry)
       })
@@ -581,7 +477,6 @@ function PlayerPage() {
     const video = videoRef.current
     const streamUrl = currentChannel.url
     const streamType = currentChannel.sourceType || inferStreamContainer(currentChannel.originalUrl || currentChannel.url)
-    const primaryStreamKey = `${currentChannel?.name || ''}|${currentChannel?.originalUrl || currentChannel?.url || ''}`
     const streamKey = `${currentChannel?.name || ''}|${currentChannel?.url || ''}`
     let retryTimer = null
 
@@ -599,39 +494,6 @@ function PlayerPage() {
     const finishLoading = () => {
       clearStartupTimeout()
       setLoading(false)
-    }
-
-    const activateTsFallback = (reason) => {
-      const fallbackKey = `${primaryStreamKey}|ts`
-      if (liveFallbackRef.current.has(fallbackKey)) {
-        return false
-      }
-
-      const fallbackChannel = findTsFallbackChannel(currentChannel, channels)
-      if (!fallbackChannel) {
-        return false
-      }
-
-      liveFallbackRef.current.add(fallbackKey)
-      console.warn('[Player] Switching to TS fallback', {
-        channel: currentChannel?.name,
-        reason,
-        fromUrl: currentChannel?.url,
-        toUrl: fallbackChannel?.url
-      })
-
-      clearStartupTimeout()
-      destroyLivePlayers()
-      setError(null)
-      setLoading(true)
-      setCurrentChannel({
-        ...fallbackChannel,
-        fallbackFrom: currentChannel.url,
-        fallbackReason: reason,
-        sourceType: fallbackChannel.sourceType || inferStreamContainer(fallbackChannel.originalUrl || fallbackChannel.url)
-      })
-
-      return true
     }
 
     const retryCurrentChannel = (reason) => {
@@ -662,10 +524,6 @@ function PlayerPage() {
     }
 
     const failHlsPlayback = (reason, message = 'HLS kanal yuklenemedi') => {
-      if (activateTsFallback(reason)) {
-        return
-      }
-
       if (retryCurrentChannel(reason)) {
         return
       }
