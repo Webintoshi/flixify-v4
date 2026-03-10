@@ -222,6 +222,13 @@ class M3uController {
       return;
     }
 
+    if (this._livePlaylistSnapshotCache.size >= 1500) {
+      const oldestKey = this._livePlaylistSnapshotCache.keys().next().value;
+      if (oldestKey) {
+        this._livePlaylistSnapshotCache.delete(oldestKey);
+      }
+    }
+
     this._livePlaylistSnapshotCache.set(key, {
       content,
       createdAt: Date.now()
