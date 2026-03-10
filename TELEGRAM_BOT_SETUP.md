@@ -57,12 +57,16 @@ TELEGRAM_WEBHOOK_HEADER_SECRET=opsiyonel_ek_secret
 TELEGRAM_ALLOWED_CHAT_IDS=123456789,987654321
 TELEGRAM_NOTIFICATION_CHAT_IDS=-1001234567890
 TELEGRAM_BOT_ADMIN_ID=admin_uuid_buraya
+TELEGRAM_EXPIRY_ALERT_DAYS=3
+TELEGRAM_EXPIRY_ALERT_INTERVAL_MS=3600000
 ```
 
 Notlar:
 - `TELEGRAM_ALLOWED_CHAT_IDS`: bota komut verebilecek chat id listesi (virgulle ayirin).
 - `TELEGRAM_NOTIFICATION_CHAT_IDS`: bildirim gidecek chat id listesi (grup id'si genelde `-100` ile baslar).
 - `TELEGRAM_BOT_ADMIN_ID`: odeme onay/red icin kullanilan admin UUID.
+- `TELEGRAM_EXPIRY_ALERT_DAYS`: bitime kalan gun alarmi (ornek: `3` veya `7,3,1`).
+- `TELEGRAM_EXPIRY_ALERT_INTERVAL_MS`: arka plan kontrol periyodu (ms), varsayilan `3600000` (1 saat).
 - `TELEGRAM_WEBHOOK_URL`: HTTPS olmalidir.
 
 ## 5) Servisi baslat / yeniden deploy et

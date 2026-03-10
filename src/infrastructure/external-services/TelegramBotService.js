@@ -76,6 +76,27 @@ function parsePositiveInt(value, fieldName) {
   return parsed;
 }
 
+function parseExpiryAlertDays(value) {
+  const raw = String(value || '3')
+    .split(',')
+    .map((entry) => Number.parseInt(entry.trim(), 10))
+    .filter((entry) => Number.isFinite(entry) && entry > 0);
+
+  if (raw.length === 0) {
+    return [3];
+  }
+
+  return Array.from(new Set(raw)).sort((a, b) => a - b);
+}
+
+function normalizeIntervalMs(value) {
+  const parsed = Number.parseInt(String(value || '').trim(), 10);
+  if (!Number.isFinite(parsed) || parsed < 5 * 60 * 1000) {
+    return 60 * 60 * 1000;
+  }
+  return parsed;
+}
+
 const M3U_MONTH_OPTIONS = {
   1: 30,
   3: 90,
@@ -94,7 +115,9 @@ class TelegramBotService {
     actorAdminId,
     userRepository,
     adminRepository,
-    cacheService = null
+    cacheService = null,
+    expiryAlertDays = '3',
+    expiryAlertIntervalMs = null
   }) {
     this._token = token;
     this._webhookSecret = webhookSecret;
@@ -107,6 +130,10 @@ class TelegramBotService {
     this._adminRepository = adminRepository;
     this._cacheService = cacheService;
     this._pendingM3uPlanByChat = new Map();
+    this._expiryAlertDays = parseExpiryAlertDays(expiryAlertDays);
+    this._expiryAlertIntervalMs = normalizeIntervalMs(expiryAlertIntervalMs);
+    this._expiryAlertTimer = null;
+    this._localAlertDedup = new Map();
   }
 
   isEnabled() {
@@ -162,6 +189,8 @@ class TelegramBotService {
         error: error.message
       });
     }
+
+    this._startExpiryAlertMonitor();
   }
 
   async notifyNewRegistration({
@@ -808,15 +837,163 @@ class TelegramBotService {
   }
 
   async _broadcastMessage(chatIds, text, options = {}) {
+    let deliveredCount = 0;
     for (const chatId of chatIds) {
       try {
         await this._sendMessage(chatId, text, options);
+        deliveredCount++;
       } catch (error) {
         logger.error('Telegram notification send failed', {
           chatId,
           error: error.message
         });
       }
+    }
+
+    return deliveredCount;
+  }
+
+  _startExpiryAlertMonitor() {
+    if (!this._token || this._expiryAlertTimer) {
+      return;
+    }
+
+    const run = async () => {
+      try {
+        await this._checkExpiringUsersAndNotify();
+      } catch (error) {
+        logger.error('Telegram expiry monitor failed', { error: error.message });
+      }
+    };
+
+    run();
+    this._expiryAlertTimer = setInterval(run, this._expiryAlertIntervalMs);
+    if (typeof this._expiryAlertTimer.unref === 'function') {
+      this._expiryAlertTimer.unref();
+    }
+
+    logger.info('Telegram expiry alert monitor started', {
+      days: this._expiryAlertDays,
+      intervalMs: this._expiryAlertIntervalMs
+    });
+  }
+
+  async _checkExpiringUsersAndNotify() {
+    const targetChats = this._getNotificationChatIds();
+    if (targetChats.length === 0) {
+      return;
+    }
+
+    const activeUsers = await this._userRepository.findByStatus('active');
+    if (!Array.isArray(activeUsers) || activeUsers.length === 0) {
+      return;
+    }
+
+    const nowMs = Date.now();
+    const oneDayMs = 24 * 60 * 60 * 1000;
+    let sentCount = 0;
+
+    for (const user of activeUsers) {
+      if (!user?.m3uUrl || !user?.expiresAt) {
+        continue;
+      }
+
+      const expiresAt = new Date(user.expiresAt);
+      if (Number.isNaN(expiresAt.getTime())) {
+        continue;
+      }
+
+      const diffMs = expiresAt.getTime() - nowMs;
+      if (diffMs <= 0) {
+        continue;
+      }
+
+      const daysRemaining = Math.ceil(diffMs / oneDayMs);
+      if (!this._expiryAlertDays.includes(daysRemaining)) {
+        continue;
+      }
+
+      const code = user.code.toString();
+      const dedupKey = `expiry:${code}:${daysRemaining}:${expiresAt.toISOString().slice(0, 10)}`;
+      const alreadySent = await this._hasSentExpiryAlert(dedupKey);
+      if (alreadySent) {
+        continue;
+      }
+
+      const text = [
+        '⏰ <b>Paket Bitis Uyarisi</b>',
+        '',
+        `👤 <b>Kullanici Kodu:</b> <code>${escapeHtml(code)}</code>`,
+        `🗓️ <b>Bitis Tarihi:</b> ${escapeHtml(formatDateTr(expiresAt))}`,
+        `⚠️ <b>Kalan Sure:</b> ${daysRemaining} gun`
+      ].join('\n');
+
+      const delivered = await this._broadcastMessage(targetChats, text, {
+        parseMode: 'HTML',
+        replyMarkup: {
+          inline_keyboard: [
+            [
+              { text: '📋 Kodu Kopyala', copy_text: { text: code } }
+            ],
+            [
+              { text: '👤 Kullanici Detayi', callback_data: `user:${code}` },
+              {
+                text: '⏳ Sure Uzat',
+                switch_inline_query_current_chat: `/extend ${code} `
+              }
+            ]
+          ]
+        }
+      });
+
+      if (delivered > 0) {
+        await this._markExpiryAlertSent(dedupKey, 48 * 60 * 60);
+        sentCount++;
+      }
+    }
+
+    if (sentCount > 0) {
+      logger.info('Telegram expiry alerts sent', { count: sentCount });
+    }
+  }
+
+  async _hasSentExpiryAlert(key) {
+    if (this._cacheService) {
+      try {
+        const exists = await this._cacheService.exists(`telegram-alert:${key}`);
+        if (exists) {
+          return true;
+        }
+      } catch (error) {
+        logger.warn('Failed to read expiry alert key from cache', { error: error.message, key });
+      }
+    }
+
+    const localExpiresAt = this._localAlertDedup.get(key);
+    if (!localExpiresAt) {
+      return false;
+    }
+
+    if (localExpiresAt < Date.now()) {
+      this._localAlertDedup.delete(key);
+      return false;
+    }
+
+    return true;
+  }
+
+  async _markExpiryAlertSent(key, ttlSeconds) {
+    const expiresAtMs = Date.now() + (ttlSeconds * 1000);
+    this._localAlertDedup.set(key, expiresAtMs);
+
+    if (!this._cacheService) {
+      return;
+    }
+
+    try {
+      await this._cacheService.set(`telegram-alert:${key}`, { sent: true }, ttlSeconds);
+    } catch (error) {
+      logger.warn('Failed to write expiry alert key to cache', { error: error.message, key });
     }
   }
 

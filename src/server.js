@@ -187,7 +187,9 @@ async function startServer() {
     actorAdminId: process.env.TELEGRAM_BOT_ADMIN_ID,
     userRepository,
     adminRepository,
-    cacheService
+    cacheService,
+    expiryAlertDays: process.env.TELEGRAM_EXPIRY_ALERT_DAYS,
+    expiryAlertIntervalMs: process.env.TELEGRAM_EXPIRY_ALERT_INTERVAL_MS
   });
 
   // Controllers
