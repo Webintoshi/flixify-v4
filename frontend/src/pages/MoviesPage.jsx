@@ -91,6 +91,39 @@ const normalizeMovieGenreId = (genre) => {
   return value
 }
 
+const getMovieTurkishPriority = (movie) => {
+  const title = toAsciiLower(movie?.title)
+  const genre = toAsciiLower(movie?.genre)
+  const text = `${title} ${genre}`
+
+  let score = 0
+
+  if (genre.includes('yerli')) {
+    score += 6
+  }
+
+  if (genre.includes('suc') || genre.includes('polisiye')) {
+    score += 2
+  }
+
+  if (/\b(tr|turk|turkiye|turkce|dublaj)\b/.test(text)) {
+    score += 3
+  }
+
+  return score
+}
+
+const sortMoviesWithTurkishPriority = (items = []) => {
+  return [...items].sort((left, right) => {
+    const scoreDiff = getMovieTurkishPriority(right) - getMovieTurkishPriority(left)
+    if (scoreDiff !== 0) {
+      return scoreDiff
+    }
+
+    return String(left?.title || '').localeCompare(String(right?.title || ''), 'tr')
+  })
+}
+
 // Movie Card - Modern
 const MovieCard = ({ movie, onClick, onPosterStatus }) => {
   const [isHovered, setIsHovered] = useState(false)
@@ -427,16 +460,18 @@ function MoviesPage() {
         ...movie,
         genre: normalizeMovieGenreId(movie.genre)
       }))
+      const sortedMovies = sortMoviesWithTurkishPriority(normalizedMovies)
 
-      if (normalizedMovies.length === 0) {
+      if (sortedMovies.length === 0) {
         throw new Error('Katalogda gosterilecek film kaydi bulunamadi.')
       }
 
-      setMovies(normalizedMovies)
+      setMovies(sortedMovies)
 
-      const featuredMovie = normalizedMovies.find(m => m.genre.includes('Netflix')) || 
-                           normalizedMovies.find(m => m.genre.includes('4K')) || 
-                           normalizedMovies[0]
+      const featuredMovie = sortedMovies.find((item) => getMovieTurkishPriority(item) > 0) ||
+                           sortedMovies.find(m => m.genre.includes('Netflix')) || 
+                           sortedMovies.find(m => m.genre.includes('4K')) || 
+                           sortedMovies[0]
       setHeroMovie(featuredMovie)
       resetPosterTracking()
 
@@ -625,6 +660,7 @@ function MoviesPage() {
         {/* Movie Rows */}
         {activeGenre === 'all' && !searchQuery && (
           <>
+            <MovieRow title="Yerli Filmler" movies={moviesByGenre['Yerli Filmler'] || []} onMovieClick={handleMovieClick} onPosterStatus={handlePosterStatus} />
             <MovieRow title="Netflix Yapimlari" movies={moviesByGenre['Netflix'] || []} onMovieClick={handleMovieClick} onPosterStatus={handlePosterStatus} />
             <MovieRow title="4K / UHD Filmler" movies={moviesByGenre['4K / UHD Filmler'] || []} onMovieClick={handleMovieClick} onPosterStatus={handlePosterStatus} />
             <MovieRow title="Dram & Romantik" movies={moviesByGenre['Dram & Romantik'] || []} onMovieClick={handleMovieClick} onPosterStatus={handlePosterStatus} />
@@ -632,7 +668,6 @@ function MoviesPage() {
             <MovieRow title="Komedi" movies={moviesByGenre['Komedi'] || []} onMovieClick={handleMovieClick} onPosterStatus={handlePosterStatus} />
             <MovieRow title="Korku & Gerilim" movies={moviesByGenre['Korku & Gerilim'] || []} onMovieClick={handleMovieClick} onPosterStatus={handlePosterStatus} />
             <MovieRow title="Animasyon" movies={moviesByGenre['Animasyon & Cizgi Film'] || []} onMovieClick={handleMovieClick} onPosterStatus={handlePosterStatus} />
-            <MovieRow title="Yerli Filmler" movies={moviesByGenre['Yerli Filmler'] || []} onMovieClick={handleMovieClick} onPosterStatus={handlePosterStatus} />
           </>
         )}
         

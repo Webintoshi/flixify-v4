@@ -460,8 +460,8 @@ class M3uController {
     const hasAudio = typeof mediaAnalysis?.hasAudio === 'boolean'
       ? mediaAnalysis.hasAudio
       : Boolean(audioCodec);
-    const forceVideoTranscode = String(process.env.VOD_REMUX_FORCE_VIDEO_TRANSCODE || 'true')
-      .toLowerCase() !== 'false';
+    const forceVideoTranscode = String(process.env.VOD_REMUX_FORCE_VIDEO_TRANSCODE || 'false')
+      .toLowerCase() === 'true';
 
     return {
       videoCodec,

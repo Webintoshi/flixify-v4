@@ -15,7 +15,7 @@ const SERIES_PLATFORM_ALIASES = {
 }
 
 const EPISODE_PATTERN = /\bS(\d{1,2})E(\d{1,3})\b/i
-const LEADING_REGION_PATTERN = /^[A-Z0-9]{2,4}\s*[•|:-]\s*/
+const LEADING_REGION_PATTERN = /^[A-Z0-9]{2,4}\s*[|:-]\s*/
 const TRAILING_STREAM_LABEL_PATTERN = /\s+(24\/7|FHD|HD|4K|UHD)$/i
 
 function parseExtInfLine(line) {

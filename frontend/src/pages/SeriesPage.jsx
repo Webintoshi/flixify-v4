@@ -129,6 +129,39 @@ const normalizeSeriesGenreId = (genre) => {
   return value;
 };
 
+const getSeriesTurkishPriority = (series) => {
+  const name = toAsciiLower(series?.name);
+  const genre = toAsciiLower(series?.genre);
+  const text = `${name} ${genre}`;
+
+  let score = 0;
+
+  if (genre.includes('gunluk') || genre.includes('gain') || genre.includes('exxen')) {
+    score += 5;
+  }
+
+  if (genre.includes('yerli')) {
+    score += 4;
+  }
+
+  if (/\b(tr|turk|turkiye|turkce)\b/.test(text)) {
+    score += 3;
+  }
+
+  return score;
+};
+
+const sortSeriesWithTurkishPriority = (items = []) => {
+  return [...items].sort((left, right) => {
+    const scoreDiff = getSeriesTurkishPriority(right) - getSeriesTurkishPriority(left);
+    if (scoreDiff !== 0) {
+      return scoreDiff;
+    }
+
+    return String(left?.name || '').localeCompare(String(right?.name || ''), 'tr');
+  });
+};
+
 const resolveSeriesPrimaryPoster = (series) => {
   const primary = collectSeriesPosterCandidates(series)[0];
   return primary || getSeriesDefaultPoster(series?.genre);
@@ -575,15 +608,17 @@ function SeriesPage() {
         ...item,
         genre: normalizeSeriesGenreId(item.genre)
       }));
+      const sortedSeries = sortSeriesWithTurkishPriority(normalizedSeries);
 
-      if (normalizedSeries.length === 0) {
+      if (sortedSeries.length === 0) {
         throw new Error('Katalogda gosterilecek dizi kaydi bulunamadi.');
       }
 
-      setSeries(normalizedSeries);
+      setSeries(sortedSeries);
 
-      const netflixSeries = normalizedSeries.find((item) => item.genre === 'Netflix Dizileri');
-      setHeroSeries(netflixSeries || normalizedSeries[0]);
+      const prioritySeries = sortedSeries.find((item) => getSeriesTurkishPriority(item) > 0);
+      const netflixSeries = sortedSeries.find((item) => item.genre === 'Netflix Dizileri');
+      setHeroSeries(prioritySeries || netflixSeries || sortedSeries[0]);
       resetPosterTracking();
       setLoading(false);
     } catch (err) {
@@ -795,12 +830,14 @@ function SeriesPage() {
         {/* Series Rows */}
         {activeCategory === 'all' && !searchQuery && (
           <>
+            <SeriesRow title="Gunluk Diziler" seriesList={seriesByCategory['Gunluk Diziler'] || []} onSeriesClick={setSelectedSeries} onPosterStatus={handlePosterStatus} />
+            <SeriesRow title="Exxen Dizileri" seriesList={seriesByCategory['Exxen Dizileri'] || []} onSeriesClick={setSelectedSeries} onPosterStatus={handlePosterStatus} />
+            <SeriesRow title="GAIN Dizileri" seriesList={seriesByCategory['GAIN Dizileri'] || []} onSeriesClick={setSelectedSeries} onPosterStatus={handlePosterStatus} />
             <SeriesRow title="Netflix Dizileri" seriesList={seriesByCategory['Netflix Dizileri'] || []} onSeriesClick={setSelectedSeries} onPosterStatus={handlePosterStatus} />
             <SeriesRow title="Disney+ Dizileri" seriesList={seriesByCategory['Disney+ Dizileri'] || []} onSeriesClick={setSelectedSeries} onPosterStatus={handlePosterStatus} />
             <SeriesRow title="Amazon Prime" seriesList={seriesByCategory['Amazon Prime Dizileri'] || []} onSeriesClick={setSelectedSeries} onPosterStatus={handlePosterStatus} />
             <SeriesRow title="BluTV (HBO)" seriesList={seriesByCategory['BluTV Dizileri (HBO)'] || []} onSeriesClick={setSelectedSeries} onPosterStatus={handlePosterStatus} />
             <SeriesRow title="Anime" seriesList={seriesByCategory['Anime'] || []} onSeriesClick={setSelectedSeries} onPosterStatus={handlePosterStatus} />
-            <SeriesRow title="Gunluk Diziler" seriesList={seriesByCategory['Gunluk Diziler'] || []} onSeriesClick={setSelectedSeries} onPosterStatus={handlePosterStatus} />
           </>
         )}
         

@@ -104,23 +104,46 @@ export default function VodPlayer({
 
   const remuxManifestUrl = useMemo(() => buildRemuxManifestUrl(videoUrl), [videoUrl])
 
-  const initialPlaybackStrategy = useMemo(() => {
-    if (probe?.playbackStrategy) {
-      return probe.playbackStrategy
-    }
-
-    return getFallbackStrategy(videoUrl)
-  }, [probe?.playbackStrategy, videoUrl])
-
   useEffect(() => {
     if (!videoUrl) {
       return
     }
 
-    const shouldUseRemux = initialPlaybackStrategy === 'remux-hls'
-    setUseRemuxFallback(shouldUseRemux)
-    setRuntimeStrategy(shouldUseRemux ? 'hls' : initialPlaybackStrategy)
-  }, [initialPlaybackStrategy, videoUrl])
+    // Fast-start policy: begin playback immediately with URL-inferred strategy.
+    playbackStartedRef.current = false
+    setUseRemuxFallback(false)
+    setRuntimeStrategy(getFallbackStrategy(videoUrl))
+  }, [videoUrl])
+
+  useEffect(() => {
+    if (!videoUrl || !probe?.playbackStrategy) {
+      return
+    }
+
+    if (playbackStartedRef.current) {
+      return
+    }
+
+    // "source-not-seekable" is handled as runtime fallback to keep startup fast.
+    const wantsImmediateRemux =
+      probe.playbackStrategy === 'remux-hls' &&
+      probe.remuxReason !== 'source-not-seekable'
+
+    if (wantsImmediateRemux) {
+      setUseRemuxFallback(true)
+      setRuntimeStrategy('hls')
+      return
+    }
+
+    if (probe.playbackStrategy === 'hls') {
+      setUseRemuxFallback(false)
+      setRuntimeStrategy('hls')
+      return
+    }
+
+    setUseRemuxFallback(false)
+    setRuntimeStrategy('native')
+  }, [probe?.playbackStrategy, probe?.remuxReason, videoUrl])
 
   const playbackSourceUrl = useMemo(() => {
     if (!videoUrl) {
@@ -395,7 +418,7 @@ export default function VodPlayer({
   }, [clearControlsTimeout, clearStartupTimeout])
 
   useEffect(() => {
-    if (!playbackSourceUrl || probeLoading || !videoRef.current) {
+    if (!playbackSourceUrl || !videoRef.current) {
       return undefined
     }
 
@@ -559,7 +582,6 @@ export default function VodPlayer({
     destroyPlaybackEngine,
     activateRemuxFallback,
     playbackSourceUrl,
-    probeLoading,
     runtimeStrategy,
     syncTimeline,
     useRemuxFallback,
@@ -591,7 +613,7 @@ export default function VodPlayer({
       }}
     >
       <div className="relative w-full h-full">
-        {(loading || probeLoading) && (
+        {loading && (
           <div className="absolute inset-0 flex items-center justify-center bg-black z-20">
             <div className="w-16 h-16 border-4 border-t-transparent rounded-full animate-spin" style={{ borderColor: PRIMARY }} />
           </div>
