@@ -38,6 +38,8 @@ class M3uController {
     this._upstreamTimeoutMs = parseInt(process.env.PROXY_TIMEOUT_MS, 10) || 30000;
     this._streamProxyTimeoutMs = parseInt(process.env.STREAM_PROXY_TIMEOUT_MS, 10) || 120000;
     this._providerUserAgent = process.env.PROVIDER_USER_AGENT || 'VLC/3.0.18 LibVLC/3.0.18';
+    this._livePlaylistSnapshotCache = new Map();
+    this._livePlaylistSnapshotTtlMs = parseInt(process.env.LIVE_PLAYLIST_SNAPSHOT_TTL_MS, 10) || 12000;
     this._httpAgent = new http.Agent({
       keepAlive: true,
       keepAliveMsecs: 10000,
@@ -209,6 +211,39 @@ class M3uController {
     this._copyHeaderIfPresent(res, upstreamHeaders, 'Accept-Ranges', req.headers.range ? 'bytes' : null);
     this._copyHeaderIfPresent(res, upstreamHeaders, 'Last-Modified');
     this._copyHeaderIfPresent(res, upstreamHeaders, 'ETag');
+  }
+
+  _buildLivePlaylistSnapshotKey(code, targetUrl) {
+    return `${code}:${targetUrl}`;
+  }
+
+  _setLivePlaylistSnapshot(key, content) {
+    if (!key || !content) {
+      return;
+    }
+
+    this._livePlaylistSnapshotCache.set(key, {
+      content,
+      createdAt: Date.now()
+    });
+  }
+
+  _getLivePlaylistSnapshot(key) {
+    if (!key) {
+      return null;
+    }
+
+    const snapshot = this._livePlaylistSnapshotCache.get(key);
+    if (!snapshot) {
+      return null;
+    }
+
+    if (Date.now() - snapshot.createdAt > this._livePlaylistSnapshotTtlMs) {
+      this._livePlaylistSnapshotCache.delete(key);
+      return null;
+    }
+
+    return snapshot.content;
   }
 
   _getContainerType(targetUrl, contentType = '') {
@@ -1329,31 +1364,63 @@ class M3uController {
       const upstreamContentType = upstream.headers['content-type'] || '';
       if (this._isPlaylistResponse(targetUrl, upstreamContentType)) {
         this._destroyResponseStream(upstream);
+        const snapshotKey = this._buildLivePlaylistSnapshotKey(code, targetUrl);
 
-        const playlistResponse = await this._requestViaProviderProxy({
-          method: 'get',
-          url: targetUrl,
-          responseType: 'text',
-          timeout: this._streamProxyTimeoutMs,
-          headers: this._buildUpstreamStreamHeaders(req, 'application/vnd.apple.mpegurl,*/*'),
-          validateStatus: () => true
-        });
-        this._validateStreamResponse(playlistResponse);
+        try {
+          const playlistResponse = await this._requestViaProviderProxy({
+            method: 'get',
+            url: targetUrl,
+            responseType: 'text',
+            timeout: this._streamProxyTimeoutMs,
+            headers: this._buildUpstreamStreamHeaders(req, 'application/vnd.apple.mpegurl,*/*'),
+            validateStatus: () => true
+          });
+          this._validateStreamResponse(playlistResponse);
 
-        res.status(playlistResponse.status);
-        this._setProxyMediaHeaders(
-          res,
-          playlistResponse.headers,
-          req,
-          'application/vnd.apple.mpegurl'
-        );
+          this._setLivePlaylistSnapshot(snapshotKey, playlistResponse.data);
 
-        return res.send(this._rewriteHlsPlaylist(playlistResponse.data, {
-          baseApiUrl: this._getBaseApiUrl(req),
-          baseTargetUrl: targetUrl,
-          code,
-          token: accessToken
-        }));
+          res.status(playlistResponse.status);
+          this._setProxyMediaHeaders(
+            res,
+            playlistResponse.headers,
+            req,
+            'application/vnd.apple.mpegurl'
+          );
+
+          return res.send(this._rewriteHlsPlaylist(playlistResponse.data, {
+            baseApiUrl: this._getBaseApiUrl(req),
+            baseTargetUrl: targetUrl,
+            code,
+            token: accessToken
+          }));
+        } catch (playlistError) {
+          const stalePlaylist = this._getLivePlaylistSnapshot(snapshotKey);
+          if (stalePlaylist) {
+            logger.warn('Serving stale HLS playlist snapshot after upstream failure', {
+              code,
+              targetUrl,
+              error: playlistError.message
+            });
+
+            res.status(200);
+            this._setProxyMediaHeaders(
+              res,
+              null,
+              req,
+              'application/vnd.apple.mpegurl'
+            );
+            res.setHeader('X-Playlist-Stale', '1');
+
+            return res.send(this._rewriteHlsPlaylist(stalePlaylist, {
+              baseApiUrl: this._getBaseApiUrl(req),
+              baseTargetUrl: targetUrl,
+              code,
+              token: accessToken
+            }));
+          }
+
+          throw playlistError;
+        }
       }
 
       res.on('close', () => {

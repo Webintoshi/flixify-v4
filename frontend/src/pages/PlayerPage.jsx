@@ -635,7 +635,7 @@ function PlayerPage() {
     }
 
     const retryCurrentChannel = (reason) => {
-      if (liveRetryRef.current.count >= 1) return false
+      if (liveRetryRef.current.count >= 2) return false
       liveRetryRef.current.count += 1
 
       console.warn('[Player] Retrying channel playback', {
@@ -675,6 +675,103 @@ function PlayerPage() {
       finishLoading()
     }
 
+    const LIVE_STALL_INTERVAL_MS = 4000
+    const LIVE_STALL_THRESHOLD_MS = 12000
+    let stallWatchdogTimer = null
+    let lastObservedTime = 0
+    let lastProgressAt = Date.now()
+    let softRecoveries = 0
+
+    const markPlaybackProgress = () => {
+      const currentTime = Number(video.currentTime || 0)
+      if (Math.abs(currentTime - lastObservedTime) > 0.15) {
+        lastObservedTime = currentTime
+        lastProgressAt = Date.now()
+        softRecoveries = 0
+      }
+    }
+
+    const markPotentialStall = () => {
+      lastProgressAt = Math.min(lastProgressAt, Date.now() - LIVE_STALL_THRESHOLD_MS)
+    }
+
+    const stopStallWatchdog = () => {
+      if (stallWatchdogTimer) {
+        clearInterval(stallWatchdogTimer)
+        stallWatchdogTimer = null
+      }
+    }
+
+    const startStallWatchdog = () => {
+      stopStallWatchdog()
+
+      stallWatchdogTimer = setInterval(() => {
+        if (!video || video.paused || video.ended || document.hidden) {
+          return
+        }
+
+        const currentTime = Number(video.currentTime || 0)
+        if (Math.abs(currentTime - lastObservedTime) > 0.15) {
+          lastObservedTime = currentTime
+          lastProgressAt = Date.now()
+          return
+        }
+
+        if (Date.now() - lastProgressAt < LIVE_STALL_THRESHOLD_MS) {
+          return
+        }
+
+        if (softRecoveries >= 2) {
+          if (!retryCurrentChannel('live-watchdog-hard-retry')) {
+            setError('Yayin gecici olarak takildi. Kanal degistirip tekrar deneyin.')
+            finishLoading()
+          }
+          lastProgressAt = Date.now()
+          return
+        }
+
+        softRecoveries += 1
+        lastProgressAt = Date.now()
+        setLoading(true)
+
+        if (streamType === 'hls' && hlsPlayerRef.current) {
+          console.warn('[Player] HLS watchdog soft recovery', {
+            channel: currentChannel?.name,
+            recoveryAttempt: softRecoveries
+          })
+          try {
+            hlsPlayerRef.current.startLoad(-1)
+            video.play().catch(() => {})
+          } catch {
+            // ignore soft recovery failures
+          }
+          return
+        }
+
+        if (playerRef.current) {
+          console.warn('[Player] MPEGTS watchdog soft recovery', {
+            channel: currentChannel?.name,
+            recoveryAttempt: softRecoveries
+          })
+          try {
+            playerRef.current.unload()
+            playerRef.current.load()
+            playerRef.current.play().catch(() => {})
+          } catch {
+            // ignore soft recovery failures
+          }
+        }
+      }, LIVE_STALL_INTERVAL_MS)
+    }
+
+    const handleProgressTick = () => {
+      markPlaybackProgress()
+    }
+
+    const handlePlaybackStall = () => {
+      markPotentialStall()
+    }
+
     video.muted = false
     setIsMuted(false)
     setError(null)
@@ -683,6 +780,9 @@ function PlayerPage() {
     video.pause()
     video.removeAttribute('src')
     video.load()
+    video.addEventListener('timeupdate', handleProgressTick)
+    video.addEventListener('stalled', handlePlaybackStall)
+    video.addEventListener('waiting', handlePlaybackStall)
 
     if (streamType === 'hls') {
       liveStartupTimeoutRef.current = setTimeout(() => {
@@ -706,14 +806,24 @@ function PlayerPage() {
         const hls = new Hls({
           enableWorker: true,
           lowLatencyMode: false,
-          backBufferLength: 90,
-          maxBufferLength: 30,
-          maxMaxBufferLength: 60,
-          liveSyncDurationCount: 3,
-          liveMaxLatencyDurationCount: 10,
+          backBufferLength: 120,
+          maxBufferLength: 45,
+          maxMaxBufferLength: 90,
+          liveSyncDurationCount: 6,
+          liveMaxLatencyDurationCount: 18,
           manifestLoadingTimeOut: 15000,
+          manifestLoadingMaxRetry: 4,
+          manifestLoadingRetryDelay: 500,
+          manifestLoadingMaxRetryTimeout: 4000,
           levelLoadingTimeOut: 15000,
+          levelLoadingMaxRetry: 6,
+          levelLoadingRetryDelay: 500,
+          levelLoadingMaxRetryTimeout: 4000,
           fragLoadingTimeOut: 20000,
+          fragLoadingMaxRetry: 6,
+          fragLoadingRetryDelay: 500,
+          fragLoadingMaxRetryTimeout: 4000,
+          appendErrorMaxRetry: 6,
           startFragPrefetch: true
         })
 
@@ -737,7 +847,10 @@ function PlayerPage() {
           }
 
           if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-            hls.startLoad()
+            hls.startLoad(-1)
+            if (retryCurrentChannel('hls-network-fatal')) {
+              return
+            }
           }
 
           failHlsPlayback(`hls-${String(data.type || 'fatal').toLowerCase()}`)
@@ -752,12 +865,18 @@ function PlayerPage() {
         failHlsPlayback('hls-unsupported', 'Bu kanal formati mevcut tarayicida desteklenmiyor.')
       }
 
+      startStallWatchdog()
+
       return () => {
         clearStartupTimeout()
+        stopStallWatchdog()
         if (retryTimer) {
           clearTimeout(retryTimer)
           retryTimer = null
         }
+        video.removeEventListener('timeupdate', handleProgressTick)
+        video.removeEventListener('stalled', handlePlaybackStall)
+        video.removeEventListener('waiting', handlePlaybackStall)
         video.removeEventListener('loadeddata', finishLoading)
         video.removeEventListener('playing', finishLoading)
         video.removeEventListener('canplay', finishLoading)
@@ -775,15 +894,15 @@ function PlayerPage() {
           isLive: true,
           enableWorker: true,
           enableStashBuffer: true,
-          stashInitialSize: 256,
-          lazyLoad: true,
-          lazyLoadMaxDuration: 180,
+          stashInitialSize: 384,
+          lazyLoad: false,
+          lazyLoadMaxDuration: 300,
           liveBufferLatencyChasing: true,
-          liveBufferLatencyMaxLatency: 3.0,
-          liveBufferLatencyMinRemain: 1.0,
+          liveBufferLatencyMaxLatency: 6.0,
+          liveBufferLatencyMinRemain: 2.0,
           autoCleanupSourceBuffer: true,
-          autoCleanupMaxBackwardDuration: 45,
-          autoCleanupMinBackwardDuration: 20,
+          autoCleanupMaxBackwardDuration: 90,
+          autoCleanupMinBackwardDuration: 30,
           fixAudioTimestampGap: true
         })
 
@@ -818,6 +937,7 @@ function PlayerPage() {
         playerRef.current.attachMediaElement(video)
         playerRef.current.load()
         playerRef.current.play().catch(() => {})
+        startStallWatchdog()
 
         playerRef.current.on(mpegts.Events.ERROR, (errorType, errorDetail, errorInfo) => {
           console.error('[Player Error]', { errorType, errorDetail, errorInfo })
@@ -852,10 +972,14 @@ function PlayerPage() {
 
     return () => {
       clearStartupTimeout()
+      stopStallWatchdog()
       if (retryTimer) {
         clearTimeout(retryTimer)
         retryTimer = null
       }
+      video.removeEventListener('timeupdate', handleProgressTick)
+      video.removeEventListener('stalled', handlePlaybackStall)
+      video.removeEventListener('waiting', handlePlaybackStall)
       video.removeEventListener('loadeddata', finishLoading)
       video.removeEventListener('playing', finishLoading)
       destroyLivePlayers()

@@ -49,10 +49,26 @@ export function unwrapProxyTargetUrl(value) {
 }
 
 export function inferStreamContainer(value = '') {
-  const lowered = String(value || '').toLowerCase()
+  const unwrappedValue = unwrapProxyTargetUrl(value)
+  const lowered = String(unwrappedValue || value || '').toLowerCase()
 
   if (!lowered) {
     return 'unknown'
+  }
+
+  try {
+    const parsed = new URL(unwrappedValue)
+    const output = String(parsed.searchParams.get('output') || '').toLowerCase()
+
+    if (['hls', 'm3u8'].includes(output)) {
+      return 'hls'
+    }
+
+    if (['ts', 'mpegts'].includes(output)) {
+      return 'mpegts'
+    }
+  } catch {
+    // ignore parse errors and continue with extension checks
   }
 
   if (lowered.includes('.m3u8')) {
@@ -68,6 +84,24 @@ export function inferStreamContainer(value = '') {
   }
 
   return 'unknown'
+}
+
+function isVodStreamUrl(value = '') {
+  const lowered = String(value || '').toLowerCase()
+  if (!lowered) {
+    return true
+  }
+
+  if (lowered.includes('/movie/') || lowered.includes('/series/') || lowered.includes('/vod/')) {
+    return true
+  }
+
+  return /\.(mkv|mp4|avi|mov|webm|m4v)(\?|$)/i.test(lowered)
+}
+
+function isLikelyLiveEntry(entry) {
+  const originalUrl = unwrapProxyTargetUrl(entry?.originalUrl || entry?.url || '')
+  return !isVodStreamUrl(originalUrl)
 }
 
 export function normalizePlaylistGroup(rawGroup) {
@@ -128,21 +162,24 @@ export function parsePlaylistEntries(content) {
 }
 
 export function parseLiveChannels(content) {
-  return parsePlaylistEntries(content).map((entry) => ({
-    name: entry.title || entry.tvgName || 'Bilinmiyor',
-    logo: entry.logo,
-    group: normalizePlaylistGroup(entry.rawGroup),
-    country: inferCountry(entry.rawGroup, entry.title, entry.tvgCountry),
-    url: entry.url,
-    originalUrl: entry.originalUrl,
-    sourceType: inferStreamContainer(entry.originalUrl)
-  }))
+  return parsePlaylistEntries(content)
+    .filter((entry) => isLikelyLiveEntry(entry))
+    .map((entry) => ({
+      name: entry.title || entry.tvgName || 'Bilinmiyor',
+      logo: entry.logo,
+      group: normalizePlaylistGroup(entry.rawGroup),
+      country: inferCountry(entry.rawGroup, entry.title, entry.tvgCountry),
+      url: entry.url,
+      originalUrl: entry.originalUrl,
+      sourceType: inferStreamContainer(entry.originalUrl)
+    }))
 }
 
 export function parseLiveChannelsByCountry(content, country = 'TR') {
   const normalizedCountry = String(country || 'TR').toUpperCase()
 
   return parsePlaylistEntries(content)
+    .filter((entry) => isLikelyLiveEntry(entry))
     .map((entry) => ({
       name: entry.title || entry.tvgName || 'Bilinmiyor',
       logo: entry.logo,
