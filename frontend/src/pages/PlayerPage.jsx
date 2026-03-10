@@ -404,24 +404,28 @@ function PlayerPage() {
       finishLoading()
     }
 
-    const LIVE_STALL_INTERVAL_MS = 4000
-    const LIVE_STALL_THRESHOLD_MS = 12000
+    const LIVE_STALL_INTERVAL_MS = 5000
+    const LIVE_STALL_THRESHOLD_MS = 30000
     let stallWatchdogTimer = null
     let lastObservedTime = 0
     let lastProgressAt = Date.now()
     let softRecoveries = 0
 
+    const markNetworkActivity = () => {
+      lastProgressAt = Date.now()
+    }
+
     const markPlaybackProgress = () => {
       const currentTime = Number(video.currentTime || 0)
       if (Math.abs(currentTime - lastObservedTime) > 0.15) {
         lastObservedTime = currentTime
-        lastProgressAt = Date.now()
+        markNetworkActivity()
         softRecoveries = 0
       }
     }
 
     const markPotentialStall = () => {
-      lastProgressAt = Math.min(lastProgressAt, Date.now() - LIVE_STALL_THRESHOLD_MS)
+      lastProgressAt = Math.min(lastProgressAt, Date.now() - Math.floor(LIVE_STALL_THRESHOLD_MS / 2))
     }
 
     const stopStallWatchdog = () => {
@@ -451,6 +455,21 @@ function PlayerPage() {
         }
 
         if (softRecoveries >= 2) {
+          if (streamType === 'hls' && hlsPlayerRef.current) {
+            console.warn('[Player] HLS watchdog hard recovery', {
+              channel: currentChannel?.name
+            })
+            try {
+              hlsPlayerRef.current.startLoad(-1)
+              video.play().catch(() => {})
+            } catch {
+              // ignore hard recovery failures
+            }
+            softRecoveries = 0
+            lastProgressAt = Date.now()
+            return
+          }
+
           if (!retryCurrentChannel('live-watchdog-hard-retry')) {
             setError('Yayin gecici olarak takildi. Kanal degistirip tekrar deneyin.')
             finishLoading()
@@ -461,7 +480,6 @@ function PlayerPage() {
 
         softRecoveries += 1
         lastProgressAt = Date.now()
-        setLoading(true)
 
         if (streamType === 'hls' && hlsPlayerRef.current) {
           console.warn('[Player] HLS watchdog soft recovery', {
@@ -512,6 +530,7 @@ function PlayerPage() {
     video.addEventListener('timeupdate', handleProgressTick)
     video.addEventListener('stalled', handlePlaybackStall)
     video.addEventListener('waiting', handlePlaybackStall)
+    video.addEventListener('progress', markNetworkActivity)
 
     if (streamType === 'hls') {
       liveStartupTimeoutRef.current = setTimeout(() => {
@@ -559,6 +578,8 @@ function PlayerPage() {
         hlsPlayerRef.current = hls
         hls.loadSource(streamUrl)
         hls.attachMedia(video)
+        hls.on(Hls.Events.FRAG_LOADED, markNetworkActivity)
+        hls.on(Hls.Events.LEVEL_UPDATED, markNetworkActivity)
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
           finishLoading()
           video.play().catch(() => {
@@ -606,6 +627,7 @@ function PlayerPage() {
         video.removeEventListener('timeupdate', handleProgressTick)
         video.removeEventListener('stalled', handlePlaybackStall)
         video.removeEventListener('waiting', handlePlaybackStall)
+        video.removeEventListener('progress', markNetworkActivity)
         video.removeEventListener('loadeddata', finishLoading)
         video.removeEventListener('playing', finishLoading)
         video.removeEventListener('canplay', finishLoading)
@@ -704,6 +726,7 @@ function PlayerPage() {
       video.removeEventListener('timeupdate', handleProgressTick)
       video.removeEventListener('stalled', handlePlaybackStall)
       video.removeEventListener('waiting', handlePlaybackStall)
+      video.removeEventListener('progress', markNetworkActivity)
       video.removeEventListener('loadeddata', finishLoading)
       video.removeEventListener('playing', finishLoading)
       destroyLivePlayers()

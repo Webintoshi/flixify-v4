@@ -37,18 +37,23 @@ class M3uController {
     this._ffprobePath = process.env.FFPROBE_PATH || 'ffprobe';
     this._upstreamTimeoutMs = parseInt(process.env.PROXY_TIMEOUT_MS, 10) || 30000;
     this._streamProxyTimeoutMs = parseInt(process.env.STREAM_PROXY_TIMEOUT_MS, 10) || 120000;
+    this._streamProxyReadTimeoutMs = parseInt(process.env.STREAM_PROXY_READ_TIMEOUT_MS, 10) || 0;
     this._providerUserAgent = process.env.PROVIDER_USER_AGENT || 'VLC/3.0.18 LibVLC/3.0.18';
+    const configuredLiveKeepSegments = Number.parseInt(process.env.LIVE_HLS_KEEP_SEGMENTS || '', 10);
+    this._liveHlsKeepSegments = Number.isInteger(configuredLiveKeepSegments) && configuredLiveKeepSegments > 0
+      ? configuredLiveKeepSegments
+      : 0;
     this._httpAgent = new http.Agent({
       keepAlive: true,
       keepAliveMsecs: 10000,
       maxSockets: 200,
-      timeout: this._streamProxyTimeoutMs
+      timeout: this._streamProxyReadTimeoutMs
     });
     this._httpsAgent = new https.Agent({
       keepAlive: true,
       keepAliveMsecs: 10000,
       maxSockets: 200,
-      timeout: this._streamProxyTimeoutMs
+      timeout: this._streamProxyReadTimeoutMs
     });
 
     this._circuitBreaker = new CircuitBreaker(this._fetchM3u.bind(this), {
@@ -415,6 +420,52 @@ class M3uController {
       .filter((line) => line !== null);
 
     return nextLines.join('\n');
+  }
+
+  _optimizeLivePlaylist(content) {
+    if (!this._liveHlsKeepSegments) {
+      return content;
+    }
+
+    return this._pruneLivePlaylistWindow(content, this._liveHlsKeepSegments);
+  }
+
+  _extractOriginsFromHlsPlaylist(content, baseTargetUrl) {
+    const origins = new Set();
+    const lines = String(content || '').split(/\r?\n/);
+
+    const resolveAndCollectOrigin = (rawValue) => {
+      const candidate = String(rawValue || '').trim();
+      if (!candidate || candidate.startsWith('#')) {
+        return;
+      }
+
+      try {
+        const resolved = new URL(candidate, baseTargetUrl).toString();
+        this._addAllowedOrigin(origins, resolved);
+      } catch {
+        // ignore malformed URLs
+      }
+    };
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        continue;
+      }
+
+      if (!trimmed.startsWith('#')) {
+        resolveAndCollectOrigin(trimmed);
+        continue;
+      }
+
+      const uriMatches = trimmed.matchAll(/URI="([^"]+)"/gi);
+      for (const match of uriMatches) {
+        resolveAndCollectOrigin(match?.[1]);
+      }
+    }
+
+    return origins;
   }
 
   _buildProbePayload(targetUrl, upstream) {
@@ -1180,6 +1231,36 @@ class M3uController {
     return originSet;
   }
 
+  async _mergeAllowedOrigins(code, originCandidates = []) {
+    const allowedOrigins = await this._getAllowedOrigins(code);
+    let hasChanges = false;
+
+    for (const origin of originCandidates) {
+      if (!origin || allowedOrigins.has(origin)) {
+        continue;
+      }
+      allowedOrigins.add(origin);
+      hasChanges = true;
+    }
+
+    if (hasChanges) {
+      const cacheKey = `m3u:allowed-origins:${code}`;
+      const serializedOrigins = Array.from(allowedOrigins);
+      this._userAllowedOrigins.set(code, new Set(serializedOrigins));
+      await this._cacheService.set(cacheKey, serializedOrigins, 300);
+    }
+
+    return allowedOrigins;
+  }
+
+  async _rememberHlsAllowedOrigins(code, content, baseTargetUrl) {
+    const playlistOrigins = this._extractOriginsFromHlsPlaylist(content, baseTargetUrl);
+    if (playlistOrigins.size === 0) {
+      return this._getAllowedOrigins(code);
+    }
+    return this._mergeAllowedOrigins(code, Array.from(playlistOrigins));
+  }
+
   _rewriteExtinfLine(line, context) {
     return line.replace(/tvg-logo="([^"]+)"/i, (match, logoUrl) => {
       if (!this._isHttpUrl(logoUrl)) {
@@ -1459,7 +1540,8 @@ class M3uController {
           preferredProxyIndex
         });
 
-        const optimizedPlaylist = this._pruneLivePlaylistWindow(playlistResponse.data);
+        await this._rememberHlsAllowedOrigins(code, playlistResponse.data, targetUrl);
+        const optimizedPlaylist = this._optimizeLivePlaylist(playlistResponse.data);
         const resolvedProxyIndex = Number.isInteger(playlistResponse.__providerProxyIndex) && playlistResponse.__providerProxyIndex >= 0
           ? playlistResponse.__providerProxyIndex
           : preferredProxyIndex;
@@ -1485,7 +1567,7 @@ class M3uController {
         method: requestMethod,
         url: targetUrl,
         responseType: requestMethod === 'get' ? 'stream' : undefined,
-        timeout: requestMethod === 'get' ? this._streamProxyTimeoutMs : this._upstreamTimeoutMs,
+        timeout: requestMethod === 'get' ? this._streamProxyReadTimeoutMs : this._upstreamTimeoutMs,
         headers: upstreamRequestHeaders,
         validateStatus: () => true
       }, this._validateStreamResponse.bind(this), {
@@ -1520,7 +1602,8 @@ class M3uController {
           preferredProxyIndex: playlistProxyIndex
         });
 
-        const optimizedPlaylist = this._pruneLivePlaylistWindow(playlistResponse.data);
+        await this._rememberHlsAllowedOrigins(code, playlistResponse.data, targetUrl);
+        const optimizedPlaylist = this._optimizeLivePlaylist(playlistResponse.data);
         const resolvedProxyIndex = Number.isInteger(playlistResponse.__providerProxyIndex) && playlistResponse.__providerProxyIndex >= 0
           ? playlistResponse.__providerProxyIndex
           : playlistProxyIndex;

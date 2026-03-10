@@ -408,6 +408,28 @@ async function startServer() {
     });
   });
 
+  // Keep long-running media responses stable (live stream proxy / HLS segment flow).
+  const keepAliveTimeoutMs = Number.parseInt(process.env.SERVER_KEEP_ALIVE_TIMEOUT_MS || '120000', 10);
+  const headersTimeoutMs = Number.parseInt(
+    process.env.SERVER_HEADERS_TIMEOUT_MS || String(Math.max((Number.isFinite(keepAliveTimeoutMs) ? keepAliveTimeoutMs : 120000) + 5000, 65000)),
+    10
+  );
+  const requestTimeoutMs = Number.parseInt(process.env.SERVER_REQUEST_TIMEOUT_MS || '0', 10);
+
+  if (Number.isFinite(keepAliveTimeoutMs) && keepAliveTimeoutMs >= 0) {
+    server.keepAliveTimeout = keepAliveTimeoutMs;
+  }
+
+  if (Number.isFinite(headersTimeoutMs) && headersTimeoutMs >= 0) {
+    server.headersTimeout = headersTimeoutMs;
+  }
+
+  if (Number.isFinite(requestTimeoutMs) && requestTimeoutMs >= 0) {
+    server.requestTimeout = requestTimeoutMs;
+  }
+
+  server.setTimeout(0);
+
   // Graceful shutdown
   const shutdown = async (signal) => {
     logger.info(`${signal} received. Starting graceful shutdown...`);

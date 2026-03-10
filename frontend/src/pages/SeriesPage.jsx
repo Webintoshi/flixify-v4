@@ -558,7 +558,8 @@ function useDebounce(value, delay) {
 
 function SeriesPage() {
   const navigate = useNavigate();
-  const { user, token } = useAuthStore();
+  const user = useAuthStore((state) => state.user);
+  const token = useAuthStore((state) => state.token);
   
   // Redirect to package purchase if no subscription
   useEffect(() => {
@@ -583,27 +584,56 @@ function SeriesPage() {
   const debouncedSearchQuery = useDebounce(searchQuery, 300);
   const posterStatusRef = useRef(new Map());
   const forcedPosterRefreshRef = useRef(false);
+  const userRef = useRef(user);
+  const tokenRef = useRef(token);
+  const hasBootstrappedRef = useRef(false);
+  const latestRequestIdRef = useRef(0);
+
+  useEffect(() => {
+    userRef.current = user;
+    tokenRef.current = token;
+  }, [user, token]);
 
   const resetPosterTracking = useCallback(() => {
     posterStatusRef.current = new Map();
   }, []);
 
-  const fetchSeries = useCallback(async ({ forceRefresh = false } = {}) => {
+  const fetchSeries = useCallback(async ({ forceRefresh = false, background = false } = {}) => {
+    const requestId = latestRequestIdRef.current + 1;
+    latestRequestIdRef.current = requestId;
+
+    const currentUser = userRef.current;
+    const currentToken = tokenRef.current;
+    const shouldShowBlockingLoader = !hasBootstrappedRef.current && !background;
+
     try {
-      setLoading(true);
+      if (shouldShowBlockingLoader) {
+        setLoading(true);
+      }
       setError(null);
 
-      if (!user) {
+      if (!currentUser) {
+        if (shouldShowBlockingLoader) {
+          setLoading(false);
+        }
         return;
       }
 
-      if (!(user?.hasM3U ?? user?.m3uUrl)) {
+      if (!(currentUser?.hasM3U ?? currentUser?.m3uUrl)) {
+        if (requestId !== latestRequestIdRef.current) {
+          return;
+        }
         setLoading(false);
         setError('M3U URL bulunamadi. Lutfen yonetici ile iletisime gecin.');
         return;
       }
 
-      const catalogSeries = await fetchSeriesCatalog(user, token, { forceRefresh });
+      const catalogSeries = await fetchSeriesCatalog(currentUser, currentToken, { forceRefresh });
+
+      if (requestId !== latestRequestIdRef.current) {
+        return;
+      }
+
       const normalizedSeries = catalogSeries.map((item) => ({
         ...item,
         genre: normalizeSeriesGenreId(item.genre)
@@ -620,13 +650,23 @@ function SeriesPage() {
       const netflixSeries = sortedSeries.find((item) => item.genre === 'Netflix Dizileri');
       setHeroSeries(prioritySeries || netflixSeries || sortedSeries[0]);
       resetPosterTracking();
+      hasBootstrappedRef.current = true;
       setLoading(false);
     } catch (err) {
+      if (requestId !== latestRequestIdRef.current) {
+        return;
+      }
+
       console.error('Series catalog fetch error:', err);
+
+      if (forceRefresh && hasBootstrappedRef.current) {
+        return;
+      }
+
       setError('Diziler yuklenirken hata olustu: ' + err.message);
       setLoading(false);
     }
-  }, [resetPosterTracking, token, user]);
+  }, [resetPosterTracking]);
 
   const handlePosterStatus = useCallback((seriesName, success) => {
     if (!seriesName || forcedPosterRefreshRef.current) {
@@ -649,15 +689,21 @@ function SeriesPage() {
 
     if (failureRatio >= POSTER_FAILURE_RATIO_THRESHOLD) {
       forcedPosterRefreshRef.current = true;
-      fetchSeries({ forceRefresh: true }).catch(() => {});
+      fetchSeries({ forceRefresh: true, background: true }).catch(() => {});
     }
   }, [fetchSeries]);
 
   useEffect(() => {
+    hasBootstrappedRef.current = false;
     forcedPosterRefreshRef.current = false;
     resetPosterTracking();
+    if (!token || !user?.code) {
+      setLoading(false);
+      return;
+    }
+
     fetchSeries();
-  }, [fetchSeries, resetPosterTracking]);
+  }, [fetchSeries, resetPosterTracking, token, user?.code, user?.hasM3U, user?.m3uUrl]);
 
   // Memoized filtered series - sadece debounced query veya kategori degistiginde calisir
   const filteredSeries = useMemo(() => {

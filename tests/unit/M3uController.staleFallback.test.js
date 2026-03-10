@@ -92,4 +92,41 @@ describe('M3uController live proxy helpers', () => {
     expect(pruned).not.toContain('seg-1.ts')
     expect(pruned).not.toContain('seg-2.ts')
   })
+
+  test('keeps original live playlist when pruning is disabled', () => {
+    const controller = buildController()
+    const raw = [
+      '#EXTM3U',
+      '#EXT-X-MEDIA-SEQUENCE:100',
+      '#EXTINF:10.0,',
+      'seg-1.ts',
+      '#EXTINF:10.0,',
+      'seg-2.ts',
+      '#EXTINF:10.0,',
+      'seg-3.ts'
+    ].join('\n')
+
+    expect(controller._optimizeLivePlaylist(raw)).toBe(raw)
+  })
+
+  test('extracts nested hls origins from segment and URI tags', () => {
+    const controller = buildController()
+    const playlist = [
+      '#EXTM3U',
+      '#EXT-X-STREAM-INF:BANDWIDTH=1800000,URI="tracks/audio.m3u8"',
+      'variant/index.m3u8',
+      '#EXT-X-KEY:METHOD=AES-128,URI="https://keys.example.net/live.key"',
+      '#EXTINF:6.0,',
+      'https://cdn.example.com/live/segment001.ts'
+    ].join('\n')
+
+    const origins = controller._extractOriginsFromHlsPlaylist(
+      playlist,
+      'https://origin.example.com/master/main.m3u8'
+    )
+
+    expect(origins.has('https://origin.example.com')).toBe(true)
+    expect(origins.has('https://cdn.example.com')).toBe(true)
+    expect(origins.has('https://keys.example.net')).toBe(true)
+  })
 })
