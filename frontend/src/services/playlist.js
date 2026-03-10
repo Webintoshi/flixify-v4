@@ -293,7 +293,8 @@ export async function fetchUserPlaylist(user, token, options = {}) {
   }
 
   const tokenKey = tokenFingerprint(token)
-  const playlistUrl = buildApiUrl(`/m3u/${user.code}.m3u`)
+  const playlistQuery = (forceRefresh || disableCache) ? '?forceRefresh=true' : ''
+  const playlistUrl = buildApiUrl(`/m3u/${user.code}.m3u${playlistQuery}`)
   const rawCacheKey = buildRawCacheKey(user.code, tokenKey)
   const cached = !disableCache && !forceRefresh ? getCachedEntry(rawMemoryCache, rawCacheKey, ttlMs) : null
   const staleCached = !disableCache ? getAnyCachedEntry(rawMemoryCache, rawCacheKey) : null

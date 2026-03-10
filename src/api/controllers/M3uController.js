@@ -1285,10 +1285,11 @@ class M3uController {
     const { code } = req.params;
     const accessToken = req.user.token;
     const baseApiUrl = this._getBaseApiUrl(req);
+    const forceRefresh = String(req.query.forceRefresh || '').toLowerCase() === 'true' || req.query.forceRefresh === '1';
     let rawPlaylist;
 
     try {
-      ({ rawPlaylist } = await this._getRawPlaylistForCode(code));
+      ({ rawPlaylist } = await this._getRawPlaylistForCode(code, { forceRefresh }));
     } catch (error) {
       const statusCode = error.statusCode || (error.message.includes('No M3U URL') ? 404 : 502);
       logger.error('Provider playlist fetch failed', {
@@ -1310,7 +1311,7 @@ class M3uController {
 
     res.set({
       'Content-Type': 'application/x-mpegURL',
-      'Cache-Control': 'private, max-age=60'
+      'Cache-Control': 'private, no-store'
     });
 
     res.send(rewrittenPlaylist);
