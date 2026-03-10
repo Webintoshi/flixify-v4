@@ -21,6 +21,42 @@ function formatUptime(totalSeconds) {
   return `${days}g ${hours}s ${minutes}d`;
 }
 
+function formatDateTr(value) {
+  const date = value ? new Date(value) : new Date();
+  return date.toLocaleString('tr-TR', {
+    timeZone: 'Europe/Istanbul',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit'
+  });
+}
+
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function formatPaymentBadge(summary) {
+  if (!summary?.hasPaymentReport) {
+    return '❌ Odeme bildirimi yok';
+  }
+
+  switch (summary.latestStatus) {
+    case 'pending':
+      return '⏳ Bildirim yapildi (onay bekliyor)';
+    case 'approved':
+      return '✅ Odeme onayli';
+    case 'rejected':
+      return '🚫 Odeme reddedildi';
+    default:
+      return `ℹ️ Son durum: ${summary.latestStatus || 'bilinmiyor'}`;
+  }
+}
+
 function normalizeProviderPlaylistUrl(value) {
   if (!value || typeof value !== 'string') {
     return value;
@@ -99,7 +135,7 @@ class TelegramBotService {
 
     const payload = {
       url: this._webhookUrl,
-      allowed_updates: ['message'],
+      allowed_updates: ['message', 'callback_query'],
       drop_pending_updates: false
     };
 
@@ -136,24 +172,62 @@ class TelegramBotService {
       return;
     }
 
-    const lines = [
-      'Yeni Kayit',
-      `Kod: ${code}`,
-      `Durum: ${status}`,
-      `Kaynak: ${source}`,
-      `Tarih: ${new Date(createdAt).toISOString()}`,
-      `Kullanim: /setm3u ${code} http://panel.example.com/playlist/${code}.m3u 30`
-    ];
-
-    if (userId) {
-      lines.push(`User ID: ${userId}`);
+    let paymentSummary = null;
+    if (userId && this._adminRepository?.getPaymentSummaryByUserId) {
+      try {
+        paymentSummary = await this._adminRepository.getPaymentSummaryByUserId(userId);
+      } catch (error) {
+        logger.warn('Failed to resolve payment summary for registration notification', {
+          userId,
+          error: error.message
+        });
+      }
     }
 
-    await this._broadcastMessage(targetChats, lines.join('\n'));
+    const message = this._buildRegistrationMessage({
+      code,
+      status,
+      createdAt,
+      userId,
+      source,
+      paymentSummary
+    });
+
+    const replyMarkup = this._buildRegistrationKeyboard(code);
+    await this._broadcastMessage(targetChats, message, {
+      parseMode: 'HTML',
+      replyMarkup
+    });
   }
 
   async handleUpdate(update) {
     if (!this.isEnabled() || !update || typeof update !== 'object') {
+      return;
+    }
+
+    const callbackQuery = update.callback_query;
+    if (callbackQuery) {
+      const callbackChatId = String(callbackQuery.message?.chat?.id || callbackQuery.from?.id || '');
+      if (!callbackChatId) {
+        return;
+      }
+
+      if (!this._allowedChatIds.has(callbackChatId)) {
+        logger.warn('Unauthorized Telegram callback tried to use bot', { chatId: callbackChatId });
+        await this._answerCallbackQuery(callbackQuery.id, 'Yetkisiz sohbet.', true);
+        return;
+      }
+
+      try {
+        await this._handleCallbackQuery(callbackQuery, callbackChatId);
+      } catch (error) {
+        logger.error('Telegram callback failed', {
+          chatId: callbackChatId,
+          callbackData: callbackQuery.data,
+          error: error.message
+        });
+        await this._answerCallbackQuery(callbackQuery.id, `Hata: ${error.message}`, true);
+      }
       return;
     }
 
@@ -194,6 +268,79 @@ class TelegramBotService {
       command,
       args: parts
     };
+  }
+
+  _buildRegistrationMessage({
+    code,
+    status,
+    createdAt,
+    userId,
+    source,
+    paymentSummary
+  }) {
+    const lines = [
+      '🆕 <b>Yeni Kayit</b>',
+      '',
+      `👤 <b>Kullanici Kodu:</b> <code>${escapeHtml(code)}</code>`,
+      `💳 <b>Odeme Durumu:</b> ${escapeHtml(formatPaymentBadge(paymentSummary))}`,
+      `📌 <b>Kayit Durumu:</b> ${escapeHtml(status)}`,
+      `🆔 <b>User ID:</b> ${escapeHtml(userId || '-')}`,
+      `🗓️ <b>Tarih:</b> ${escapeHtml(formatDateTr(createdAt))}`,
+      `🔎 <b>Kaynak:</b> ${escapeHtml(source)}`
+    ];
+
+    if (paymentSummary?.latestPayment?.id) {
+      lines.push(`💸 <b>Son Odeme ID:</b> ${escapeHtml(paymentSummary.latestPayment.id)}`);
+    }
+
+    return lines.join('\n');
+  }
+
+  _buildRegistrationKeyboard(code) {
+    return {
+      inline_keyboard: [
+        [
+          {
+            text: '📋 Kodu Kopyala',
+            copy_text: { text: code }
+          }
+        ],
+        [
+          { text: '👤 Kullanici Detayi', callback_data: `user:${code}` },
+          { text: '💳 Odeme Durumu', callback_data: `payment:${code}` }
+        ],
+        [
+          {
+            text: '🧩 M3U Ata',
+            switch_inline_query_current_chat: `/setm3u ${code} `
+          }
+        ]
+      ]
+    };
+  }
+
+  async _handleCallbackQuery(callbackQuery, chatId) {
+    const data = String(callbackQuery.data || '');
+    const [action, codeInput] = data.split(':');
+
+    if (!action || !codeInput) {
+      await this._answerCallbackQuery(callbackQuery.id, 'Gecersiz secim.', true);
+      return;
+    }
+
+    if (action === 'user') {
+      await this._sendUserDetails(chatId, [codeInput]);
+      await this._answerCallbackQuery(callbackQuery.id, 'Kullanici detayi gonderildi.');
+      return;
+    }
+
+    if (action === 'payment') {
+      await this._sendUserPaymentStatus(chatId, codeInput);
+      await this._answerCallbackQuery(callbackQuery.id, 'Odeme durumu gonderildi.');
+      return;
+    }
+
+    await this._answerCallbackQuery(callbackQuery.id, 'Bilinmeyen secim.', true);
   }
 
   async _dispatchCommand(chatId, command, args) {
@@ -340,6 +487,34 @@ class TelegramBotService {
       `M3U: ${user.m3uUrl ? user.m3uUrl.toLogString() : '-'}`,
       `Erisim: ${access.allowed ? 'ACIK' : `KAPALI (${access.reason})`}`
     ];
+
+    await this._sendMessage(chatId, lines.join('\n'));
+  }
+
+  async _sendUserPaymentStatus(chatId, codeInput) {
+    const codeVo = Code.create(codeInput);
+    const user = await this._userRepository.findByCode(codeVo);
+    if (!user) {
+      await this._sendMessage(chatId, `Kullanici bulunamadi: ${codeInput}`);
+      return;
+    }
+
+    let summary = null;
+    if (this._adminRepository?.getPaymentSummaryByUserId) {
+      summary = await this._adminRepository.getPaymentSummaryByUserId(user.id);
+    }
+
+    const lines = [
+      `💳 Odeme Durumu - ${codeVo.toString()}`,
+      `${formatPaymentBadge(summary)}`
+    ];
+
+    if (summary?.latestPayment) {
+      lines.push(`ID: ${summary.latestPayment.id}`);
+      lines.push(`Tutar: ${summary.latestPayment.amount || '-'}`);
+      lines.push(`Yontem: ${summary.latestPayment.method || '-'}`);
+      lines.push(`Tarih: ${formatDateTr(summary.latestPayment.created_at)}`);
+    }
 
     await this._sendMessage(chatId, lines.join('\n'));
   }
@@ -499,10 +674,28 @@ class TelegramBotService {
     await this._sendMessage(chatId, `Odeme reddedildi: ${paymentId}`);
   }
 
-  async _sendMessage(chatId, text) {
-    await this._telegramRequest('sendMessage', {
+  async _sendMessage(chatId, text, options = {}) {
+    const payload = {
       chat_id: chatId,
       text
+    };
+
+    if (options.parseMode) {
+      payload.parse_mode = options.parseMode;
+    }
+
+    if (options.replyMarkup) {
+      payload.reply_markup = options.replyMarkup;
+    }
+
+    await this._telegramRequest('sendMessage', payload);
+  }
+
+  async _answerCallbackQuery(callbackQueryId, text = '', showAlert = false) {
+    await this._telegramRequest('answerCallbackQuery', {
+      callback_query_id: callbackQueryId,
+      text,
+      show_alert: showAlert
     });
   }
 
@@ -513,10 +706,10 @@ class TelegramBotService {
     return Array.from(this._allowedChatIds);
   }
 
-  async _broadcastMessage(chatIds, text) {
+  async _broadcastMessage(chatIds, text, options = {}) {
     for (const chatId of chatIds) {
       try {
-        await this._sendMessage(chatId, text);
+        await this._sendMessage(chatId, text, options);
       } catch (error) {
         logger.error('Telegram notification send failed', {
           chatId,

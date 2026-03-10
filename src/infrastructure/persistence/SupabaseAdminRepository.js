@@ -140,6 +140,31 @@ class SupabaseAdminRepository {
     }
   }
 
+  async getPaymentSummaryByUserId(userId) {
+    try {
+      const { data, error } = await this._supabase
+        .from('payments')
+        .select('id,status,amount,method,created_at')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false })
+        .limit(20);
+
+      if (error) throw error;
+
+      const payments = data || [];
+      const latest = payments[0] || null;
+
+      return {
+        hasPaymentReport: payments.length > 0,
+        latestStatus: latest?.status || null,
+        latestPayment: latest
+      };
+    } catch (error) {
+      logger.error('Database error in getPaymentSummaryByUserId', { error: error.message, userId });
+      throw error;
+    }
+  }
+
   async approvePayment(id, adminId) {
     try {
       const { data, error } = await this._supabase
