@@ -76,6 +76,13 @@ function parsePositiveInt(value, fieldName) {
   return parsed;
 }
 
+const M3U_MONTH_OPTIONS = {
+  1: 30,
+  3: 90,
+  6: 180,
+  12: 365
+};
+
 class TelegramBotService {
   constructor({
     token,
@@ -99,6 +106,7 @@ class TelegramBotService {
     this._userRepository = userRepository;
     this._adminRepository = adminRepository;
     this._cacheService = cacheService;
+    this._pendingM3uPlanByChat = new Map();
   }
 
   isEnabled() {
@@ -312,7 +320,7 @@ class TelegramBotService {
         [
           {
             text: '🧩 M3U Ata',
-            switch_inline_query_current_chat: `/setm3u ${code} `
+            callback_data: `m3u_months:${code}`
           }
         ]
       ]
@@ -321,7 +329,9 @@ class TelegramBotService {
 
   async _handleCallbackQuery(callbackQuery, chatId) {
     const data = String(callbackQuery.data || '');
-    const [action, codeInput] = data.split(':');
+    const parts = data.split(':');
+    const action = parts[0];
+    const codeInput = parts[1];
 
     if (!action || !codeInput) {
       await this._answerCallbackQuery(callbackQuery.id, 'Gecersiz secim.', true);
@@ -340,7 +350,80 @@ class TelegramBotService {
       return;
     }
 
+    if (action === 'm3u_months') {
+      await this._sendM3uMonthOptions(chatId, codeInput);
+      await this._answerCallbackQuery(callbackQuery.id, 'Süre secimini yapin.');
+      return;
+    }
+
+    if (action === 'm3u_setplan') {
+      const months = parsePositiveInt(parts[2], 'Ay');
+      const days = M3U_MONTH_OPTIONS[months];
+      if (!days) {
+        await this._answerCallbackQuery(callbackQuery.id, 'Desteklenmeyen ay secimi.', true);
+        return;
+      }
+      this._setPendingM3uPlan(chatId, codeInput, months, days);
+      await this._sendM3uPlanSelected(chatId, codeInput, months, days);
+      await this._answerCallbackQuery(callbackQuery.id, `${months} ay secildi.`);
+      return;
+    }
+
     await this._answerCallbackQuery(callbackQuery.id, 'Bilinmeyen secim.', true);
+  }
+
+  async _sendM3uMonthOptions(chatId, codeInput) {
+    const codeVo = Code.create(codeInput);
+    const user = await this._userRepository.findByCode(codeVo);
+    if (!user) {
+      await this._sendMessage(chatId, `Kullanici bulunamadi: ${codeInput}`);
+      return;
+    }
+
+    const text = [
+      '🧩 M3U Atama Süresi',
+      `👤 Kod: ${codeVo.toString()}`,
+      '',
+      'Kaç aylik atama yapilsin?'
+    ].join('\n');
+
+    await this._sendMessage(chatId, text, {
+      replyMarkup: {
+        inline_keyboard: [
+          [
+            { text: '1 Ay', callback_data: `m3u_setplan:${codeVo.toString()}:1` },
+            { text: '3 Ay', callback_data: `m3u_setplan:${codeVo.toString()}:3` }
+          ],
+          [
+            { text: '6 Ay', callback_data: `m3u_setplan:${codeVo.toString()}:6` },
+            { text: '12 Ay', callback_data: `m3u_setplan:${codeVo.toString()}:12` }
+          ]
+        ]
+      }
+    });
+  }
+
+  async _sendM3uPlanSelected(chatId, codeInput, months, days) {
+    const lines = [
+      `✅ Süre secildi: ${months} ay (${days} gun)`,
+      `👤 Kod: ${codeInput}`,
+      '',
+      'Simdi M3U URL girin:',
+      `/setm3u ${codeInput} <m3uUrl>`
+    ];
+
+    await this._sendMessage(chatId, lines.join('\n'), {
+      replyMarkup: {
+        inline_keyboard: [
+          [
+            {
+              text: '⚡ Komutu Hazirla',
+              switch_inline_query_current_chat: `/setm3u ${codeInput} `
+            }
+          ]
+        ]
+      }
+    });
   }
 
   async _dispatchCommand(chatId, command, args) {
@@ -539,7 +622,10 @@ class TelegramBotService {
     const m3uVo = M3uUrl.create(normalizedUrl);
 
     const hasDaysArgument = typeof args[2] !== 'undefined';
-    const days = hasDaysArgument ? parsePositiveInt(args[2], 'Gun') : null;
+    const selectedPlan = this._getPendingM3uPlan(chatId, codeVo.toString());
+    const days = hasDaysArgument
+      ? parsePositiveInt(args[2], 'Gun')
+      : (selectedPlan?.days || null);
     const expiresAt = days ? new Date(Date.now() + (days * 24 * 60 * 60 * 1000)) : user.expiresAt;
 
     if (user.status.canActivate) {
@@ -566,9 +652,12 @@ class TelegramBotService {
       await this._cacheService.invalidateUser(codeVo.toString());
     }
 
+    this._clearPendingM3uPlan(chatId, codeVo.toString());
+
     const lines = [
       `M3U tanimlandi: ${codeVo.toString()}`,
       `Durum: ${user.status.canActivate ? 'active yapildi' : 'm3u guncellendi'}`,
+      `Süre: ${days ? `${days} gun${selectedPlan?.months ? ` (${selectedPlan.months} ay)` : ''}` : 'degismedi'}`,
       `Bitis: ${expiresAt ? expiresAt.toISOString() : '-'}`
     ];
     await this._sendMessage(chatId, lines.join('\n'));
@@ -704,6 +793,40 @@ class TelegramBotService {
       return Array.from(this._notificationChatIds);
     }
     return Array.from(this._allowedChatIds);
+  }
+
+  _m3uPlanKey(chatId, code) {
+    return `${chatId}:${code}`;
+  }
+
+  _setPendingM3uPlan(chatId, code, months, days) {
+    const key = this._m3uPlanKey(chatId, code);
+    this._pendingM3uPlanByChat.set(key, {
+      months,
+      days,
+      createdAt: Date.now()
+    });
+  }
+
+  _getPendingM3uPlan(chatId, code) {
+    const key = this._m3uPlanKey(chatId, code);
+    const plan = this._pendingM3uPlanByChat.get(key);
+    if (!plan) {
+      return null;
+    }
+
+    // 30 dakika sonra süre seçimi geçersiz olsun
+    if (Date.now() - plan.createdAt > 30 * 60 * 1000) {
+      this._pendingM3uPlanByChat.delete(key);
+      return null;
+    }
+
+    return plan;
+  }
+
+  _clearPendingM3uPlan(chatId, code) {
+    const key = this._m3uPlanKey(chatId, code);
+    this._pendingM3uPlanByChat.delete(key);
   }
 
   async _broadcastMessage(chatIds, text, options = {}) {
