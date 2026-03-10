@@ -279,6 +279,7 @@ export async function fetchUserPlaylist(user, token, options = {}) {
   const {
     signal,
     forceRefresh = false,
+    disableCache = false,
     ttlMs = DEFAULT_TTL_MS,
     retries = 1
   } = options
@@ -294,8 +295,8 @@ export async function fetchUserPlaylist(user, token, options = {}) {
   const tokenKey = tokenFingerprint(token)
   const playlistUrl = buildApiUrl(`/m3u/${user.code}.m3u`)
   const rawCacheKey = buildRawCacheKey(user.code, tokenKey)
-  const cached = !forceRefresh ? getCachedEntry(rawMemoryCache, rawCacheKey, ttlMs) : null
-  const staleCached = getAnyCachedEntry(rawMemoryCache, rawCacheKey)
+  const cached = !disableCache && !forceRefresh ? getCachedEntry(rawMemoryCache, rawCacheKey, ttlMs) : null
+  const staleCached = !disableCache ? getAnyCachedEntry(rawMemoryCache, rawCacheKey) : null
 
   if (cached) {
     return cached
@@ -341,7 +342,7 @@ export async function fetchUserPlaylist(user, token, options = {}) {
           throw new Error('Playlist bos dondu')
         }
 
-        return cacheEntry(rawMemoryCache, rawCacheKey, text)
+        return disableCache ? text : cacheEntry(rawMemoryCache, rawCacheKey, text)
       } catch (error) {
         lastError = error
 
@@ -360,7 +361,7 @@ export async function fetchUserPlaylist(user, token, options = {}) {
           continue
         }
 
-        if (staleCached && isTransient) {
+        if (!disableCache && staleCached && isTransient) {
           return staleCached
         }
 
@@ -385,6 +386,7 @@ export async function fetchParsedPlaylist(user, token, options = {}) {
     cacheKey,
     parser,
     forceRefresh = false,
+    disableCache = false,
     ttlMs = DEFAULT_TTL_MS,
     signal
   } = options
@@ -403,8 +405,8 @@ export async function fetchParsedPlaylist(user, token, options = {}) {
 
   const tokenKey = tokenFingerprint(token)
   const parsedCacheKey = buildParsedCacheKey(user.code, tokenKey, cacheKey)
-  const cached = !forceRefresh ? getCachedEntry(parsedMemoryCache, parsedCacheKey, ttlMs) : null
-  const staleCached = getAnyCachedEntry(parsedMemoryCache, parsedCacheKey)
+  const cached = !disableCache && !forceRefresh ? getCachedEntry(parsedMemoryCache, parsedCacheKey, ttlMs) : null
+  const staleCached = !disableCache ? getAnyCachedEntry(parsedMemoryCache, parsedCacheKey) : null
 
   if (cached) {
     return cached
@@ -413,14 +415,15 @@ export async function fetchParsedPlaylist(user, token, options = {}) {
   try {
     const text = await fetchUserPlaylist(user, token, {
       forceRefresh,
+      disableCache,
       ttlMs,
       signal
     })
 
     const parsed = parser(text)
-    return cacheEntry(parsedMemoryCache, parsedCacheKey, parsed)
+    return disableCache ? parsed : cacheEntry(parsedMemoryCache, parsedCacheKey, parsed)
   } catch (error) {
-    if (staleCached) {
+    if (!disableCache && staleCached) {
       return staleCached
     }
 

@@ -38,10 +38,6 @@ class M3uController {
     this._upstreamTimeoutMs = parseInt(process.env.PROXY_TIMEOUT_MS, 10) || 30000;
     this._streamProxyTimeoutMs = parseInt(process.env.STREAM_PROXY_TIMEOUT_MS, 10) || 120000;
     this._providerUserAgent = process.env.PROVIDER_USER_AGENT || 'VLC/3.0.18 LibVLC/3.0.18';
-    this._livePlaylistSnapshotCache = new Map();
-    this._livePlaylistSnapshotTtlMs = parseInt(process.env.LIVE_PLAYLIST_SNAPSHOT_TTL_MS, 10) || 12000;
-    this._liveProxyRouteCache = new Map();
-    this._liveProxyRouteTtlMs = parseInt(process.env.LIVE_PROXY_ROUTE_TTL_MS, 10) || 10 * 60 * 1000;
     this._httpAgent = new http.Agent({
       keepAlive: true,
       keepAliveMsecs: 10000,
@@ -215,68 +211,6 @@ class M3uController {
     this._copyHeaderIfPresent(res, upstreamHeaders, 'ETag');
   }
 
-  _buildLivePlaylistSnapshotKey(code, targetUrl) {
-    return `${code}:${targetUrl}`;
-  }
-
-  _setLivePlaylistSnapshot(key, content) {
-    if (!key || !content) {
-      return;
-    }
-
-    if (this._livePlaylistSnapshotCache.size >= 1500) {
-      const oldestKey = this._livePlaylistSnapshotCache.keys().next().value;
-      if (oldestKey) {
-        this._livePlaylistSnapshotCache.delete(oldestKey);
-      }
-    }
-
-    this._livePlaylistSnapshotCache.set(key, {
-      content,
-      createdAt: Date.now()
-    });
-  }
-
-  _getLivePlaylistSnapshot(key) {
-    if (!key) {
-      return null;
-    }
-
-    const snapshot = this._livePlaylistSnapshotCache.get(key);
-    if (!snapshot) {
-      return null;
-    }
-
-    if (Date.now() - snapshot.createdAt > this._livePlaylistSnapshotTtlMs) {
-      this._livePlaylistSnapshotCache.delete(key);
-      return null;
-    }
-
-    return snapshot.content;
-  }
-
-  _deleteLivePlaylistSnapshot(key) {
-    if (!key) {
-      return;
-    }
-
-    this._livePlaylistSnapshotCache.delete(key);
-  }
-
-  _extractStatusCode(error) {
-    const statusCode = Number(error?.statusCode || error?.response?.status || 0);
-    return Number.isFinite(statusCode) && statusCode > 0 ? statusCode : null;
-  }
-
-  _shouldServeStalePlaylist(error) {
-    const statusCode = this._extractStatusCode(error);
-    if (statusCode && statusCode >= 400 && statusCode < 500) {
-      return false;
-    }
-
-    return true;
-  }
-
   _parsePreferredProxyIndex(value) {
     if (value === undefined || value === null || value === '') {
       return null;
@@ -290,7 +224,7 @@ class M3uController {
     return parsed;
   }
 
-  _buildProxyCandidates(proxies = [], preferredProxyIndex = null, stickToPreferred = false) {
+  _buildProxyCandidates(proxies = [], preferredProxyIndex = null) {
     if (!Array.isArray(proxies) || proxies.length === 0) {
       return [{ proxy: null, proxyIndex: -1 }];
     }
@@ -304,56 +238,8 @@ class M3uController {
       return indexed;
     }
 
-    if (stickToPreferred) {
-      return [indexed[normalizedPreferred]];
-    }
-
     const preferred = indexed[normalizedPreferred];
     return [preferred, ...indexed.filter((candidate) => candidate.proxyIndex !== normalizedPreferred)];
-  }
-
-  _buildLiveProxyRouteKey(code, targetUrl) {
-    return crypto
-      .createHash('sha1')
-      .update(`${code}:${targetUrl}`)
-      .digest('hex')
-      .slice(0, 16);
-  }
-
-  _getPinnedProxyIndex(routeKey) {
-    if (!routeKey) {
-      return null;
-    }
-
-    const cached = this._liveProxyRouteCache.get(routeKey);
-    if (!cached) {
-      return null;
-    }
-
-    if (Date.now() - cached.updatedAt > this._liveProxyRouteTtlMs) {
-      this._liveProxyRouteCache.delete(routeKey);
-      return null;
-    }
-
-    return cached.proxyIndex;
-  }
-
-  _setPinnedProxyIndex(routeKey, proxyIndex) {
-    if (!routeKey || !Number.isInteger(proxyIndex) || proxyIndex < 0) {
-      return;
-    }
-
-    if (this._liveProxyRouteCache.size >= 4000) {
-      const oldestKey = this._liveProxyRouteCache.keys().next().value;
-      if (oldestKey) {
-        this._liveProxyRouteCache.delete(oldestKey);
-      }
-    }
-
-    this._liveProxyRouteCache.set(routeKey, {
-      proxyIndex,
-      updatedAt: Date.now()
-    });
   }
 
   _getContainerType(targetUrl, contentType = '') {
@@ -410,8 +296,7 @@ class M3uController {
           context.code,
           context.token,
           resolved,
-          context.preferredProxyIndex,
-          context.routeKey
+          context.preferredProxyIndex
         )}"`;
       } catch {
         return match;
@@ -440,8 +325,7 @@ class M3uController {
             context.code,
             context.token,
             resolved,
-            context.preferredProxyIndex,
-            context.routeKey
+            context.preferredProxyIndex
           );
         } catch {
           return line;
@@ -778,9 +662,9 @@ class M3uController {
   }
 
   async _requestViaProviderProxy(overrides = {}, responseValidator = null, options = {}) {
-    const { preferredProxyIndex = null, stickToPreferred = false } = options;
+    const { preferredProxyIndex = null } = options;
     const proxies = this._getProxyConfigs();
-    const candidates = this._buildProxyCandidates(proxies, preferredProxyIndex, stickToPreferred);
+    const candidates = this._buildProxyCandidates(proxies, preferredProxyIndex);
     let lastError = null;
 
     for (const candidate of candidates) {
@@ -909,17 +793,11 @@ class M3uController {
     return `${req.protocol}://${req.get('host')}/api/v1`;
   }
 
-  _buildStreamProxyUrl(baseApiUrl, code, token, targetUrl, preferredProxyIndex = null, routeKey = null) {
+  _buildStreamProxyUrl(baseApiUrl, code, token, targetUrl, preferredProxyIndex = null) {
     const baseUrl = `${baseApiUrl}/stream/${encodeURIComponent(code)}?token=${encodeURIComponent(token)}&url=${encodeURIComponent(targetUrl)}`;
-    const withProxyHint = Number.isInteger(preferredProxyIndex) && preferredProxyIndex >= 0
+    return Number.isInteger(preferredProxyIndex) && preferredProxyIndex >= 0
       ? `${baseUrl}&up=${preferredProxyIndex}`
       : baseUrl;
-
-    if (routeKey) {
-      return `${withProxyHint}&rk=${encodeURIComponent(routeKey)}`;
-    }
-
-    return withProxyHint;
   }
 
   _buildVodManifestUrl(baseApiUrl, code, token, targetUrl) {
@@ -1522,8 +1400,6 @@ class M3uController {
     const { code } = req.params;
     const targetUrl = req.query.url;
     const preferredProxyIndex = this._parsePreferredProxyIndex(req.query.up);
-    const requestedRouteKey = String(req.query.rk || '').trim();
-    const inferredRouteKey = requestedRouteKey || this._buildLiveProxyRouteKey(code, targetUrl);
 
     try {
       const accessToken = this._resolveAccessToken(req);
@@ -1531,41 +1407,17 @@ class M3uController {
       await this._assertAllowedProxyTarget(code, targetUrl);
       const requestMethod = req.method === 'HEAD' ? 'head' : 'get';
       const upstreamRequestHeaders = this._buildUpstreamStreamHeaders(req);
-      const requestWithRoutePin = async (overrides, validator, fallbackPreferredProxyIndex = null) => {
-        const pinnedProxyIndex = this._getPinnedProxyIndex(inferredRouteKey);
-        const preferredIndex = pinnedProxyIndex ?? fallbackPreferredProxyIndex;
-
-        try {
-          return await this._requestViaProviderProxy(overrides, validator, {
-            preferredProxyIndex: preferredIndex,
-            stickToPreferred: pinnedProxyIndex !== null
-          });
-        } catch (error) {
-          if (pinnedProxyIndex === null) {
-            throw error;
-          }
-
-          // Route-locked proxy is unhealthy now; unlock once and repin on next success.
-          this._liveProxyRouteCache.delete(inferredRouteKey);
-          return this._requestViaProviderProxy(overrides, validator, {
-            preferredProxyIndex: fallbackPreferredProxyIndex
-          });
-        }
-      };
-
-      const upstream = await requestWithRoutePin({
+      const upstream = await this._requestViaProviderProxy({
         method: requestMethod,
         url: targetUrl,
         responseType: requestMethod === 'get' ? 'stream' : undefined,
         timeout: requestMethod === 'get' ? this._streamProxyTimeoutMs : this._upstreamTimeoutMs,
         headers: upstreamRequestHeaders,
         validateStatus: () => true
-      }, this._validateStreamResponse.bind(this), preferredProxyIndex);
+      }, this._validateStreamResponse.bind(this), {
+        preferredProxyIndex
+      });
       this._validateStreamResponse(upstream);
-
-      if (Number.isInteger(upstream.__providerProxyIndex) && upstream.__providerProxyIndex >= 0) {
-        this._setPinnedProxyIndex(inferredRouteKey, upstream.__providerProxyIndex);
-      }
 
       res.status(upstream.status);
       this._setProxyMediaHeaders(res, upstream.headers, req, 'video/MP2T');
@@ -1577,84 +1429,43 @@ class M3uController {
       const upstreamContentType = upstream.headers['content-type'] || '';
       if (this._isPlaylistResponse(targetUrl, upstreamContentType)) {
         this._destroyResponseStream(upstream);
-        const playlistRouteKey = inferredRouteKey;
-        const snapshotKey = this._buildLivePlaylistSnapshotKey(code, targetUrl);
-        const routePinnedProxyIndex = this._getPinnedProxyIndex(playlistRouteKey);
-        const playlistProxyIndex = routePinnedProxyIndex ?? (
+        const playlistProxyIndex = (
           Number.isInteger(upstream.__providerProxyIndex) && upstream.__providerProxyIndex >= 0
             ? upstream.__providerProxyIndex
             : preferredProxyIndex
         );
 
-        try {
-          const playlistResponse = await requestWithRoutePin({
-            method: 'get',
-            url: targetUrl,
-            responseType: 'text',
-            timeout: this._streamProxyTimeoutMs,
-            headers: this._buildUpstreamStreamHeaders(req, 'application/vnd.apple.mpegurl,*/*'),
-            validateStatus: () => true
-          }, this._validateStreamResponse.bind(this), playlistProxyIndex);
+        const playlistResponse = await this._requestViaProviderProxy({
+          method: 'get',
+          url: targetUrl,
+          responseType: 'text',
+          timeout: this._streamProxyTimeoutMs,
+          headers: this._buildUpstreamStreamHeaders(req, 'application/vnd.apple.mpegurl,*/*'),
+          validateStatus: () => true
+        }, this._validateStreamResponse.bind(this), {
+          preferredProxyIndex: playlistProxyIndex
+        });
 
-          const optimizedPlaylist = this._pruneLivePlaylistWindow(playlistResponse.data);
-          this._setLivePlaylistSnapshot(snapshotKey, optimizedPlaylist);
+        const optimizedPlaylist = this._pruneLivePlaylistWindow(playlistResponse.data);
+        const resolvedProxyIndex = Number.isInteger(playlistResponse.__providerProxyIndex) && playlistResponse.__providerProxyIndex >= 0
+          ? playlistResponse.__providerProxyIndex
+          : playlistProxyIndex;
 
-          const resolvedProxyIndex = Number.isInteger(playlistResponse.__providerProxyIndex) && playlistResponse.__providerProxyIndex >= 0
-            ? playlistResponse.__providerProxyIndex
-            : playlistProxyIndex;
-          this._setPinnedProxyIndex(playlistRouteKey, resolvedProxyIndex);
+        res.status(playlistResponse.status);
+        this._setProxyMediaHeaders(
+          res,
+          playlistResponse.headers,
+          req,
+          'application/vnd.apple.mpegurl'
+        );
 
-          res.status(playlistResponse.status);
-          this._setProxyMediaHeaders(
-            res,
-            playlistResponse.headers,
-            req,
-            'application/vnd.apple.mpegurl'
-          );
-
-          return res.send(this._rewriteHlsPlaylist(optimizedPlaylist, {
-            baseApiUrl: this._getBaseApiUrl(req),
-            baseTargetUrl: targetUrl,
-            code,
-            token: accessToken,
-            preferredProxyIndex: resolvedProxyIndex,
-            routeKey: playlistRouteKey
-          }));
-        } catch (playlistError) {
-          if (!this._shouldServeStalePlaylist(playlistError)) {
-            this._deleteLivePlaylistSnapshot(snapshotKey);
-            throw playlistError;
-          }
-
-          const stalePlaylist = this._getLivePlaylistSnapshot(snapshotKey);
-          if (stalePlaylist) {
-            logger.warn('Serving stale HLS playlist snapshot after upstream failure', {
-              code,
-              targetUrl,
-              error: playlistError.message
-            });
-
-            res.status(200);
-            this._setProxyMediaHeaders(
-              res,
-              null,
-              req,
-              'application/vnd.apple.mpegurl'
-            );
-            res.setHeader('X-Playlist-Stale', '1');
-
-            return res.send(this._rewriteHlsPlaylist(stalePlaylist, {
-              baseApiUrl: this._getBaseApiUrl(req),
-              baseTargetUrl: targetUrl,
-              code,
-              token: accessToken,
-              preferredProxyIndex: playlistProxyIndex,
-              routeKey: playlistRouteKey
-            }));
-          }
-
-          throw playlistError;
-        }
+        return res.send(this._rewriteHlsPlaylist(optimizedPlaylist, {
+          baseApiUrl: this._getBaseApiUrl(req),
+          baseTargetUrl: targetUrl,
+          code,
+          token: accessToken,
+          preferredProxyIndex: resolvedProxyIndex
+        }));
       }
 
       res.on('close', () => {

@@ -32,77 +32,6 @@ function useDebounce(value, delay) {
   return debouncedValue
 }
 
-// M3U Cache Manager - sessionStorage ile sayfa oturumu boyunca cache
-class M3UCache {
-  static CACHE_KEY = 'iptv_m3u_cache'
-  static TTL_MS = 5 * 60 * 1000 // 5 dakika
-  static MAX_CACHE_BYTES = 1024 * 1024 // 1 MB
-
-  static get(userCode, country = 'TR') {
-    const cacheKey = `${this.CACHE_KEY}_${userCode}_${country}`
-    try {
-      const cached = sessionStorage.getItem(cacheKey)
-      if (!cached) return null
-
-      const { data, timestamp } = JSON.parse(cached)
-      const age = Date.now() - timestamp
-
-      if (age > this.TTL_MS) {
-        sessionStorage.removeItem(cacheKey)
-        return null
-      }
-
-      return { data, age }
-    } catch {
-      return null
-    }
-  }
-
-  static set(userCode, country, channels) {
-    const cacheKey = `${this.CACHE_KEY}_${userCode}_${country}`
-    try {
-      const cacheData = {
-        data: channels,
-        timestamp: Date.now()
-      }
-      const serialized = JSON.stringify(cacheData)
-
-      if (serialized.length > this.MAX_CACHE_BYTES) {
-        return
-      }
-
-      sessionStorage.setItem(cacheKey, serialized)
-    } catch (error) {
-      console.warn('M3U cache write failed:', error)
-    }
-  }
-
-  static clear(userCode, country = null) {
-    try {
-      if (country) {
-        sessionStorage.removeItem(`${this.CACHE_KEY}_${userCode}_${country}`)
-        return
-      }
-
-      Object.keys(sessionStorage)
-        .filter(key => key.startsWith(`${this.CACHE_KEY}_${userCode}_`))
-        .forEach(key => sessionStorage.removeItem(key))
-    } catch {
-      // ignore
-    }
-  }
-
-  static clearAll() {
-    try {
-      Object.keys(sessionStorage)
-        .filter(key => key.startsWith(this.CACHE_KEY))
-        .forEach(key => sessionStorage.removeItem(key))
-    } catch {
-      // ignore
-    }
-  }
-}
-
 // Countries
 const COUNTRIES = [
   { id: 'TR', name: 'Turkiye', flag: 'TR' },
@@ -208,46 +137,29 @@ function PlayerPage() {
         setLoading(false)
         return
       }
-      // Check cache first
-      const cached = M3UCache.get(user.code, selectedCountry)
-      if (cached) {
-        console.log(`[M3U Cache] Using ${selectedCountry} channels (${Math.round(cached.age / 1000)}s old)`)
-        setChannels(cached.data)
-        if (cached.data.length > 0) {
-          setCurrentChannel(cached.data[0])
-        }
-        setLoading(false)
-        // Arka planda yenile (stale-while-revalidate pattern)
-        fetchChannels(selectedCountry, true)
-      } else {
-        fetchChannels(selectedCountry)
-      }
+      fetchChannels(selectedCountry)
     }
   }, [videoMode, user, token, user?.hasM3U, user?.code, selectedCountry])
 
   // Live TV
-  // silent = true: background refresh without loading UI
-  const fetchChannels = async (countryCode = selectedCountry, silent = false) => {
+  const fetchChannels = async (countryCode = selectedCountry) => {
     try {
       // Check user's assigned M3U URL
       if (!(user?.hasM3U ?? user?.m3uUrl)) {
-        if (!silent) {
-          setError('M3U URL bulunamadi. Lutfen yonetici ile iletisime gecin.')
-          setLoading(false)
-        }
+        setError('M3U URL bulunamadi. Lutfen yonetici ile iletisime gecin.')
+        setLoading(false)
         return
       }
       
-      if (!silent) setLoading(true)
+      setLoading(true)
 
       const normalizedCountry = String(countryCode || 'TR').toUpperCase()
       const parsed = await fetchParsedPlaylist(user, token, {
         cacheKey: `live-channels:${normalizedCountry}:v3`,
         parser: (playlistText) => parseLiveChannelsByCountry(playlistText, normalizedCountry),
-        forceRefresh: silent === false && !M3UCache.get(user.code, normalizedCountry)
+        forceRefresh: true,
+        disableCache: true
       })
-
-      M3UCache.set(user.code, normalizedCountry, parsed)
 
       setChannels(parsed)
       if (parsed.length > 0) {
@@ -256,54 +168,12 @@ function PlayerPage() {
         setCurrentChannel(null)
       }
 
-      if (!silent) setLoading(false)
+      setLoading(false)
       return
-      
-      /* Legacy direct-provider fallback removed in V4.
-      // CORS UNBLOCK EKLENTISI GEREKLI - Dogrudan provider'dan cek
-      console.log('[Player] Fetching M3U DIRECT from provider:', user.m3uUrl.substring(0, 60))
-      
-      const response = await fetch(user.m3uUrl, {
-        headers: {
-          'User-Agent': 'VLC/3.0.18 LibVLC/3.0.18'
-        }
-      })
-      
-      if (!response.ok) {
-        let errorMsg = `M3U erisim hatasi: ${response.status}`
-        if (response.status === 404) {
-          errorMsg = 'M3U playlist bulunamadi (404). Lutfen CORS Unblock eklentisinin kurulu ve aktif oldugundan emin olun.'
-        } else if (response.status === 403) {
-          errorMsg = 'M3U erisim izni reddedildi (403). CORS eklentisi aktif mi kontrol edin.'
-        }
-        throw new Error(errorMsg)
-      }
-      
-      const text = await response.text()
-      
-      // M3U icerigi bos mu kontrol et
-      if (!text || text.trim().length === 0) {
-        throw new Error('M3U playlist bos veya gecersiz icerik')
-      }
-      
-      const parsed = parseLiveChannels(text)
-      
-      // Cache'e kaydet
-      M3UCache.set(user.code, normalizedCountry, parsed)
-      
-      setChannels(parsed)
-      if (parsed.length > 0 && (!currentChannel || !silent)) {
-        setCurrentChannel(parsed[0])
-      }
-      
-      if (!silent) setLoading(false)
-      */
     } catch (err) {
       console.error('M3U fetch error:', err)
-      if (!silent) {
-        setError('Kanallar yuklenemedi: ' + err.message)
-        setLoading(false)
-      }
+      setError('Kanallar yuklenemedi: ' + err.message)
+      setLoading(false)
     }
   }
 
@@ -806,11 +676,6 @@ function PlayerPage() {
           const retryableStatus = [0, 408, 429, 500, 502, 503, 504].includes(statusCode)
           const retryableError = retryableStatus || /network|timeout|io|eof|disconnect|abort/.test(lowered)
 
-          if (errorDetail?.code === 404 || errorDetail?.status === 404) {
-            console.warn('[Player] Stream 404 - Clearing cache')
-            M3UCache.clear(user?.code, selectedCountry)
-          }
-
           if (retryableError && retryCurrentChannel('mpegts-retryable-error')) {
             return
           }
@@ -1139,7 +1004,6 @@ function PlayerPage() {
                     {/* Yenile Butonu */}
                     <button
                       onClick={() => {
-                        M3UCache.clear(user?.code, selectedCountry)
                         fetchChannels(selectedCountry)
                       }}
                       disabled={loading}

@@ -1,6 +1,6 @@
 const M3uController = require('../../src/api/controllers/M3uController')
 
-describe('M3uController stale playlist policy', () => {
+describe('M3uController live proxy helpers', () => {
   const buildController = () => (
     new M3uController(
       { execute: jest.fn() },
@@ -9,28 +9,7 @@ describe('M3uController stale playlist policy', () => {
     )
   )
 
-  test('does not serve stale playlist for provider 404 responses', () => {
-    const controller = buildController()
-    const shouldServe = controller._shouldServeStalePlaylist({ statusCode: 404 })
-
-    expect(shouldServe).toBe(false)
-  })
-
-  test('does not serve stale playlist for provider 401 responses', () => {
-    const controller = buildController()
-    const shouldServe = controller._shouldServeStalePlaylist({ response: { status: 401 } })
-
-    expect(shouldServe).toBe(false)
-  })
-
-  test('serves stale playlist for transient provider failures', () => {
-    const controller = buildController()
-
-    expect(controller._shouldServeStalePlaylist({ statusCode: 502 })).toBe(true)
-    expect(controller._shouldServeStalePlaylist(new Error('ETIMEDOUT'))).toBe(true)
-  })
-
-  test('builds stream proxy url with pinned upstream proxy index when provided', () => {
+  test('builds stream proxy url with upstream proxy index when provided', () => {
     const controller = buildController()
     const url = controller._buildStreamProxyUrl(
       'https://flixify.pro/api/v1',
@@ -44,19 +23,17 @@ describe('M3uController stale playlist policy', () => {
     expect(url).toContain('up=1')
   })
 
-  test('includes route key in stream proxy url when provided', () => {
+  test('builds stream proxy url without upstream hint when no index is provided', () => {
     const controller = buildController()
     const url = controller._buildStreamProxyUrl(
       'https://flixify.pro/api/v1',
       'ABC123',
       'jwt-token',
-      'http://example.com/live/84.m3u8',
-      0,
-      'rk123'
+      'http://example.com/live/84.m3u8'
     )
 
-    expect(url).toContain('up=0')
-    expect(url).toContain('rk=rk123')
+    expect(url).not.toContain('up=')
+    expect(url).not.toContain('rk=')
   })
 
   test('parses preferred proxy index safely', () => {
@@ -82,12 +59,9 @@ describe('M3uController stale playlist policy', () => {
     expect(reordered).toHaveLength(3)
   })
 
-  test('pins and resolves route proxy index with ttl checks', () => {
+  test('builds direct candidate when no proxy is configured', () => {
     const controller = buildController()
-
-    controller._setPinnedProxyIndex('route-1', 2)
-    expect(controller._getPinnedProxyIndex('route-1')).toBe(2)
-    expect(controller._getPinnedProxyIndex('missing-route')).toBeNull()
+    expect(controller._buildProxyCandidates([])).toEqual([{ proxy: null, proxyIndex: -1 }])
   })
 
   test('prunes old live segments and adjusts media sequence', () => {
