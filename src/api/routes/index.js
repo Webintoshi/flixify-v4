@@ -42,7 +42,8 @@ function createRoutes({
         service: 'iptv-platform',
         version: process.env.npm_package_version || '1.0.0',
         timestamp: new Date().toISOString(),
-        serverIp: req.socket.localAddress
+        serverIp: req.socket.localAddress,
+        mediaTooling: req.app.locals.mediaTooling || null
       }
     });
   });
@@ -371,6 +372,24 @@ function createRoutes({
     m3uController.proxyM3u  // Real M3U from provider
   );
 
+  // GET /api/v1/catalog/series - Pre-parsed series catalog (auth + subscription required)
+  router.get(
+    '/catalog/series',
+    rateLimiters.playlist,
+    authMiddleware,
+    subscriptionCheckMiddleware,
+    m3uController.catalogSeries
+  );
+
+  // GET /api/v1/catalog/movies - Pre-parsed movies catalog (auth + subscription required)
+  router.get(
+    '/catalog/movies',
+    rateLimiters.playlist,
+    authMiddleware,
+    subscriptionCheckMiddleware,
+    m3uController.catalogMovies
+  );
+
   // GET /api/v1/m3u/health - M3U proxy health check
   router.get(
     '/m3u/health',
@@ -458,34 +477,40 @@ function createRoutes({
       const util = require('util');
       const execPromise = util.promisify(exec);
       
+      const checker = process.platform === 'win32' ? 'where' : 'which';
+      const fallbackPayload = {
+        url,
+        codecs: {
+          video: 'Unknown (FFprobe not installed)',
+          audio: 'Unknown (FFprobe not installed)'
+        },
+        browserCompatibility: {
+          chrome: 'May vary',
+          firefox: 'May vary',
+          safari: 'May vary'
+        },
+        recommendations: [
+          'Use VLC for best compatibility with MKV files',
+          'Try different browsers (Chrome, Firefox, Edge)',
+          'Check if audio codec is supported by your browser'
+        ]
+      };
+
       try {
-        await execPromise('which ffprobe');
+        await execPromise(`${checker} ffprobe`);
       } catch {
-        // ffprobe not available, return basic info
-        return res.json({
-          url,
-          codecs: {
-            video: 'Unknown (FFprobe not installed)',
-            audio: 'Unknown (FFprobe not installed)'
-          },
-          browserCompatibility: {
-            chrome: 'May vary',
-            firefox: 'May vary',
-            safari: 'May vary'
-          },
-          recommendations: [
-            'Use VLC for best compatibility with MKV files',
-            'Try different browsers (Chrome, Firefox, Edge)',
-            'Check if audio codec is supported by your browser'
-          ]
-        });
+        return res.json(fallbackPayload);
       }
       
-      // If ffprobe is available, analyze the stream
-      const { stdout } = await execPromise(
-        `ffprobe -v quiet -print_format json -show_streams "${url}"`,
-        { timeout: 30000 }
-      );
+      let stdout;
+      try {
+        ({ stdout } = await execPromise(
+          `ffprobe -v quiet -print_format json -show_streams "${url}"`,
+          { timeout: 30000 }
+        ));
+      } catch {
+        return res.json(fallbackPayload);
+      }
       
       const probeData = JSON.parse(stdout);
       const videoStream = probeData.streams.find(s => s.codec_type === 'video');

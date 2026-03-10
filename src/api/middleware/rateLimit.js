@@ -77,6 +77,16 @@ function getRequestIdentity(req) {
   return '';
 }
 
+function isSkippedMediaPath(reqPath = '') {
+  const path = String(reqPath || '');
+  return (
+    path.startsWith('/stream/') ||
+    path.startsWith('/m3u/logo/') ||
+    path.startsWith('/api/v1/stream/') ||
+    path.startsWith('/api/v1/m3u/logo/')
+  );
+}
+
 /**
  * Create rate limiter with Redis store
  */
@@ -112,8 +122,7 @@ function createRateLimiter(options) {
       return (
         req.path === '/health' ||
         req.path === '/api/health' ||
-        req.path.startsWith('/api/v1/stream/') ||
-        req.path.startsWith('/api/v1/m3u/logo/')
+        isSkippedMediaPath(req.path)
       );
     }
   };

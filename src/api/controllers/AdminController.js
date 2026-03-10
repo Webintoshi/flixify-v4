@@ -16,17 +16,7 @@
 const logger = require('../../config/logger');
 const { asyncHandler } = require('../middleware/errorHandler');
 const Code = require('../../domain/value-objects/Code');
-
-function normalizeProviderPlaylistUrl(value) {
-  if (!value || typeof value !== 'string') {
-    return value;
-  }
-
-  return value
-    .trim()
-    .replace('/playlisth/', '/playlist/')
-    .replace('/playlists/', '/playlist/');
-}
+const { normalizeProviderPlaylistUrl } = require('../../utils/providerPlaylistUrl');
 
 class AdminController {
   constructor(userRepository, activateUser, cacheService, adminRepository) {
@@ -34,6 +24,13 @@ class AdminController {
     this._activateUser = activateUser;
     this._cacheService = cacheService;
     this._adminRepository = adminRepository;
+  }
+
+  async _invalidateM3uCaches(code) {
+    await this._cacheService.delete(`m3u:content:${code}`);
+    await this._cacheService.delete(`m3u:allowed-origins:${code}`);
+    await this._cacheService.delete(`catalog:series:${code}:v1`);
+    await this._cacheService.delete(`catalog:movies:${code}:v1`);
   }
 
   /**
@@ -210,6 +207,8 @@ class AdminController {
       adminNotes
     });
 
+    await this._invalidateM3uCaches(code);
+
     res.json({
       status: 'success',
       data: activatedUser.toJSON(),
@@ -240,6 +239,7 @@ class AdminController {
 
     // Invalidate cache
     await this._cacheService.invalidateUser(code);
+    await this._invalidateM3uCaches(code);
 
     logger.info('User suspended by admin', { 
       adminCode: req.user?.code?.substring(0, 4) + '****',
@@ -284,6 +284,7 @@ class AdminController {
 
     // Invalidate cache
     await this._cacheService.invalidateUser(code);
+    await this._invalidateM3uCaches(code);
 
     res.json({
       status: 'success',

@@ -17,6 +17,7 @@
 const Code = require('../../domain/value-objects/Code');
 const M3uUrl = require('../../domain/value-objects/M3uUrl');
 const logger = require('../../config/logger');
+const { normalizeProviderPlaylistUrl } = require('../../utils/providerPlaylistUrl');
 
 class ActivateUser {
   constructor(userRepository, cacheService) {
@@ -48,7 +49,7 @@ class ActivateUser {
     }
 
     try {
-      m3uUrlVo = M3uUrl.create(m3uUrl);
+      m3uUrlVo = M3uUrl.create(normalizeProviderPlaylistUrl(m3uUrl));
     } catch (error) {
       logger.warn('Invalid M3U URL in activate request', { error: error.message });
       throw new Error(`Invalid M3U URL: ${error.message}`);
@@ -94,6 +95,10 @@ class ActivateUser {
 
       // Invalidate cache
       await this._cacheService.invalidateUser(codeVo.toString());
+      await this._cacheService.delete(`m3u:content:${codeVo.toString()}`);
+      await this._cacheService.delete(`m3u:allowed-origins:${codeVo.toString()}`);
+      await this._cacheService.delete(`catalog:series:${codeVo.toString()}:v1`);
+      await this._cacheService.delete(`catalog:movies:${codeVo.toString()}:v1`);
 
       logger.info('User activated successfully', { 
         userId: savedUser.id,

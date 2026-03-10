@@ -5,29 +5,30 @@ import {
   Play, Plus, Info, Search, ChevronDown, X, Star, 
   TrendingUp, Clock, Calendar, ChevronLeft, ChevronRight
 } from 'lucide-react';
-import { fetchParsedPlaylist, hasValidSubscription } from '../services/playlist';
-import { groupSeriesEpisodes, parseSeriesFromPlaylist } from '../utils/playlistParser';
+import { fetchSeriesCatalog, hasValidSubscription } from '../services/playlist';
 
 const PRIMARY = '#E50914';
 const BG_DARK = '#0a0a0a';
 const BG_SURFACE = '#141414';
 const BG_CARD = '#1a1a1a';
 const BORDER = '#2a2a2a';
+const POSTER_FAILURE_RATIO_THRESHOLD = 0.25;
+const POSTER_FAILURE_MIN_SAMPLE = 24;
 
-// Platformlar - Renk kodlari ile
+// Platforms with color coding
 const PLATFORMS = [
-  { id: 'all', name: 'Tumu', color: '#E50914', icon: '✨' },
-  { id: 'Netflix Dizileri', name: 'Netflix', color: '#E50914', icon: '🎬' },
-  { id: 'Disney+ Dizileri', name: 'Disney+', color: '#113CCF', icon: '🏰' },
-  { id: 'Amazon Prime Dizileri', name: 'Prime', color: '#00A8E1', icon: '📦' },
-  { id: 'TV+ Dizileri', name: 'TV+', color: '#FF6B00', icon: '📺' },
-  { id: 'TOD (beIN) Dizileri', name: 'TOD', color: '#00C851', icon: '⚽' },
-  { id: 'BluTV Dizileri (HBO)', name: 'BluTV', color: '#9B59B6', icon: '🐉' },
-  { id: 'Apple TV+ Dizileri', name: 'Apple TV+', color: '#555555', icon: '🍎' },
-  { id: 'GAİN Dizileri', name: 'GAIN', color: '#FF1493', icon: '🎯' },
-  { id: 'Exxen Dizileri', name: 'Exxen', color: '#FFD700', icon: '⭐' },
-  { id: 'Günlük Diziler', name: 'Gunluk', color: '#20B2AA', icon: '📅' },
-  { id: 'Anime', name: 'Anime', color: '#FF69B4', icon: '🌸' },
+  { id: 'all', name: 'Tumu', color: '#E50914', icon: '*' },
+  { id: 'Netflix Dizileri', name: 'Netflix', color: '#E50914', icon: 'NF' },
+  { id: 'Disney+ Dizileri', name: 'Disney+', color: '#113CCF', icon: 'DS' },
+  { id: 'Amazon Prime Dizileri', name: 'Prime', color: '#00A8E1', icon: 'PR' },
+  { id: 'TV+ Dizileri', name: 'TV+', color: '#FF6B00', icon: 'TV' },
+  { id: 'TOD (beIN) Dizileri', name: 'TOD', color: '#00C851', icon: 'TD' },
+  { id: 'BluTV Dizileri (HBO)', name: 'BluTV', color: '#9B59B6', icon: 'BL' },
+  { id: 'Apple TV+ Dizileri', name: 'Apple TV+', color: '#555555', icon: 'AP' },
+  { id: 'GAIN Dizileri', name: 'GAIN', color: '#FF1493', icon: 'GA' },
+  { id: 'Exxen Dizileri', name: 'Exxen', color: '#FFD700', icon: 'EX' },
+  { id: 'Gunluk Diziler', name: 'Gunluk', color: '#20B2AA', icon: 'GN' },
+  { id: 'Anime', name: 'Anime', color: '#FF69B4', icon: 'AN' },
 ];
 
 const PLATFORM_ALIASES = {
@@ -38,94 +39,13 @@ const PLATFORM_ALIASES = {
   'TOD (beIN) Dizileri': ['tod', 'bein', 'bein connect'],
   'BluTV Dizileri (HBO)': ['blutv', 'blue tv', 'bluetv', 'hbo'],
   'Apple TV+ Dizileri': ['apple tv+', 'apple tv'],
-  'GAÄ°N Dizileri': ['gain'],
+  'GAIN Dizileri': ['gain'],
   'Exxen Dizileri': ['exxen'],
-  'GÃ¼nlÃ¼k Diziler': ['gunluk', 'daily'],
+  'Gunluk Diziler': ['gunluk', 'daily'],
   'Anime': ['anime']
 };
 
-const EPISODE_PATTERN = /\bS(\d{1,2})E(\d{1,3})\b/i;
-const LEADING_REGION_PATTERN = /^[A-Z0-9]{2,4}\s*[•|:-]\s*/;
-const TRAILING_STREAM_LABEL_PATTERN = /\s+(24\/7|FHD|HD|4K|UHD)$/i;
-
-const unwrapProxyTargetUrl = (value) => {
-  if (!value || typeof value !== 'string') {
-    return '';
-  }
-
-  try {
-    const parsed = new URL(value);
-    const proxiedTarget = parsed.searchParams.get('url');
-    return proxiedTarget ? decodeURIComponent(proxiedTarget) : value;
-  } catch (error) {
-    return value;
-  }
-};
-
-const normalizeGenre = (rawGenre, fullTitle) => {
-  let genre = (rawGenre || 'Diger').replace('TR:', '').replace('TR | ', '').trim();
-  const haystack = `${genre} ${fullTitle}`.toLowerCase();
-
-  const matchedPlatform = Object.entries(PLATFORM_ALIASES).find(([, aliases]) =>
-    aliases.some((alias) => haystack.includes(alias))
-  );
-
-  if (matchedPlatform) {
-    return matchedPlatform[0];
-  }
-
-  return genre;
-};
-
-const stripPlatformAlias = (value, genre) => {
-  const aliases = PLATFORM_ALIASES[genre] || [];
-  const lowered = value.toLowerCase();
-
-  for (const alias of aliases) {
-    if (lowered.startsWith(alias)) {
-      return value.slice(alias.length).trim();
-    }
-  }
-
-  return value;
-};
-
-const extractSeriesMetadata = (fullTitle, genre) => {
-  const normalizedTitle = fullTitle.replace(/\s+/g, ' ').trim();
-  const episodeMatch = normalizedTitle.match(EPISODE_PATTERN);
-
-  let seriesName = episodeMatch
-    ? normalizedTitle.slice(0, episodeMatch.index).trim()
-    : normalizedTitle;
-  const season = episodeMatch ? parseInt(episodeMatch[1], 10) : 1;
-  const episode = episodeMatch ? parseInt(episodeMatch[2], 10) : 1;
-
-  seriesName = seriesName.replace(LEADING_REGION_PATTERN, '').trim();
-  seriesName = stripPlatformAlias(seriesName, genre);
-  seriesName = seriesName.replace(TRAILING_STREAM_LABEL_PATTERN, '').trim();
-
-  if (!seriesName) {
-    seriesName = normalizedTitle.replace(TRAILING_STREAM_LABEL_PATTERN, '').trim() || normalizedTitle;
-  }
-
-  return {
-    seriesName,
-    season,
-    episode
-  };
-};
-
-const isSeriesTargetUrl = (value) => {
-  const originalTarget = unwrapProxyTargetUrl(value).toLowerCase();
-  return originalTarget.includes('/series/');
-};
-
-// Parse series from M3U
-const parseSeriesFromM3U = (content) => {
-  return parseSeriesFromPlaylist(content);
-};
-
-// Platform bazlı varsayılan dizi görselleri
+// Platform-level default series posters
 const PLATFORM_POSTERS = {
   'Netflix Dizileri': 'https://images.unsplash.com/photo-1574375927938-d5a98e8ffe85?w=500&h=750&fit=crop',
   'Disney+ Dizileri': 'https://images.unsplash.com/photo-1518709268805-4e9042af9f23?w=500&h=750&fit=crop',
@@ -134,81 +54,170 @@ const PLATFORM_POSTERS = {
   'TOD (beIN) Dizileri': 'https://images.unsplash.com/photo-1560272564-c83b66b1ad12?w=500&h=750&fit=crop',
   'BluTV Dizileri (HBO)': 'https://images.unsplash.com/photo-1485846234645-a62644f84728?w=500&h=750&fit=crop',
   'Apple TV+ Dizileri': 'https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?w=500&h=750&fit=crop',
-  'GAİN Dizileri': 'https://images.unsplash.com/photo-1509347528160-9a9e33742cdb?w=500&h=750&fit=crop',
+  'GAIN Dizileri': 'https://images.unsplash.com/photo-1509347528160-9a9e33742cdb?w=500&h=750&fit=crop',
   'Exxen Dizileri': 'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=500&h=750&fit=crop',
-  'Günlük Diziler': 'https://images.unsplash.com/photo-1535016120720-40c646be5580?w=500&h=750&fit=crop',
+  'Gunluk Diziler': 'https://images.unsplash.com/photo-1535016120720-40c646be5580?w=500&h=750&fit=crop',
   'Anime': 'https://images.unsplash.com/photo-1541562232579-512a21360020?w=500&h=750&fit=crop',
-  'default': 'https://images.unsplash.com/photo-1535016120720-40c646be5580?w=500&h=750&fit=crop'
+  default: 'https://images.unsplash.com/photo-1535016120720-40c646be5580?w=500&h=750&fit=crop'
 };
 
-// Group episodes by series
-const groupBySeries = (episodes) => {
-  return groupSeriesEpisodes(episodes, PLATFORM_POSTERS);
+const getSeriesDefaultPoster = (genre) => {
+  const lowered = String(genre || '').toLowerCase();
+  const matched = Object.entries(PLATFORM_ALIASES).find(([, aliases]) =>
+    aliases.some((alias) => lowered.includes(alias))
+  );
+
+  if (matched?.[0] && PLATFORM_POSTERS[matched[0]]) {
+    return PLATFORM_POSTERS[matched[0]];
+  }
+
+  if (PLATFORM_POSTERS[genre]) {
+    return PLATFORM_POSTERS[genre];
+  }
+
+  return PLATFORM_POSTERS.default;
+};
+
+const collectSeriesPosterCandidates = (series) => {
+  const candidates = [];
+  const seen = new Set();
+
+  const push = (value) => {
+    if (!value || typeof value !== 'string') {
+      return;
+    }
+
+    const normalized = value.trim();
+    if (!normalized || seen.has(normalized)) {
+      return;
+    }
+
+    seen.add(normalized);
+    candidates.push(normalized);
+  };
+
+  push(series?.logo);
+
+  if (Array.isArray(series?.logoCandidates)) {
+    series.logoCandidates.forEach(push);
+  }
+
+  Object.values(series?.seasons || {}).flat().forEach((episodeItem) => {
+    push(episodeItem?.logo);
+  });
+
+  return candidates;
+};
+
+const toAsciiLower = (value) => String(value || '')
+  .normalize('NFKD')
+  .replace(/[\u0300-\u036f]/g, '')
+  .toLowerCase();
+
+const normalizeSeriesGenreId = (genre) => {
+  const value = String(genre || '');
+  const lowered = toAsciiLower(value);
+
+  if (lowered.includes('gain')) {
+    return 'GAIN Dizileri';
+  }
+
+  if (lowered.includes('gunluk') || lowered.includes('daily')) {
+    return 'Gunluk Diziler';
+  }
+
+  return value;
+};
+
+const resolveSeriesPrimaryPoster = (series) => {
+  const primary = collectSeriesPosterCandidates(series)[0];
+  return primary || getSeriesDefaultPoster(series?.genre);
 };
 
 // Series Card - Modern
-const SeriesCard = ({ series, onClick }) => {
+const SeriesCard = ({ series, onClick, onPosterStatus }) => {
   const [isHovered, setIsHovered] = useState(false);
-  const [imageError, setImageError] = useState(false);
-  
+  const [posterIndex, setPosterIndex] = useState(0);
+  const posterReportedRef = useRef(false);
+
   const seasonCount = Object.keys(series.seasons).length;
   const totalEpisodes = Object.values(series.seasons).flat().length;
   const platform = PLATFORMS.find(p => p.id === series.genre) || PLATFORMS[0];
-  
-  // Platform bazlı varsayılan görsel veya M3U'dan gelen logo
-  const getPosterUrl = () => {
-    if (imageError) {
-      return PLATFORM_POSTERS[series.genre] || PLATFORM_POSTERS['default'];
+  const posterCandidates = useMemo(() => collectSeriesPosterCandidates(series), [series]);
+  const providerPosterUrl = posterCandidates[posterIndex] || '';
+  const usingFallbackPoster = !providerPosterUrl;
+  const posterUrl = providerPosterUrl || getSeriesDefaultPoster(series.genre);
+
+  useEffect(() => {
+    setPosterIndex(0);
+    posterReportedRef.current = false;
+  }, [series.name, series.logo, series.genre, posterCandidates.length]);
+
+  const reportPosterResult = useCallback((success) => {
+    if (posterReportedRef.current) {
+      return;
     }
-    if (!series.logo || series.logo === '') {
-      return PLATFORM_POSTERS[series.genre] || PLATFORM_POSTERS['default'];
+
+    posterReportedRef.current = true;
+    onPosterStatus?.(series.name, success);
+  }, [onPosterStatus, series.name]);
+
+  const handlePosterError = useCallback(() => {
+    if (!usingFallbackPoster && posterIndex < posterCandidates.length - 1) {
+      setPosterIndex((current) => current + 1);
+      return;
     }
-    return series.logo;
-  };
-  
-  const posterUrl = getPosterUrl();
-  
+
+    setPosterIndex(posterCandidates.length);
+    reportPosterResult(false);
+  }, [posterCandidates.length, posterIndex, reportPosterResult, usingFallbackPoster]);
+
+  const handlePosterLoad = useCallback(() => {
+    reportPosterResult(!usingFallbackPoster);
+  }, [reportPosterResult, usingFallbackPoster]);
+
   return (
-    <div 
+    <div
       className="relative cursor-pointer transition-all duration-300"
       style={{ transform: isHovered ? 'scale(1.05)' : 'scale(1)', zIndex: isHovered ? 10 : 1 }}
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
       onClick={() => onClick(series)}
     >
-      <div 
+      <div
         className="rounded-2xl overflow-hidden"
-        style={{ 
+        style={{
           backgroundColor: BG_CARD,
           border: `2px solid ${isHovered ? platform.color : BORDER}`,
           boxShadow: isHovered ? `0 20px 40px rgba(0,0,0,0.5), 0 0 30px ${platform.color}30` : 'none'
         }}
       >
         <div className="relative aspect-[2/3]">
-          <img 
+          <img
             src={posterUrl}
             alt={series.name}
             className="w-full h-full object-cover"
             loading="lazy"
-            onError={() => setImageError(true)}
+            onError={handlePosterError}
+            onLoad={handlePosterLoad}
           />
-          
+
           {/* Platform Badge */}
-          <div 
+          <div
             className="absolute top-3 left-3 px-3 py-1 rounded-full text-xs font-bold"
             style={{ backgroundColor: platform.color, color: 'white' }}
           >
             {platform.name}
           </div>
-          
+
           {/* Hover Overlay */}
           {isHovered && (
-            <div 
+            <div
               className="absolute inset-0 flex flex-col justify-end p-4"
               style={{ background: 'linear-gradient(to top, rgba(0,0,0,0.95) 0%, rgba(0,0,0,0.5) 50%, transparent 100%)' }}
             >
               <h4 className="text-white font-bold text-lg mb-2">{series.name}</h4>
-              
+
               <div className="flex items-center gap-3 text-sm text-white/70 mb-3">
                 <span className="flex items-center gap-1">
                   <Star className="w-4 h-4 text-yellow-500" fill="currentColor" />
@@ -217,9 +226,9 @@ const SeriesCard = ({ series, onClick }) => {
                 <span>{seasonCount} Sezon</span>
                 <span>{totalEpisodes} Bolum</span>
               </div>
-              
+
               <div className="flex items-center gap-2">
-                <button 
+                <button
                   className="flex-1 py-2.5 rounded-xl font-bold text-sm flex items-center justify-center gap-2"
                   style={{ backgroundColor: PRIMARY, color: 'white' }}
                   onClick={(e) => { e.stopPropagation(); onClick(series); }}
@@ -227,7 +236,7 @@ const SeriesCard = ({ series, onClick }) => {
                   <Play className="w-4 h-4" fill="currentColor" />
                   Izle
                 </button>
-                <button 
+                <button
                   className="p-2.5 rounded-xl"
                   style={{ backgroundColor: 'rgba(255,255,255,0.1)' }}
                 >
@@ -241,9 +250,8 @@ const SeriesCard = ({ series, onClick }) => {
     </div>
   );
 };
-
 // Series Row - Yatay kaydirma
-const SeriesRow = ({ title, seriesList, onSeriesClick }) => {
+const SeriesRow = ({ title, seriesList, onSeriesClick, onPosterStatus }) => {
   const sliderRef = useRef(null);
   const [showLeft, setShowLeft] = useState(false);
   const [showRight, setShowRight] = useState(true);
@@ -288,7 +296,7 @@ const SeriesRow = ({ title, seriesList, onSeriesClick }) => {
         >
           {seriesList.map((series, index) => (
             <div key={`${series.name}-${index}`} style={{ scrollSnapAlign: 'start', minWidth: '200px' }}>
-              <SeriesCard series={series} onClick={onSeriesClick} />
+              <SeriesCard series={series} onClick={onSeriesClick} onPosterStatus={onPosterStatus} />
             </div>
           ))}
         </div>
@@ -314,8 +322,8 @@ const HeroSection = ({ series, onPlay }) => {
   const seasonCount = Object.keys(series.seasons).length;
   const platform = PLATFORMS.find(p => p.id === series.genre) || PLATFORMS[0];
   
-  // Platform bazlı hero görseli
-  const heroBgUrl = series.logo || PLATFORM_POSTERS[series.genre] || PLATFORM_POSTERS['default'];
+  // Platform-level hero image
+  const heroBgUrl = resolveSeriesPrimaryPoster(series);
   
   return (
     <div 
@@ -389,8 +397,8 @@ const SeriesDetailModal = ({ series, onClose, onPlayEpisode }) => {
   const episodes = series.seasons[selectedSeason] || [];
   const platform = PLATFORMS.find(p => p.id === series.genre) || PLATFORMS[0];
   
-  // Platform bazlı modal hero görseli
-  const modalBgUrl = series.logo || PLATFORM_POSTERS[series.genre] || PLATFORM_POSTERS['default'];
+  // Platform-level modal hero image
+  const modalBgUrl = resolveSeriesPrimaryPoster(series);
   
   return (
     <div 
@@ -524,7 +532,7 @@ function SeriesPage() {
     if (user && !hasValidSubscription(user)) {
       navigate('/profil/paketler', { 
         state: { 
-          message: 'Dizileri izlemek için aktif bir paket satın almalısınız.' 
+          message: 'Dizileri izlemek icin aktif bir paket satin almalisiniz.'
         } 
       })
     }
@@ -540,89 +548,81 @@ function SeriesPage() {
   
   // Debounce search query - 300ms gecikme
   const debouncedSearchQuery = useDebounce(searchQuery, 300);
+  const posterStatusRef = useRef(new Map());
+  const forcedPosterRefreshRef = useRef(false);
 
-  const fetchSeries = useCallback(async () => {
+  const resetPosterTracking = useCallback(() => {
+    posterStatusRef.current = new Map();
+  }, []);
+
+  const fetchSeries = useCallback(async ({ forceRefresh = false } = {}) => {
     try {
       setLoading(true);
       setError(null);
 
-      // User yükleniyor, bekle
       if (!user) {
-        return; // Yükleniyor durumunda kal
+        return;
       }
 
-      // Kullanıcının kendi M3U URL'sini kullan
       if (!(user?.hasM3U ?? user?.m3uUrl)) {
         setLoading(false);
         setError('M3U URL bulunamadi. Lutfen yonetici ile iletisime gecin.');
         return;
       }
-      
-      const groupedSeries = await fetchParsedPlaylist(user, token, {
-        cacheKey: 'series:v1',
-        parser: (playlistText) => groupBySeries(parseSeriesFromM3U(playlistText))
-      });
 
-      if (groupedSeries.length === 0) {
-        throw new Error('Playlistte gosterilecek dizi kaydi bulunamadi.');
+      const catalogSeries = await fetchSeriesCatalog(user, token, { forceRefresh });
+      const normalizedSeries = catalogSeries.map((item) => ({
+        ...item,
+        genre: normalizeSeriesGenreId(item.genre)
+      }));
+
+      if (normalizedSeries.length === 0) {
+        throw new Error('Katalogda gosterilecek dizi kaydi bulunamadi.');
       }
 
-      setSeries(groupedSeries);
-      
-      const netflixSeries = groupedSeries.find(s => s.genre === 'Netflix Dizileri');
-      setHeroSeries(netflixSeries || groupedSeries[0]);
+      setSeries(normalizedSeries);
 
+      const netflixSeries = normalizedSeries.find((item) => item.genre === 'Netflix Dizileri');
+      setHeroSeries(netflixSeries || normalizedSeries[0]);
+      resetPosterTracking();
       setLoading(false);
-      return;
-
-      /* Legacy direct-provider fallback removed in V4.
-      // Dogrudan provider'dan cek - Backend artik Turkiye'de
-      console.log('[Series] Fetching M3U from provider:', user.m3uUrl.substring(0, 60));
-      
-      const response = await fetch(user.m3uUrl, {
-        headers: {
-          'User-Agent': 'VLC/3.0.18 LibVLC/3.0.18'
-        }
-      });
-      
-      if (!response.ok) {
-        // Detayli hata mesaji
-        if (response.status === 404) {
-          throw new Error('M3U playlist bulunamadi (404). URL gecersiz veya sunucu erisilemiyor.');
-        } else if (response.status === 403) {
-          throw new Error('M3U erisim izni reddedildi (403). Abonelik suresi dolmus olabilir.');
-        } else if (response.status === 401) {
-          throw new Error('Oturum süresi dolmuş. Lütfen tekrar giriş yapın.');
-        } else {
-          throw new Error(`M3U yuklenemedi (HTTP ${response.status})`);
-        }
-      }
-      
-      const text = await response.text();
-      
-      // M3U icerigi bos mu kontrol et
-      if (!text || text.trim().length === 0) {
-        throw new Error('M3U playlist bos veya gecersiz icerik');
-      }
-      
-      const parsedEpisodes = parseSeriesFromM3U(text);
-      const groupedSeries = groupBySeries(parsedEpisodes);
-      setSeries(groupedSeries);
-      
-      const netflixSeries = groupedSeries.find(s => s.genre === 'Netflix Dizileri');
-      setHeroSeries(netflixSeries || groupedSeries[0]);
-      setLoading(false);
-      */
     } catch (err) {
-      console.error('M3U fetch error:', err);
+      console.error('Series catalog fetch error:', err);
       setError('Diziler yuklenirken hata olustu: ' + err.message);
       setLoading(false);
     }
-  }, [user, token]);
+  }, [resetPosterTracking, token, user]);
+
+  const handlePosterStatus = useCallback((seriesName, success) => {
+    if (!seriesName || forcedPosterRefreshRef.current) {
+      return;
+    }
+
+    const map = posterStatusRef.current;
+    if (map.has(seriesName)) {
+      return;
+    }
+
+    map.set(seriesName, Boolean(success));
+
+    if (map.size < POSTER_FAILURE_MIN_SAMPLE) {
+      return;
+    }
+
+    const failures = Array.from(map.values()).filter((value) => !value).length;
+    const failureRatio = failures / map.size;
+
+    if (failureRatio >= POSTER_FAILURE_RATIO_THRESHOLD) {
+      forcedPosterRefreshRef.current = true;
+      fetchSeries({ forceRefresh: true }).catch(() => {});
+    }
+  }, [fetchSeries]);
 
   useEffect(() => {
+    forcedPosterRefreshRef.current = false;
+    resetPosterTracking();
     fetchSeries();
-  }, [fetchSeries]);
+  }, [fetchSeries, resetPosterTracking]);
 
   // Memoized filtered series - sadece debounced query veya kategori degistiginde calisir
   const filteredSeries = useMemo(() => {
@@ -699,7 +699,7 @@ function SeriesPage() {
         <div className="text-center">
           <p className="text-white mb-4">{error}</p>
           <button 
-            onClick={fetchSeries}
+            onClick={() => fetchSeries({ forceRefresh: true })}
             className="px-6 py-3 rounded-xl font-bold text-white"
             style={{ backgroundColor: PRIMARY }}
           >
@@ -795,12 +795,12 @@ function SeriesPage() {
         {/* Series Rows */}
         {activeCategory === 'all' && !searchQuery && (
           <>
-            <SeriesRow title="Netflix Dizileri" seriesList={seriesByCategory['Netflix Dizileri'] || []} onSeriesClick={setSelectedSeries} />
-            <SeriesRow title="Disney+ Dizileri" seriesList={seriesByCategory['Disney+ Dizileri'] || []} onSeriesClick={setSelectedSeries} />
-            <SeriesRow title="Amazon Prime" seriesList={seriesByCategory['Amazon Prime Dizileri'] || []} onSeriesClick={setSelectedSeries} />
-            <SeriesRow title="BluTV (HBO)" seriesList={seriesByCategory['BluTV Dizileri (HBO)'] || []} onSeriesClick={setSelectedSeries} />
-            <SeriesRow title="Anime" seriesList={seriesByCategory['Anime'] || []} onSeriesClick={setSelectedSeries} />
-            <SeriesRow title="Gunluk Diziler" seriesList={seriesByCategory['Gunluk Diziler'] || []} onSeriesClick={setSelectedSeries} />
+            <SeriesRow title="Netflix Dizileri" seriesList={seriesByCategory['Netflix Dizileri'] || []} onSeriesClick={setSelectedSeries} onPosterStatus={handlePosterStatus} />
+            <SeriesRow title="Disney+ Dizileri" seriesList={seriesByCategory['Disney+ Dizileri'] || []} onSeriesClick={setSelectedSeries} onPosterStatus={handlePosterStatus} />
+            <SeriesRow title="Amazon Prime" seriesList={seriesByCategory['Amazon Prime Dizileri'] || []} onSeriesClick={setSelectedSeries} onPosterStatus={handlePosterStatus} />
+            <SeriesRow title="BluTV (HBO)" seriesList={seriesByCategory['BluTV Dizileri (HBO)'] || []} onSeriesClick={setSelectedSeries} onPosterStatus={handlePosterStatus} />
+            <SeriesRow title="Anime" seriesList={seriesByCategory['Anime'] || []} onSeriesClick={setSelectedSeries} onPosterStatus={handlePosterStatus} />
+            <SeriesRow title="Gunluk Diziler" seriesList={seriesByCategory['Gunluk Diziler'] || []} onSeriesClick={setSelectedSeries} onPosterStatus={handlePosterStatus} />
           </>
         )}
         
@@ -818,7 +818,7 @@ function SeriesPage() {
             ) : (
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
                 {filteredSeries.map((s, index) => (
-                  <SeriesCard key={`${s.name}-${index}`} series={s} onClick={setSelectedSeries} />
+                  <SeriesCard key={`${s.name}-${index}`} series={s} onClick={setSelectedSeries} onPosterStatus={handlePosterStatus} />
                 ))}
               </div>
             )}
@@ -839,3 +839,5 @@ function SeriesPage() {
 }
 
 export default SeriesPage;
+
+

@@ -20,6 +20,9 @@ const path = require('path');
 const { spawn } = require('child_process');
 const logger = require('../../config/logger');
 const { asyncHandler } = require('../middleware/errorHandler');
+const { normalizeProviderPlaylistUrl } = require('../../utils/providerPlaylistUrl');
+const { normalizeCodecName, isBrowserSupportedAudioCodec, buildPlaybackDecision } = require('../../utils/playbackDecision');
+const { buildSeriesCatalog, buildMoviesCatalog } = require('../../utils/catalogBuilder');
 
 class M3uController {
   constructor(getUserM3U, cacheService, jwtSecret) {
@@ -140,14 +143,7 @@ class M3uController {
   }
 
   _normalizeProviderPlaylistUrl(value) {
-    if (!value || typeof value !== 'string') {
-      return value;
-    }
-
-    return value
-      .trim()
-      .replace('/playlisth/', '/playlist/')
-      .replace('/playlists/', '/playlist/');
+    return normalizeProviderPlaylistUrl(value, { enforceHlsOutput: true });
   }
 
   _createAxiosConfig(overrides = {}, proxy = null) {
@@ -309,7 +305,12 @@ class M3uController {
       contentLength: Number.isFinite(contentLength) ? contentLength : null,
       seekableGuess,
       containerType,
-      codecRisk: containerType === 'ts' || contentType.toLowerCase().includes('video/mp2t')
+      codecRisk: containerType === 'ts' || contentType.toLowerCase().includes('video/mp2t'),
+      videoCodec: null,
+      audioCodec: null,
+      hasAudio: null,
+      audioBrowserSupported: null,
+      remuxReason: null
     };
   }
 
@@ -318,30 +319,58 @@ class M3uController {
       return false;
     }
 
-    const supportedContainers = new Set(['hls', 'mp4', 'webm']);
-    return supportedContainers.has(probe.containerType) && !probe.codecRisk;
+    if (probe.playbackStrategy === 'native' || probe.playbackStrategy === 'hls') {
+      return true;
+    }
+
+    return false;
   }
 
-  _buildPlaybackProbePayload(targetUrl, probe) {
+  _buildPlaybackProbePayload(targetUrl, probe, mediaAnalysis = null) {
     const containerType = probe?.containerType || this._getContainerType(targetUrl);
-    const hasByteRanges = Boolean(probe?.acceptRanges);
-    const shouldUseNativeFirst =
-      containerType === 'mp4' ||
-      containerType === 'webm' ||
-      (containerType === 'mkv' && hasByteRanges && !probe?.codecRisk);
-    const shouldRemux = !shouldUseNativeFirst;
+    const ffprobeAvailable = Boolean(mediaAnalysis);
+    const videoCodec = normalizeCodecName(mediaAnalysis?.videoCodec);
+    const audioCodec = normalizeCodecName(mediaAnalysis?.audioCodec);
+    const hasAudio = typeof mediaAnalysis?.hasAudio === 'boolean'
+      ? mediaAnalysis.hasAudio
+      : Boolean(audioCodec);
 
-    return {
+    let decision = buildPlaybackDecision({
+      containerType,
+      acceptRanges: Boolean(probe?.acceptRanges),
+      hasAudio,
+      audioCodec
+    });
+
+    if (!ffprobeAvailable && containerType !== 'hls') {
+      decision = {
+        playbackStrategy: 'remux-hls',
+        remuxRecommended: true,
+        remuxFallback: true,
+        remuxReason: 'ffprobe-unavailable',
+        audioBrowserSupported: false
+      };
+    }
+
+    const payload = {
       ...(probe || {}),
-      playbackStrategy: containerType === 'hls'
-        ? 'hls'
-        : shouldRemux
-          ? 'remux-hls'
-          : 'native',
-      remuxRecommended: shouldRemux,
-      remuxFallback: containerType === 'mkv',
-      directPlayLikely: this._canDirectPlayProbe(probe)
+      containerType,
+      ffprobeAvailable,
+      videoCodec,
+      audioCodec,
+      hasAudio,
+      audioBrowserSupported: decision.audioBrowserSupported,
+      playbackStrategy: decision.playbackStrategy,
+      remuxRecommended: decision.remuxRecommended,
+      remuxFallback: decision.remuxFallback,
+      remuxReason: decision.remuxReason,
+      directPlayLikely: false
     };
+
+    payload.directPlayLikely = this._canDirectPlayProbe(payload);
+    payload.codecRisk = payload.playbackStrategy === 'remux-hls';
+
+    return payload;
   }
 
   async _isCommandAvailable(command) {
@@ -408,11 +437,13 @@ class M3uController {
 
       const payload = JSON.parse(result.stdout || '{}');
       const videoStream = payload.streams?.find((stream) => stream.codec_type === 'video') || null;
-      const audioStream = payload.streams?.find((stream) => stream.codec_type === 'audio') || null;
+      const audioStreams = payload.streams?.filter((stream) => stream.codec_type === 'audio') || [];
+      const audioStream = audioStreams[0] || null;
 
       return {
-        videoCodec: videoStream?.codec_name || null,
-        audioCodec: audioStream?.codec_name || null
+        videoCodec: normalizeCodecName(videoStream?.codec_name),
+        audioCodec: normalizeCodecName(audioStream?.codec_name),
+        hasAudio: audioStreams.length > 0
       };
     } catch (error) {
       logger.warn('ffprobe analysis failed, continuing with conservative defaults', {
@@ -424,14 +455,21 @@ class M3uController {
   }
 
   _getVodTranscodeProfile(mediaAnalysis) {
-    const videoCodec = mediaAnalysis?.videoCodec || null;
-    const audioCodec = mediaAnalysis?.audioCodec || null;
+    const videoCodec = normalizeCodecName(mediaAnalysis?.videoCodec);
+    const audioCodec = normalizeCodecName(mediaAnalysis?.audioCodec);
+    const hasAudio = typeof mediaAnalysis?.hasAudio === 'boolean'
+      ? mediaAnalysis.hasAudio
+      : Boolean(audioCodec);
+    const forceVideoTranscode = String(process.env.VOD_REMUX_FORCE_VIDEO_TRANSCODE || 'true')
+      .toLowerCase() !== 'false';
 
     return {
       videoCodec,
       audioCodec,
-      transcodeVideo: videoCodec !== 'h264',
-      transcodeAudio: audioCodec !== 'aac'
+      hasAudio,
+      transcodeVideo: forceVideoTranscode || videoCodec !== 'h264',
+      transcodeAudio: true,
+      audioBrowserSupported: hasAudio ? isBrowserSupportedAudioCodec(audioCodec) : true
     };
   }
 
@@ -567,6 +605,49 @@ class M3uController {
     const error = new Error(`Provider returned HTTP ${lastStatus || 502}`);
     error.statusCode = lastStatus || 502;
     throw error;
+  }
+
+  async _resolveUserPlaylistUrl(code) {
+    const result = await this._getUserM3U.execute({ code });
+    const m3uUrl = this._normalizeProviderPlaylistUrl(result?.url);
+
+    if (!m3uUrl) {
+      const error = new Error('No M3U URL assigned');
+      error.statusCode = 404;
+      throw error;
+    }
+
+    this._userProviderOrigins.set(code, new URL(m3uUrl).origin);
+    return m3uUrl;
+  }
+
+  async _getRawPlaylistForCode(code, options = {}) {
+    const { forceRefresh = false } = options;
+    const m3uUrl = await this._resolveUserPlaylistUrl(code);
+    const cacheKey = `m3u:content:${code}`;
+    let rawPlaylist = !forceRefresh ? await this._cacheService.get(cacheKey) : null;
+
+    if (!rawPlaylist) {
+      rawPlaylist = await this._circuitBreaker.fire(m3uUrl);
+      await this._cacheService.set(cacheKey, rawPlaylist, 300);
+    }
+
+    await this._rememberAllowedOrigins(code, rawPlaylist, m3uUrl);
+
+    return {
+      m3uUrl,
+      rawPlaylist
+    };
+  }
+
+  async _getCatalogFromCache(code, type) {
+    const cacheKey = `catalog:${type}:${code}:v1`;
+    return this._cacheService.get(cacheKey);
+  }
+
+  async _setCatalogCache(code, type, value) {
+    const cacheKey = `catalog:${type}:${code}:v1`;
+    await this._cacheService.set(cacheKey, value, 300);
   }
 
   _getBaseApiUrl(req) {
@@ -767,21 +848,23 @@ class M3uController {
         '-c:v', 'libx264',
         '-preset', 'veryfast',
         '-crf', '22',
-        '-pix_fmt', 'yuv420p'
+        '-pix_fmt', 'yuv420p',
+        '-profile:v', 'main',
+        '-level', '4.1',
+        '-g', '48',
+        '-keyint_min', '48',
+        '-sc_threshold', '0',
+        '-force_key_frames', 'expr:gte(t,n_forced*4)'
       );
     } else {
       args.push('-c:v', 'copy');
     }
 
-    if (profile.transcodeAudio) {
-      args.push(
-        '-c:a', 'aac',
-        '-b:a', '128k',
-        '-ac', '2'
-      );
-    } else {
-      args.push('-c:a', 'copy');
-    }
+    args.push(
+      '-c:a', 'aac',
+      '-b:a', '128k',
+      '-ac', '2'
+    );
 
     args.push(
       '-max_muxing_queue_size', '1024',
@@ -1040,47 +1123,21 @@ class M3uController {
     const { code } = req.params;
     const accessToken = req.user.token;
     const baseApiUrl = this._getBaseApiUrl(req);
+    let rawPlaylist;
 
-    let m3uUrl;
     try {
-      const result = await this._getUserM3U.execute({ code });
-      m3uUrl = result.url;
-
-      if (!m3uUrl) {
-        return res.status(404).json({
-          error: 'Not Found',
-          message: 'No M3U URL assigned'
-        });
-      }
-
-      m3uUrl = this._normalizeProviderPlaylistUrl(m3uUrl);
-
-      this._userProviderOrigins.set(code, new URL(m3uUrl).origin);
+      ({ rawPlaylist } = await this._getRawPlaylistForCode(code));
     } catch (error) {
-      logger.error('Failed to resolve user M3U URL', { code, error: error.message });
-      return res.status(403).json({
-        error: 'Forbidden',
+      const statusCode = error.statusCode || (error.message.includes('No M3U URL') ? 404 : 502);
+      logger.error('Provider playlist fetch failed', {
+        code,
+        error: error.message,
+        statusCode
+      });
+      return res.status(statusCode).json({
+        error: statusCode === 404 ? 'Not Found' : 'Bad Gateway',
         message: error.message
       });
-    }
-
-    const cacheKey = `m3u:content:${code}`;
-    let rawPlaylist = await this._cacheService.get(cacheKey);
-
-    if (!rawPlaylist) {
-      try {
-        rawPlaylist = await this._circuitBreaker.fire(m3uUrl);
-        await this._cacheService.set(cacheKey, rawPlaylist, 300);
-      } catch (error) {
-        logger.error('Provider playlist fetch failed', {
-          code,
-          error: error.message
-        });
-        return res.status(502).json({
-          error: 'Bad Gateway',
-          message: error.message
-        });
-      }
     }
 
     const rewrittenPlaylist = this._rewritePlaylist(rawPlaylist, {
@@ -1089,14 +1146,92 @@ class M3uController {
       token: accessToken
     });
 
-    await this._rememberAllowedOrigins(code, rawPlaylist, m3uUrl);
-
     res.set({
       'Content-Type': 'application/x-mpegURL',
       'Cache-Control': 'private, max-age=60'
     });
 
     res.send(rewrittenPlaylist);
+  });
+
+  catalogSeries = asyncHandler(async (req, res) => {
+    const code = req.user.code;
+    const accessToken = req.user.token;
+    const baseApiUrl = this._getBaseApiUrl(req);
+    const forceRefresh = String(req.query.forceRefresh || '').toLowerCase() === 'true' || req.query.forceRefresh === '1';
+
+    try {
+      let catalog = !forceRefresh ? await this._getCatalogFromCache(code, 'series') : null;
+
+      if (!Array.isArray(catalog)) {
+        const { rawPlaylist } = await this._getRawPlaylistForCode(code, { forceRefresh });
+        catalog = buildSeriesCatalog(rawPlaylist, {
+          streamProxyBuilder: (targetUrl) => this._buildStreamProxyUrl(baseApiUrl, code, accessToken, targetUrl),
+          logoProxyBuilder: (targetUrl) => this._buildLogoProxyUrl(baseApiUrl, code, accessToken, targetUrl)
+        });
+        await this._setCatalogCache(code, 'series', catalog);
+      }
+
+      res.json({
+        status: 'success',
+        data: {
+          items: catalog,
+          total: catalog.length,
+          generatedAt: new Date().toISOString()
+        }
+      });
+    } catch (error) {
+      const statusCode = error.statusCode || 502;
+      logger.error('Series catalog build failed', {
+        code,
+        error: error.message,
+        statusCode
+      });
+      res.status(statusCode).json({
+        error: 'Series catalog failed',
+        message: error.message
+      });
+    }
+  });
+
+  catalogMovies = asyncHandler(async (req, res) => {
+    const code = req.user.code;
+    const accessToken = req.user.token;
+    const baseApiUrl = this._getBaseApiUrl(req);
+    const forceRefresh = String(req.query.forceRefresh || '').toLowerCase() === 'true' || req.query.forceRefresh === '1';
+
+    try {
+      let catalog = !forceRefresh ? await this._getCatalogFromCache(code, 'movies') : null;
+
+      if (!Array.isArray(catalog)) {
+        const { rawPlaylist } = await this._getRawPlaylistForCode(code, { forceRefresh });
+        catalog = buildMoviesCatalog(rawPlaylist, {
+          streamProxyBuilder: (targetUrl) => this._buildStreamProxyUrl(baseApiUrl, code, accessToken, targetUrl),
+          logoProxyBuilder: (targetUrl) => this._buildLogoProxyUrl(baseApiUrl, code, accessToken, targetUrl)
+        });
+        await this._setCatalogCache(code, 'movies', catalog);
+      }
+
+      res.json({
+        status: 'success',
+        data: {
+          items: catalog,
+          total: catalog.length,
+          generatedAt: new Date().toISOString()
+        }
+      });
+    } catch (error) {
+      const statusCode = error.statusCode || 502;
+      logger.error('Movies catalog build failed', {
+        code,
+        error: error.message,
+        statusCode
+      });
+      res.status(statusCode).json({
+        error: 'Movies catalog failed',
+        message: error.message
+      });
+    }
   });
 
   proxyStream = asyncHandler(async (req, res) => {
@@ -1249,7 +1384,8 @@ class M3uController {
         }
       }
 
-      const probe = this._buildPlaybackProbePayload(targetUrl, baseProbe);
+      const mediaAnalysis = await this._probeSourceWithFfprobe(targetUrl);
+      const probe = this._buildPlaybackProbePayload(targetUrl, baseProbe, mediaAnalysis);
 
       res.json({
         status: 'success',
@@ -1474,6 +1610,8 @@ class M3uController {
     const cacheKey = `m3u:content:${code}`;
     await this._cacheService.delete(cacheKey);
     await this._cacheService.delete(`m3u:allowed-origins:${code}`);
+    await this._cacheService.delete(`catalog:series:${code}:v1`);
+    await this._cacheService.delete(`catalog:movies:${code}:v1`);
     this._userProviderOrigins.delete(code);
     this._userAllowedOrigins.delete(code);
 

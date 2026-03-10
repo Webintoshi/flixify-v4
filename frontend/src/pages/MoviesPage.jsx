@@ -5,36 +5,98 @@ import {
   Play, Plus, Info, Search, X, Star, TrendingUp, 
   ChevronLeft, ChevronRight, Film
 } from 'lucide-react'
-import { fetchParsedPlaylist, hasValidSubscription } from '../services/playlist'
-import { dedupeByTitle, parseMoviesFromPlaylist } from '../utils/playlistParser'
+import { fetchMoviesCatalog, hasValidSubscription } from '../services/playlist'
 
 const PRIMARY = '#E50914'
 const BG_DARK = '#0a0a0a'
 const BG_SURFACE = '#141414'
 const BG_CARD = '#1a1a1a'
 const BORDER = '#2a2a2a'
+const POSTER_FAILURE_RATIO_THRESHOLD = 0.25
+const POSTER_FAILURE_MIN_SAMPLE = 24
 
-// Turler - Renk kodlari ile
+// Genres with color coding
 const GENRES = [
-  { id: 'all', name: 'Tumu', color: '#E50914', icon: '✨' },
-  { id: 'Netflix', name: 'Netflix', color: '#E50914', icon: '🎬' },
-  { id: 'Dram & Romantik', name: 'Dram & Romantik', color: '#e91e63', icon: '💕' },
-  { id: 'Aksiyon & Macera', name: 'Aksiyon & Macera', color: '#ff5722', icon: '💥' },
-  { id: 'Komedi', name: 'Komedi', color: '#ffeb3b', icon: '😄' },
-  { id: 'Korku & Gerilim', name: 'Korku & Gerilim', color: '#9c27b0', icon: '👻' },
-  { id: 'Animasyon & Çizgi Film', name: 'Animasyon', color: '#00bcd4', icon: '🎨' },
-  { id: 'Bilim Kurgu & Fantastik', name: 'Bilim Kurgu', color: '#3f51b5', icon: '🚀' },
-  { id: 'Yerli Filmler', name: 'Yerli Filmler', color: '#4caf50', icon: '🌟' },
-  { id: '4K / UHD Filmler', name: '4K / UHD', color: '#2196f3', icon: '💎' },
-  { id: 'Belgesel & Biyografi', name: 'Belgesel', color: '#795548', icon: '📚' },
-  { id: 'Suç & Polisiye', name: 'Suc', color: '#607d8b', icon: '🔍' },
+  { id: 'all', name: 'Tumu', color: '#E50914', icon: '*' },
+  { id: 'Netflix', name: 'Netflix', color: '#E50914', icon: 'NF' },
+  { id: 'Dram & Romantik', name: 'Dram & Romantik', color: '#e91e63', icon: 'DR' },
+  { id: 'Aksiyon & Macera', name: 'Aksiyon & Macera', color: '#ff5722', icon: 'AK' },
+  { id: 'Komedi', name: 'Komedi', color: '#ffeb3b', icon: 'KM' },
+  { id: 'Korku & Gerilim', name: 'Korku & Gerilim', color: '#9c27b0', icon: 'KG' },
+  { id: 'Animasyon & Cizgi Film', name: 'Animasyon', color: '#00bcd4', icon: 'AN' },
+  { id: 'Bilim Kurgu & Fantastik', name: 'Bilim Kurgu', color: '#3f51b5', icon: 'BK' },
+  { id: 'Yerli Filmler', name: 'Yerli Filmler', color: '#4caf50', icon: 'YR' },
+  { id: '4K / UHD Filmler', name: '4K / UHD', color: '#2196f3', icon: '4K' },
+  { id: 'Belgesel & Biyografi', name: 'Belgesel', color: '#795548', icon: 'BG' },
+  { id: 'Suc & Polisiye', name: 'Suc', color: '#607d8b', icon: 'SP' },
 ]
 
+const MOVIE_POSTERS = {
+  'Dram & Romantik': 'https://images.unsplash.com/photo-1485846234645-a62644f84728?w=500&h=750&fit=crop',
+  'Aksiyon & Macera': 'https://images.unsplash.com/photo-1536440136628-849c177e76a1?w=500&h=750&fit=crop',
+  Komedi: 'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=500&h=750&fit=crop',
+  'Korku & Gerilim': 'https://images.unsplash.com/photo-1509248961158-e54f6934749c?w=500&h=750&fit=crop',
+  'Animasyon & Cizgi Film': 'https://images.unsplash.com/photo-1534447677768-be436bb09401?w=500&h=750&fit=crop',
+  'Bilim Kurgu & Fantastik': 'https://images.unsplash.com/photo-1446776811953-b23d57bd21aa?w=500&h=750&fit=crop',
+  'Yerli Filmler': 'https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?w=500&h=750&fit=crop',
+  '4K / UHD Filmler': 'https://images.unsplash.com/photo-1535016120720-40c646be5580?w=500&h=750&fit=crop',
+  default: 'https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?w=500&h=750&fit=crop'
+}
+
+const getMovieDefaultPoster = (genre) => MOVIE_POSTERS[genre] || MOVIE_POSTERS.default
+
+const collectMoviePosterCandidates = (movie) => {
+  const candidates = []
+  const seen = new Set()
+
+  const push = (value) => {
+    if (!value || typeof value !== 'string') {
+      return
+    }
+
+    const normalized = value.trim()
+    if (!normalized || seen.has(normalized)) {
+      return
+    }
+
+    seen.add(normalized)
+    candidates.push(normalized)
+  }
+
+  push(movie?.logo)
+  if (Array.isArray(movie?.logoCandidates)) {
+    movie.logoCandidates.forEach(push)
+  }
+
+  return candidates
+}
+
+const toAsciiLower = (value) => String(value || '')
+  .normalize('NFKD')
+  .replace(/[\u0300-\u036f]/g, '')
+  .toLowerCase()
+
+const normalizeMovieGenreId = (genre) => {
+  const value = String(genre || '')
+  const lowered = toAsciiLower(value)
+
+  if (lowered.includes('animasyon') && lowered.includes('cizgi')) {
+    return 'Animasyon & Cizgi Film'
+  }
+
+  if (lowered.includes('suc')) {
+    return 'Suc & Polisiye'
+  }
+
+  return value
+}
+
 // Movie Card - Modern
-const MovieCard = ({ movie, onClick }) => {
+const MovieCard = ({ movie, onClick, onPosterStatus }) => {
   const [isHovered, setIsHovered] = useState(false)
-  const [imageError, setImageError] = useState(false)
-  
+  const [posterIndex, setPosterIndex] = useState(0)
+  const posterReportedRef = useRef(false)
+
   const extractYear = (title) => {
     const match = title.match(/\((\d{4})\)/)
     return match ? match[1] : ''
@@ -43,74 +105,90 @@ const MovieCard = ({ movie, onClick }) => {
   const cleanTitle = movie.title.replace(/\s*\(\d{4}\)\s*$/, '')
   const year = extractYear(movie.title)
   const genre = GENRES.find(g => g.id === movie.genre) || GENRES[0]
-  
-  const getDefaultPoster = (genreId) => {
-    const images = {
-      'Dram & Romantik': 'https://images.unsplash.com/photo-1485846234645-a62644f84728?w=500&h=750&fit=crop',
-      'Aksiyon & Macera': 'https://images.unsplash.com/photo-1536440136628-849c177e76a1?w=500&h=750&fit=crop',
-      'Komedi': 'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=500&h=750&fit=crop',
-      'Korku & Gerilim': 'https://images.unsplash.com/photo-1509248961158-e54f6934749c?w=500&h=750&fit=crop',
-      'Animasyon & Çizgi Film': 'https://images.unsplash.com/photo-1534447677768-be436bb09401?w=500&h=750&fit=crop',
-      'Bilim Kurgu & Fantastik': 'https://images.unsplash.com/photo-1446776811953-b23d57bd21aa?w=500&h=750&fit=crop',
-      'Yerli Filmler': 'https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?w=500&h=750&fit=crop',
-      '4K / UHD Filmler': 'https://images.unsplash.com/photo-1535016120720-40c646be5580?w=500&h=750&fit=crop',
-      'default': 'https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?w=500&h=750&fit=crop'
-    }
-    return images[genreId] || images['default']
-  }
+  const posterCandidates = useMemo(() => collectMoviePosterCandidates(movie), [movie])
+  const providerPosterUrl = posterCandidates[posterIndex] || ''
+  const usingFallbackPoster = !providerPosterUrl
+  const posterUrl = providerPosterUrl || getMovieDefaultPoster(movie.genre)
 
-  const posterUrl = imageError || !movie.logo ? getDefaultPoster(movie.genre) : movie.logo
-  
+  useEffect(() => {
+    setPosterIndex(0)
+    posterReportedRef.current = false
+  }, [movie.id, movie.title, movie.logo, movie.genre, posterCandidates.length])
+
+  const reportPosterResult = useCallback((success) => {
+    if (posterReportedRef.current) {
+      return
+    }
+
+    posterReportedRef.current = true
+    onPosterStatus?.(movie.title, success)
+  }, [movie.title, onPosterStatus])
+
+  const handlePosterError = useCallback(() => {
+    if (!usingFallbackPoster && posterIndex < posterCandidates.length - 1) {
+      setPosterIndex((current) => current + 1)
+      return
+    }
+
+    setPosterIndex(posterCandidates.length)
+    reportPosterResult(false)
+  }, [posterCandidates.length, posterIndex, reportPosterResult, usingFallbackPoster])
+
+  const handlePosterLoad = useCallback(() => {
+    reportPosterResult(!usingFallbackPoster)
+  }, [reportPosterResult, usingFallbackPoster])
+
   return (
-    <div 
+    <div
       className="relative cursor-pointer transition-all duration-300"
       style={{ transform: isHovered ? 'scale(1.05)' : 'scale(1)', zIndex: isHovered ? 10 : 1 }}
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
       onClick={() => onClick(movie)}
     >
-      <div 
+      <div
         className="rounded-2xl overflow-hidden"
-        style={{ 
+        style={{
           backgroundColor: BG_CARD,
           border: `2px solid ${isHovered ? genre.color : BORDER}`,
           boxShadow: isHovered ? `0 20px 40px rgba(0,0,0,0.5), 0 0 30px ${genre.color}30` : 'none'
         }}
       >
         <div className="relative aspect-[2/3]">
-          <img 
+          <img
             src={posterUrl}
             alt={cleanTitle}
             className="w-full h-full object-cover"
             loading="lazy"
-            onError={() => setImageError(true)}
+            onError={handlePosterError}
+            onLoad={handlePosterLoad}
           />
-          
+
           {/* Tur Badge */}
-          <div 
+          <div
             className="absolute top-3 left-3 px-3 py-1 rounded-full text-xs font-bold"
             style={{ backgroundColor: genre.color, color: 'white' }}
           >
             {genre.name}
           </div>
-          
+
           {/* Yil Badge */}
           {year && (
-            <div 
+            <div
               className="absolute top-3 right-3 px-2 py-1 rounded-lg text-xs font-bold bg-black/60 text-white"
             >
               {year}
             </div>
           )}
-          
+
           {/* Hover Overlay */}
           {isHovered && (
-            <div 
+            <div
               className="absolute inset-0 flex flex-col justify-end p-4"
               style={{ background: 'linear-gradient(to top, rgba(0,0,0,0.95) 0%, rgba(0,0,0,0.5) 50%, transparent 100%)' }}
             >
               <h4 className="text-white font-bold text-lg mb-2 line-clamp-2">{cleanTitle}</h4>
-              
+
               <div className="flex items-center gap-3 text-sm text-white/70 mb-3">
                 <span className="flex items-center gap-1">
                   <Star className="w-4 h-4 text-yellow-500" fill="currentColor" />
@@ -119,9 +197,9 @@ const MovieCard = ({ movie, onClick }) => {
                 {year && <span>{year}</span>}
                 <span>HD</span>
               </div>
-              
+
               <div className="flex items-center gap-2">
-                <button 
+                <button
                   className="flex-1 py-2.5 rounded-xl font-bold text-sm flex items-center justify-center gap-2"
                   style={{ backgroundColor: PRIMARY, color: 'white' }}
                   onClick={(e) => { e.stopPropagation(); onClick(movie); }}
@@ -129,7 +207,7 @@ const MovieCard = ({ movie, onClick }) => {
                   <Play className="w-4 h-4" fill="currentColor" />
                   Izle
                 </button>
-                <button 
+                <button
                   className="p-2.5 rounded-xl"
                   style={{ backgroundColor: 'rgba(255,255,255,0.1)' }}
                 >
@@ -143,9 +221,8 @@ const MovieCard = ({ movie, onClick }) => {
     </div>
   )
 }
-
 // Movie Row - Yatay kaydirma
-const MovieRow = ({ title, movies, onMovieClick }) => {
+const MovieRow = ({ title, movies, onMovieClick, onPosterStatus }) => {
   const sliderRef = useRef(null)
   const [showLeft, setShowLeft] = useState(false)
   const [showRight, setShowRight] = useState(true)
@@ -190,7 +267,7 @@ const MovieRow = ({ title, movies, onMovieClick }) => {
         >
           {movies.map((movie, index) => (
             <div key={`${movie.id}-${index}`} style={{ scrollSnapAlign: 'start', minWidth: '200px' }}>
-              <MovieCard movie={movie} onClick={onMovieClick} />
+              <MovieCard movie={movie} onClick={onMovieClick} onPosterStatus={onPosterStatus} />
             </div>
           ))}
         </div>
@@ -217,22 +294,16 @@ const HeroSection = ({ movie, onPlay }) => {
   const year = movie.title.match(/\((\d{4})\)/)?.[1] || ''
   const genre = GENRES.find(g => g.id === movie.genre) || GENRES[0]
   
-  const getBackdrop = (genreId) => {
-    const images = {
-      'Dram & Romantik': 'https://images.unsplash.com/photo-1485846234645-a62644f84728?w=1920&h=1080&fit=crop',
-      'Aksiyon & Macera': 'https://images.unsplash.com/photo-1536440136628-849c177e76a1?w=1920&h=1080&fit=crop',
-      'Komedi': 'https://images.unsplash.com/photo-1514525253161-7a46d19cd819?w=1920&h=1080&fit=crop',
-      'Korku & Gerilim': 'https://images.unsplash.com/photo-1509248961158-e54f6934749c?w=1920&h=1080&fit=crop',
-      'default': 'https://images.unsplash.com/photo-1489599849927-2ee91cede3ba?w=1920&h=1080&fit=crop'
-    }
-    return images[genreId] || images['default']
+  const getBackdrop = (movieItem) => {
+    const providerBackdrop = collectMoviePosterCandidates(movieItem)[0]
+    return providerBackdrop || getMovieDefaultPoster(movieItem?.genre)
   }
   
   return (
     <div 
       className="relative rounded-3xl overflow-hidden mb-10"
       style={{ 
-        backgroundImage: `linear-gradient(to right, rgba(0,0,0,0.9) 0%, rgba(0,0,0,0.4) 50%, transparent 100%), url(${getBackdrop(movie.genre)})`,
+        backgroundImage: `linear-gradient(to right, rgba(0,0,0,0.9) 0%, rgba(0,0,0,0.4) 50%, transparent 100%), url(${getBackdrop(movie)})`,
         backgroundSize: 'cover',
         backgroundPosition: 'center',
         minHeight: '500px'
@@ -247,7 +318,7 @@ const HeroSection = ({ movie, onPlay }) => {
         >
           <span className="text-lg">{genre.icon}</span>
           <span className="font-bold text-white">{genre.name}</span>
-          {year && <span className="text-white/80 ml-2">• {year}</span>}
+          {year && <span className="text-white/80 ml-2">| {year}</span>}
         </div>
         
         <h1 className="text-5xl md:text-6xl font-black text-white mb-4 max-w-2xl">
@@ -314,7 +385,7 @@ function MoviesPage() {
     if (user && !hasValidSubscription(user)) {
       navigate('/profil/paketler', { 
         state: { 
-          message: 'Filmleri izlemek için aktif bir paket satın almalısınız.' 
+          message: 'Filmleri izlemek icin aktif bir paket satin almalisiniz.'
         } 
       })
     }
@@ -329,74 +400,84 @@ function MoviesPage() {
   
   // Debounce search query - 300ms gecikme
   const debouncedSearchQuery = useDebounce(searchQuery, 300)
+  const posterStatusRef = useRef(new Map())
+  const forcedPosterRefreshRef = useRef(false)
 
-  const fetchMovies = useCallback(async () => {
+  const resetPosterTracking = useCallback(() => {
+    posterStatusRef.current = new Map()
+  }, [])
+
+  const fetchMovies = useCallback(async ({ forceRefresh = false } = {}) => {
     try {
       setLoading(true)
       setError(null)
 
-      // User yükleniyor, bekle
       if (!user) {
-        return // Yükleniyor durumunda kal
+        return
       }
 
-      // Kullanıcının kendi M3U URL'sini kullan
       if (!(user?.hasM3U ?? user?.m3uUrl)) {
         setLoading(false)
         setError('M3U URL bulunamadi. Lutfen yonetici ile iletisime gecin.')
         return
       }
       
-      const parsedMovies = await fetchParsedPlaylist(user, token, {
-        cacheKey: 'movies:v1',
-        parser: (playlistText) => dedupeByTitle(parseMoviesFromPlaylist(playlistText))
-      })
+      const catalogMovies = await fetchMoviesCatalog(user, token, { forceRefresh })
+      const normalizedMovies = catalogMovies.map((movie) => ({
+        ...movie,
+        genre: normalizeMovieGenreId(movie.genre)
+      }))
 
-      setMovies(parsedMovies)
+      if (normalizedMovies.length === 0) {
+        throw new Error('Katalogda gosterilecek film kaydi bulunamadi.')
+      }
 
-      const featuredMovie = parsedMovies.find(m => m.genre.includes('Netflix')) || 
-                           parsedMovies.find(m => m.genre.includes('4K')) || 
-                           parsedMovies[0]
+      setMovies(normalizedMovies)
+
+      const featuredMovie = normalizedMovies.find(m => m.genre.includes('Netflix')) || 
+                           normalizedMovies.find(m => m.genre.includes('4K')) || 
+                           normalizedMovies[0]
       setHeroMovie(featuredMovie)
+      resetPosterTracking()
 
       setLoading(false)
-      return
-      /* Legacy fallback removed.
-        } else if (response.status === 401) {
-          throw new Error('Oturum süresi dolmuş. Lütfen tekrar giriş yapın.')
-        } else {
-          throw new Error(`M3U yuklenemedi (HTTP ${response.status})`)
-        }
-      }
-      
-      const text = await response.text()
-      
-      // M3U icerigi bos mu kontrol et
-      if (!text || text.trim().length === 0) {
-        throw new Error('M3U playlist bos veya gecersiz icerik')
-      }
-      
-      let parsedMovies = parseMoviesFromPlaylist(text)
-      parsedMovies = dedupeByTitle(parsedMovies)
-      
-      setMovies(parsedMovies)
-      
-      const featuredMovie = parsedMovies.find(m => m.genre.includes('Netflix')) || 
-                           parsedMovies.find(m => m.genre.includes('4K')) || 
-                           parsedMovies[0]
-      setHeroMovie(featuredMovie)
-      setLoading(false)
-      */
     } catch (err) {
-      console.error('M3U fetch error:', err)
+      console.error('Movies catalog fetch error:', err)
       setError('Filmler yuklenirken hata olustu: ' + err.message)
       setLoading(false)
     }
-  }, [user, token])
+  }, [resetPosterTracking, token, user])
+
+  const handlePosterStatus = useCallback((movieTitle, success) => {
+    if (!movieTitle || forcedPosterRefreshRef.current) {
+      return
+    }
+
+    const map = posterStatusRef.current
+    if (map.has(movieTitle)) {
+      return
+    }
+
+    map.set(movieTitle, Boolean(success))
+
+    if (map.size < POSTER_FAILURE_MIN_SAMPLE) {
+      return
+    }
+
+    const failures = Array.from(map.values()).filter((value) => !value).length
+    const failureRatio = failures / map.size
+
+    if (failureRatio >= POSTER_FAILURE_RATIO_THRESHOLD) {
+      forcedPosterRefreshRef.current = true
+      fetchMovies({ forceRefresh: true }).catch(() => {})
+    }
+  }, [fetchMovies])
 
   useEffect(() => {
+    forcedPosterRefreshRef.current = false
+    resetPosterTracking()
     fetchMovies()
-  }, [fetchMovies])
+  }, [fetchMovies, resetPosterTracking])
 
   // Memoized filtered movies - sadece debounced query veya tur degistiginde calisir
   const filteredMovies = useMemo(() => {
@@ -448,7 +529,7 @@ function MoviesPage() {
         <div className="text-center">
           <p className="text-white mb-4">{error}</p>
           <button 
-            onClick={fetchMovies}
+            onClick={() => fetchMovies({ forceRefresh: true })}
             className="px-6 py-3 rounded-xl font-bold text-white"
             style={{ backgroundColor: PRIMARY }}
           >
@@ -544,14 +625,14 @@ function MoviesPage() {
         {/* Movie Rows */}
         {activeGenre === 'all' && !searchQuery && (
           <>
-            <MovieRow title="Netflix Yapimlari" movies={moviesByGenre['Netflix'] || []} onMovieClick={handleMovieClick} />
-            <MovieRow title="4K / UHD Filmler" movies={moviesByGenre['4K / UHD Filmler'] || []} onMovieClick={handleMovieClick} />
-            <MovieRow title="Dram & Romantik" movies={moviesByGenre['Dram & Romantik'] || []} onMovieClick={handleMovieClick} />
-            <MovieRow title="Aksiyon & Macera" movies={moviesByGenre['Aksiyon & Macera'] || []} onMovieClick={handleMovieClick} />
-            <MovieRow title="Komedi" movies={moviesByGenre['Komedi'] || []} onMovieClick={handleMovieClick} />
-            <MovieRow title="Korku & Gerilim" movies={moviesByGenre['Korku & Gerilim'] || []} onMovieClick={handleMovieClick} />
-            <MovieRow title="Animasyon" movies={moviesByGenre['Animasyon & Çizgi Film'] || []} onMovieClick={handleMovieClick} />
-            <MovieRow title="Yerli Filmler" movies={moviesByGenre['Yerli Filmler'] || []} onMovieClick={handleMovieClick} />
+            <MovieRow title="Netflix Yapimlari" movies={moviesByGenre['Netflix'] || []} onMovieClick={handleMovieClick} onPosterStatus={handlePosterStatus} />
+            <MovieRow title="4K / UHD Filmler" movies={moviesByGenre['4K / UHD Filmler'] || []} onMovieClick={handleMovieClick} onPosterStatus={handlePosterStatus} />
+            <MovieRow title="Dram & Romantik" movies={moviesByGenre['Dram & Romantik'] || []} onMovieClick={handleMovieClick} onPosterStatus={handlePosterStatus} />
+            <MovieRow title="Aksiyon & Macera" movies={moviesByGenre['Aksiyon & Macera'] || []} onMovieClick={handleMovieClick} onPosterStatus={handlePosterStatus} />
+            <MovieRow title="Komedi" movies={moviesByGenre['Komedi'] || []} onMovieClick={handleMovieClick} onPosterStatus={handlePosterStatus} />
+            <MovieRow title="Korku & Gerilim" movies={moviesByGenre['Korku & Gerilim'] || []} onMovieClick={handleMovieClick} onPosterStatus={handlePosterStatus} />
+            <MovieRow title="Animasyon" movies={moviesByGenre['Animasyon & Cizgi Film'] || []} onMovieClick={handleMovieClick} onPosterStatus={handlePosterStatus} />
+            <MovieRow title="Yerli Filmler" movies={moviesByGenre['Yerli Filmler'] || []} onMovieClick={handleMovieClick} onPosterStatus={handlePosterStatus} />
           </>
         )}
         
@@ -569,7 +650,7 @@ function MoviesPage() {
             ) : (
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
                 {filteredMovies.map((movie, index) => (
-                  <MovieCard key={`${movie.id}-${index}`} movie={movie} onClick={handleMovieClick} />
+                  <MovieCard key={`${movie.id}-${index}`} movie={movie} onClick={handleMovieClick} onPosterStatus={handlePosterStatus} />
                 ))}
               </div>
             )}
@@ -581,3 +662,5 @@ function MoviesPage() {
 }
 
 export default MoviesPage
+
+

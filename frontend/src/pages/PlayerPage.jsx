@@ -103,31 +103,131 @@ class M3UCache {
   }
 }
 
-// Ulkeler - Bayraklar ile
+// Countries
 const COUNTRIES = [
-  { id: 'TR', name: 'Turkiye', flag: '🇹🇷' },
-  { id: 'DE', name: 'Almanya', flag: '🇩🇪' },
-  { id: 'GB', name: 'Ingiltere', flag: '🇬🇧' },
-  { id: 'US', name: 'ABD', flag: '🇺🇸' },
-  { id: 'FR', name: 'Fransa', flag: '🇫🇷' },
-  { id: 'IT', name: 'Italya', flag: '🇮🇹' },
-  { id: 'NL', name: 'Hollanda', flag: '🇳🇱' },
-  { id: 'RU', name: 'Rusya', flag: '🇷🇺' },
-  { id: 'AR', name: 'Arap', flag: '🇸🇦' },
+  { id: 'TR', name: 'Turkiye', flag: 'TR' },
+  { id: 'DE', name: 'Almanya', flag: 'DE' },
+  { id: 'GB', name: 'Ingiltere', flag: 'GB' },
+  { id: 'US', name: 'ABD', flag: 'US' },
+  { id: 'FR', name: 'Fransa', flag: 'FR' },
+  { id: 'IT', name: 'Italya', flag: 'IT' },
+  { id: 'NL', name: 'Hollanda', flag: 'NL' },
+  { id: 'RU', name: 'Rusya', flag: 'RU' },
+  { id: 'AR', name: 'Arap', flag: 'AR' },
 ]
 
-// Kategoriler - Renkler ile
+// Categories
 const CATEGORIES = [
-  { id: 'all', name: 'Tumu', color: '#E50914', icon: '✨' },
-  { id: 'news', name: 'Haber', color: '#3b82f6', icon: '📰' },
-  { id: 'sports', name: 'Spor', color: '#10b981', icon: '⚽' },
-  { id: 'movies', name: 'Film', color: '#8b5cf6', icon: '🎬' },
-  { id: 'entertainment', name: 'Eglence', color: '#f59e0b', icon: '🎪' },
-  { id: 'documentary', name: 'Belgesel', color: '#06b6d4', icon: '🌍' },
-  { id: 'kids', name: 'Cocuk', color: '#ec4899', icon: '🎈' },
-  { id: 'music', name: 'Muzik', color: '#a855f7', icon: '🎵' },
+  { id: 'all', name: 'Tumu', color: '#E50914', icon: '*' },
+  { id: 'news', name: 'Haber', color: '#3b82f6', icon: 'NW' },
+  { id: 'sports', name: 'Spor', color: '#10b981', icon: 'SP' },
+  { id: 'movies', name: 'Film', color: '#8b5cf6', icon: 'MV' },
+  { id: 'entertainment', name: 'Eglence', color: '#f59e0b', icon: 'EN' },
+  { id: 'documentary', name: 'Belgesel', color: '#06b6d4', icon: 'DC' },
+  { id: 'kids', name: 'Cocuk', color: '#ec4899', icon: 'KD' },
+  { id: 'music', name: 'Muzik', color: '#a855f7', icon: 'MU' },
 ]
 
+
+function buildTsVariantUrl(value) {
+  const source = String(value || '').trim()
+  if (!source) {
+    return ''
+  }
+
+  const applyTsRules = (target) => {
+    let next = String(target || '')
+    if (!next) {
+      return ''
+    }
+
+    next = next.replace(/output=hls/gi, 'output=ts')
+    next = next.replace(/\.m3u8(\?|$)/i, '.ts$1')
+    return next
+  }
+
+  try {
+    const parsed = new URL(source)
+    const nestedTarget = parsed.searchParams.get('url')
+
+    if (nestedTarget) {
+      let decodedTarget = nestedTarget
+      try {
+        decodedTarget = decodeURIComponent(nestedTarget)
+      } catch {
+        decodedTarget = nestedTarget
+      }
+      const tsNestedTarget = applyTsRules(decodedTarget)
+      if (tsNestedTarget && tsNestedTarget !== decodedTarget) {
+        parsed.searchParams.set('url', tsNestedTarget)
+        return parsed.toString()
+      }
+    }
+  } catch {
+    // ignore URL parser errors and continue with plain string replacement
+  }
+
+  const tsSource = applyTsRules(source)
+  return tsSource !== source ? tsSource : ''
+}
+
+function findTsFallbackChannel(currentChannel, allChannels = []) {
+  if (!currentChannel) {
+    return null
+  }
+
+  const currentUrl = String(currentChannel.url || '')
+  const seen = new Set([currentUrl])
+  const candidates = []
+
+  const pushCandidate = (candidate) => {
+    if (!candidate?.url) {
+      return
+    }
+
+    const normalizedUrl = String(candidate.url)
+    if (!normalizedUrl || seen.has(normalizedUrl)) {
+      return
+    }
+
+    seen.add(normalizedUrl)
+    candidates.push(candidate)
+  }
+
+  const derivedCurrentUrl = buildTsVariantUrl(currentChannel.url)
+  if (derivedCurrentUrl) {
+    pushCandidate({
+      ...currentChannel,
+      url: derivedCurrentUrl,
+      originalUrl: derivedCurrentUrl,
+      sourceType: inferStreamContainer(derivedCurrentUrl)
+    })
+  }
+
+  const derivedOriginalUrl = buildTsVariantUrl(currentChannel.originalUrl)
+  if (derivedOriginalUrl) {
+    pushCandidate({
+      ...currentChannel,
+      url: derivedOriginalUrl,
+      originalUrl: derivedOriginalUrl,
+      sourceType: inferStreamContainer(derivedOriginalUrl)
+    })
+  }
+
+  allChannels.forEach((channel) => {
+    const sameName = channel?.name && channel.name === currentChannel.name
+    const sourceType = inferStreamContainer(channel?.originalUrl || channel?.url)
+
+    if (sameName && sourceType !== 'hls') {
+      pushCandidate({
+        ...channel,
+        sourceType: channel.sourceType || sourceType
+      })
+    }
+  })
+
+  return candidates[0] || null
+}
 function PlayerPage() {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
@@ -137,6 +237,7 @@ function PlayerPage() {
   const observerRef = useRef(null)
   const liveStartupTimeoutRef = useRef(null)
   const liveRetryRef = useRef({ key: '', count: 0 })
+  const liveFallbackRef = useRef(new Set())
   
   const type = searchParams.get('type')
   const videoUrl = searchParams.get('url')
@@ -151,7 +252,7 @@ function PlayerPage() {
       // Live TV mode without subscription
       navigate('/profil/paketler', { 
         state: { 
-          message: 'Canlı TV izlemek için aktif bir paket satın almalısınız.' 
+          message: 'Canli TV izlemek icin aktif bir paket satin almalisiniz.'
         } 
       })
     }
@@ -181,6 +282,10 @@ function PlayerPage() {
   // Debounce search query - 300ms gecikme
   const debouncedSearchQuery = useDebounce(searchQuery, 300)
 
+  useEffect(() => {
+    liveFallbackRef.current = new Set()
+  }, [selectedCountry, user?.code])
+
   // Determine video mode
   useEffect(() => {
     if (type === 'movie' && videoUrl) {
@@ -198,16 +303,16 @@ function PlayerPage() {
   useEffect(() => {
     if (videoMode === 'live') {
       if (!user) {
-        // User henüz yüklenmedi, bekle
+        // User has not been loaded yet, wait
         setLoading(true)
         return
       }
       if (!(user?.hasM3U ?? user?.m3uUrl)) {
-        setError('M3U URL bulunamadı. Lütfen yönetici ile iletişime geçin.')
+        setError('M3U URL bulunamadi. Lutfen yonetici ile iletisime gecin.')
         setLoading(false)
         return
       }
-      // Önce cache kontrolü
+      // Check cache first
       const cached = M3UCache.get(user.code, selectedCountry)
       if (cached) {
         console.log(`[M3U Cache] Using ${selectedCountry} channels (${Math.round(cached.age / 1000)}s old)`)
@@ -225,13 +330,13 @@ function PlayerPage() {
   }, [videoMode, user, token, user?.hasM3U, user?.code, selectedCountry])
 
   // Live TV
-  // silent = true: Arka plan yenilemesi, loading UI gösterme
+  // silent = true: background refresh without loading UI
   const fetchChannels = async (countryCode = selectedCountry, silent = false) => {
     try {
-      // Kullanıcinin M3U URL'sini kontrol et
+      // Check user's assigned M3U URL
       if (!(user?.hasM3U ?? user?.m3uUrl)) {
         if (!silent) {
-          setError('M3U URL bulunamadı. Lütfen yönetici ile iletişime geçin.')
+          setError('M3U URL bulunamadi. Lutfen yonetici ile iletisime gecin.')
           setLoading(false)
         }
         return
@@ -271,7 +376,7 @@ function PlayerPage() {
       if (!response.ok) {
         let errorMsg = `M3U erisim hatasi: ${response.status}`
         if (response.status === 404) {
-          errorMsg = 'M3U playlist bulunamadi (404). Lütfen CORS Unblock eklentisinin kurulu ve aktif oldugundan emin olun.'
+          errorMsg = 'M3U playlist bulunamadi (404). Lutfen CORS Unblock eklentisinin kurulu ve aktif oldugundan emin olun.'
         } else if (response.status === 403) {
           errorMsg = 'M3U erisim izni reddedildi (403). CORS eklentisi aktif mi kontrol edin.'
         }
@@ -300,7 +405,7 @@ function PlayerPage() {
     } catch (err) {
       console.error('M3U fetch error:', err)
       if (!silent) {
-        setError('Kanallar yüklenemedi: ' + err.message)
+        setError('Kanallar yuklenemedi: ' + err.message)
         setLoading(false)
       }
     }
@@ -476,21 +581,57 @@ function PlayerPage() {
     const video = videoRef.current
     const streamUrl = currentChannel.url
     const streamType = currentChannel.sourceType || inferStreamContainer(currentChannel.originalUrl || currentChannel.url)
+    const primaryStreamKey = `${currentChannel?.name || ''}|${currentChannel?.originalUrl || currentChannel?.url || ''}`
     const streamKey = `${currentChannel?.name || ''}|${currentChannel?.url || ''}`
     let retryTimer = null
 
     if (liveRetryRef.current.key !== streamKey) {
       liveRetryRef.current = { key: streamKey, count: 0 }
     }
+
     const clearStartupTimeout = () => {
       if (liveStartupTimeoutRef.current) {
         clearTimeout(liveStartupTimeoutRef.current)
         liveStartupTimeoutRef.current = null
       }
     }
+
     const finishLoading = () => {
       clearStartupTimeout()
       setLoading(false)
+    }
+
+    const activateTsFallback = (reason) => {
+      const fallbackKey = `${primaryStreamKey}|ts`
+      if (liveFallbackRef.current.has(fallbackKey)) {
+        return false
+      }
+
+      const fallbackChannel = findTsFallbackChannel(currentChannel, channels)
+      if (!fallbackChannel) {
+        return false
+      }
+
+      liveFallbackRef.current.add(fallbackKey)
+      console.warn('[Player] Switching to TS fallback', {
+        channel: currentChannel?.name,
+        reason,
+        fromUrl: currentChannel?.url,
+        toUrl: fallbackChannel?.url
+      })
+
+      clearStartupTimeout()
+      destroyLivePlayers()
+      setError(null)
+      setLoading(true)
+      setCurrentChannel({
+        ...fallbackChannel,
+        fallbackFrom: currentChannel.url,
+        fallbackReason: reason,
+        sourceType: fallbackChannel.sourceType || inferStreamContainer(fallbackChannel.originalUrl || fallbackChannel.url)
+      })
+
+      return true
     }
 
     const retryCurrentChannel = (reason) => {
@@ -520,6 +661,20 @@ function PlayerPage() {
       return true
     }
 
+    const failHlsPlayback = (reason, message = 'HLS kanal yuklenemedi') => {
+      if (activateTsFallback(reason)) {
+        return
+      }
+
+      if (retryCurrentChannel(reason)) {
+        return
+      }
+
+      destroyLivePlayers()
+      setError(message)
+      finishLoading()
+    }
+
     video.muted = false
     setIsMuted(false)
     setError(null)
@@ -535,16 +690,17 @@ function PlayerPage() {
           return
         }
 
-        if (!retryCurrentChannel('hls-startup-timeout')) {
-          destroyLivePlayers()
-          setError('HLS kanal yuklenemedi')
-          setLoading(false)
-        }
+        failHlsPlayback('hls-startup-timeout')
       }, 20000)
+
+      const handleNativeHlsError = () => {
+        failHlsPlayback('hls-native-error')
+      }
 
       video.addEventListener('loadeddata', finishLoading)
       video.addEventListener('playing', finishLoading)
       video.addEventListener('canplay', finishLoading)
+      video.addEventListener('error', handleNativeHlsError)
 
       if (Hls.isSupported()) {
         const hls = new Hls({
@@ -560,13 +716,17 @@ function PlayerPage() {
           fragLoadingTimeOut: 20000,
           startFragPrefetch: true
         })
+
         hlsPlayerRef.current = hls
         hls.loadSource(streamUrl)
         hls.attachMedia(video)
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
           finishLoading()
-          video.play().catch(() => {})
+          video.play().catch(() => {
+            failHlsPlayback('hls-play-rejected')
+          })
         })
+
         hls.on(Hls.Events.ERROR, (_, data) => {
           console.error('[HLS Player Error]', data)
           if (!data?.fatal) return
@@ -578,20 +738,18 @@ function PlayerPage() {
 
           if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
             hls.startLoad()
-            if (retryCurrentChannel('hls-network-error')) return
           }
 
-          destroyLivePlayers()
-          setError('HLS kanal yuklenemedi')
-          finishLoading()
+          failHlsPlayback(`hls-${String(data.type || 'fatal').toLowerCase()}`)
         })
       } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
         video.src = streamUrl
         video.load()
-        video.play().catch(() => {})
+        video.play().catch(() => {
+          failHlsPlayback('hls-native-play-rejected')
+        })
       } else {
-        setError('Bu kanal formati mevcut tarayicida desteklenmiyor.')
-        finishLoading()
+        failHlsPlayback('hls-unsupported', 'Bu kanal formati mevcut tarayicida desteklenmiyor.')
       }
 
       return () => {
@@ -603,29 +761,26 @@ function PlayerPage() {
         video.removeEventListener('loadeddata', finishLoading)
         video.removeEventListener('playing', finishLoading)
         video.removeEventListener('canplay', finishLoading)
+        video.removeEventListener('error', handleNativeHlsError)
         destroyLivePlayers()
       }
     }
 
     if (mpegts.getFeatureList().mseLivePlayback) {
       try {
-        // ⚠️ LOW LATENCY MODE - Gecikmeyi minimize et
+        // Low latency mode for live MPEG-TS playback
         playerRef.current = mpegts.createPlayer({
           type: 'mpegts',
           url: streamUrl,
           isLive: true,
-          enableWorker: true,        // Performans için worker thread
-          enableStashBuffer: true,   // Buffer gerekli
+          enableWorker: true,
+          enableStashBuffer: true,
           stashInitialSize: 256,
           lazyLoad: true,
           lazyLoadMaxDuration: 180,
-          
-          // 🎯 DÜŞÜK GECİKME AYARLARI
-          liveBufferLatencyChasing: true,   // Gecikmeyi kovalama
+          liveBufferLatencyChasing: true,
           liveBufferLatencyMaxLatency: 3.0,
           liveBufferLatencyMinRemain: 1.0,
-          
-          // Ek optimizasyonlar
           autoCleanupSourceBuffer: true,
           autoCleanupMaxBackwardDuration: 45,
           autoCleanupMinBackwardDuration: 20,
@@ -666,14 +821,13 @@ function PlayerPage() {
 
         playerRef.current.on(mpegts.Events.ERROR, (errorType, errorDetail, errorInfo) => {
           console.error('[Player Error]', { errorType, errorDetail, errorInfo })
-          
+
           const statusCode = Number(errorDetail?.status ?? errorDetail?.code ?? 0)
           const detailMessage = String(errorDetail?.msg || errorDetail?.message || '')
           const lowered = `${String(errorType || '').toLowerCase()} ${detailMessage.toLowerCase()}`
           const retryableStatus = [0, 408, 429, 500, 502, 503, 504].includes(statusCode)
           const retryableError = retryableStatus || /network|timeout|io|eof|disconnect|abort/.test(lowered)
 
-          // URL geçersizse veya 404 alındıysa cache'i temizle
           if (errorDetail?.code === 404 || errorDetail?.status === 404) {
             console.warn('[Player] Stream 404 - Clearing cache')
             M3UCache.clear(user?.code, selectedCountry)
@@ -684,7 +838,6 @@ function PlayerPage() {
           }
 
           setError('Kanal yuklenemedi')
-          
           finishLoading()
         })
 
@@ -707,7 +860,7 @@ function PlayerPage() {
       video.removeEventListener('playing', finishLoading)
       destroyLivePlayers()
     }
-  }, [currentChannel, videoMode, user?.code, selectedCountry, destroyLivePlayers])
+  }, [channels, currentChannel, videoMode, user?.code, selectedCountry, destroyLivePlayers])
 
   // Loading
   if (videoMode === 'loading') {
@@ -973,7 +1126,7 @@ function PlayerPage() {
                     <div className="flex items-center gap-3">
                       <span className="text-sm text-white/50">{currentChannel.group}</span>
                       <span className="w-1 h-1 rounded-full bg-white/30" />
-                      <span className="text-sm font-bold" style={{ color: '#46d369' }}>● CANLI YAYIN</span>
+                      <span className="text-sm font-bold" style={{ color: '#46d369' }}>LIVE YAYIN</span>
                     </div>
                   </div>
                   <div 
@@ -1010,7 +1163,7 @@ function PlayerPage() {
                       disabled={loading}
                       className="w-10 h-10 rounded-xl flex items-center justify-center transition-all hover:scale-110 disabled:opacity-50"
                       style={{ backgroundColor: BG_DARK }}
-                      title="Kanalları Yenile"
+                      title="KanallarÄ± Yenile"
                     >
                       <RefreshCw className={`w-5 h-5 text-white/70 ${loading ? 'animate-spin' : ''}`} />
                     </button>
@@ -1120,3 +1273,5 @@ function PlayerPage() {
 }
 
 export default PlayerPage
+
+

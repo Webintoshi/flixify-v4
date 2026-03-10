@@ -24,6 +24,7 @@ const compression = require('compression');
 const hpp = require('hpp');
 const { createClient } = require('@supabase/supabase-js');
 const Redis = require('ioredis');
+const { spawn } = require('child_process');
 
 // Configuration
 const logger = require('./config/logger');
@@ -80,6 +81,31 @@ function isAllowedOrigin(origin, allowedOrigins) {
   }
 
   return allowedOrigins.defaultPatterns.some((pattern) => pattern.test(origin));
+}
+
+async function checkCommandAvailability(command) {
+  return new Promise((resolve) => {
+    const checker = process.platform === 'win32' ? 'where' : 'which';
+    const child = spawn(checker, [command], { stdio: 'ignore' });
+
+    child.on('error', () => resolve(false));
+    child.on('close', (code) => resolve(code === 0));
+  });
+}
+
+async function getMediaToolingStatus() {
+  const ffmpegPath = process.env.FFMPEG_PATH || 'ffmpeg';
+  const ffprobePath = process.env.FFPROBE_PATH || 'ffprobe';
+  const ffmpegAvailable = await checkCommandAvailability(ffmpegPath);
+  const ffprobeAvailable = await checkCommandAvailability(ffprobePath);
+
+  return {
+    ffmpegPath,
+    ffprobePath,
+    ffmpegAvailable,
+    ffprobeAvailable,
+    ready: ffmpegAvailable && ffprobeAvailable
+  };
 }
 
 /**
@@ -172,6 +198,24 @@ async function startServer() {
     logger.warn('Using development JWT secret. Set JWT_SECRET in production!');
   }
 
+  // Media tooling preflight (required for Smart Remux + codec probing)
+  const mediaTooling = await getMediaToolingStatus();
+  const shouldEnforceMediaTooling =
+    String(process.env.ENFORCE_MEDIA_TOOLING || '').toLowerCase() === 'true' ||
+    process.env.NODE_ENV === 'production';
+
+  if (!mediaTooling.ready) {
+    logger.warn('Media tooling preflight failed', mediaTooling);
+    if (shouldEnforceMediaTooling) {
+      throw new Error('FFmpeg/FFprobe are required in production. Install both binaries and restart.');
+    }
+  } else {
+    logger.info('Media tooling preflight passed', {
+      ffmpegPath: mediaTooling.ffmpegPath,
+      ffprobePath: mediaTooling.ffprobePath
+    });
+  }
+
   // Use Cases
   const registerUser = new RegisterUser(userRepository, cacheService);
   const loginUser = new LoginUser(userRepository, cacheService, jwtConfig);
@@ -222,6 +266,7 @@ async function startServer() {
 
   // Store Redis client in app locals for access in routes
   app.locals.redisClient = redisClient;
+  app.locals.mediaTooling = mediaTooling;
 
   // Security middleware
   app.use(helmet({
@@ -335,7 +380,8 @@ async function startServer() {
     res.json({
       status: 'healthy',
       timestamp: new Date().toISOString(),
-      version: process.env.npm_package_version || '1.0.0'
+      version: process.env.npm_package_version || '1.0.0',
+      mediaTooling: req.app.locals.mediaTooling || null
     });
   });
 

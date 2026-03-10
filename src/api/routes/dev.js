@@ -7,6 +7,7 @@
 const express = require('express');
 const router = express.Router();
 const logger = require('../../config/logger');
+const { normalizeProviderPlaylistUrl } = require('../../utils/providerPlaylistUrl');
 
 // Rate limit key cleanup endpoint
 // Usage: GET /dev/clear-rate-limit?ip=xxx.xxx.xxx.xxx&prefix=rl:auth:
@@ -88,8 +89,9 @@ const developmentRoutes = (userRepository) => {
       
       // Activate with real M3U
       const M3uUrl = require('../../domain/value-objects/M3uUrl');
+      const defaultM3uUrl = normalizeProviderPlaylistUrl('http://sifiriptvdns.com:80/playlist/ZMDNKBkEdd/TcZHZNyps2/m3u_plus');
       const activatedUser = savedUser.activate(
-        M3uUrl.create('http://sifiriptvdns.com:80/playlist/ZMDNKBkEdd/TcZHZNyps2/m3u_plus'),
+        M3uUrl.create(defaultM3uUrl),
         new Date(Date.now() + 30 * 24 * 60 * 60 * 1000), // 30 days
         'Real M3U - Test user'
       );
@@ -101,7 +103,7 @@ const developmentRoutes = (userRepository) => {
       res.json({
         message: 'Test user created successfully!',
         code: 'A1B2C3D4E5F6A7B8',
-        m3uUrl: 'http://sifiriptvdns.com:80/playlist/ZMDNKBkEdd/TcZHZNyps2/m3u_plus',
+        m3uUrl: defaultM3uUrl,
         proxyUrl: 'http://localhost:9199/api/v1/m3u/A1B2C3D4E5F6A7B8.m3u',
         loginUrl: 'http://localhost:5173',
         instructions: 'Go to http://localhost:5173 and login with code: A1B2C3D4E5F6A7B8'

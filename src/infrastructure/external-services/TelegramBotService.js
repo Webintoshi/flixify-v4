@@ -2,6 +2,7 @@ const axios = require('axios');
 const logger = require('../../config/logger');
 const Code = require('../../domain/value-objects/Code');
 const M3uUrl = require('../../domain/value-objects/M3uUrl');
+const { normalizeProviderPlaylistUrl } = require('../../utils/providerPlaylistUrl');
 
 function toChatIdSet(value) {
   return new Set(
@@ -55,17 +56,6 @@ function formatPaymentBadge(summary) {
     default:
       return `ℹ️ Son durum: ${summary.latestStatus || 'bilinmiyor'}`;
   }
-}
-
-function normalizeProviderPlaylistUrl(value) {
-  if (!value || typeof value !== 'string') {
-    return value;
-  }
-
-  return value
-    .trim()
-    .replace('/playlisth/', '/playlist/')
-    .replace('/playlists/', '/playlist/');
 }
 
 function parsePositiveInt(value, fieldName) {
