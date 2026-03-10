@@ -264,6 +264,7 @@ class M3uController {
       : null;
 
     const indexed = proxies.map((proxy, proxyIndex) => ({ proxy, proxyIndex }));
+    indexed.push({ proxy: null, proxyIndex: -1 });
     if (normalizedPreferred === null || normalizedPreferred >= indexed.length) {
       return indexed;
     }
@@ -797,15 +798,39 @@ class M3uController {
 
   async _fetchM3u(url) {
     const candidates = buildProviderPlaylistFetchCandidates(url, { enforceHlsOutput: true });
+    const maxCandidates = Number.parseInt(process.env.M3U_FETCH_MAX_CANDIDATES || '3', 10);
+    const candidateList = Number.isInteger(maxCandidates) && maxCandidates > 0
+      ? candidates.slice(0, maxCandidates)
+      : candidates;
+    const perAttemptTimeoutMs = Number.parseInt(process.env.M3U_FETCH_ATTEMPT_TIMEOUT_MS || '12000', 10);
+    const totalTimeoutMs = Number.parseInt(process.env.M3U_FETCH_TOTAL_TIMEOUT_MS || '30000', 10);
+    const startedAt = Date.now();
     let lastStatus = null;
     let lastError = null;
 
-    for (const candidateUrl of candidates) {
+    for (const candidateUrl of candidateList) {
+      const elapsed = Date.now() - startedAt;
+      const remainingBudgetMs = Number.isInteger(totalTimeoutMs) && totalTimeoutMs > 0
+        ? Math.max(totalTimeoutMs - elapsed, 0)
+        : perAttemptTimeoutMs;
+
+      if (remainingBudgetMs < 1500) {
+        break;
+      }
+
+      const timeoutMs = Math.max(
+        1500,
+        Math.min(
+          Number.isInteger(perAttemptTimeoutMs) && perAttemptTimeoutMs > 0 ? perAttemptTimeoutMs : this._upstreamTimeoutMs,
+          remainingBudgetMs
+        )
+      );
+
       try {
         const response = await this._requestViaProviderProxy({
           method: 'get',
           url: candidateUrl,
-          timeout: 60000,
+          timeout: timeoutMs,
           responseType: 'text',
           maxRedirects: 5,
           validateStatus: () => true

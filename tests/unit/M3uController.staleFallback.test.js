@@ -56,7 +56,8 @@ describe('M3uController live proxy helpers', () => {
 
     expect(reordered[0].proxy).toBe(proxyC)
     expect(reordered[0].proxyIndex).toBe(2)
-    expect(reordered).toHaveLength(3)
+    expect(reordered).toHaveLength(4)
+    expect(reordered[reordered.length - 1]).toEqual({ proxy: null, proxyIndex: -1 })
   })
 
   test('builds direct candidate when no proxy is configured', () => {

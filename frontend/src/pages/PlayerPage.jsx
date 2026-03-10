@@ -154,13 +154,13 @@ function PlayerPage() {
       setLoading(true)
 
       const normalizedCountry = String(countryCode || 'TR').toUpperCase()
-      const parsed = await fetchParsedPlaylist(user, token, {
-        cacheKey: `live-channels:${normalizedCountry}:v3`,
-        parser: (playlistText) => parseLiveChannelsByCountry(playlistText, normalizedCountry),
-        forceRefresh: true,
-        disableCache: true,
-        scope: 'live'
-      })
+          const parsed = await fetchParsedPlaylist(user, token, {
+            cacheKey: `live-channels:${normalizedCountry}:v3`,
+            parser: (playlistText) => parseLiveChannelsByCountry(playlistText, normalizedCountry),
+            forceRefresh: false,
+            disableCache: false,
+            scope: 'live'
+          })
 
       setChannels(parsed)
       if (parsed.length > 0) {
