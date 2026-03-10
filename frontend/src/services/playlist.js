@@ -280,6 +280,7 @@ export async function fetchUserPlaylist(user, token, options = {}) {
     signal,
     forceRefresh = false,
     disableCache = false,
+    scope = 'full',
     ttlMs = DEFAULT_TTL_MS,
     retries = 1
   } = options
@@ -293,7 +294,14 @@ export async function fetchUserPlaylist(user, token, options = {}) {
   }
 
   const tokenKey = tokenFingerprint(token)
-  const playlistQuery = (forceRefresh || disableCache) ? '?forceRefresh=true' : ''
+  const queryParams = new URLSearchParams()
+  if (forceRefresh || disableCache) {
+    queryParams.set('forceRefresh', 'true')
+  }
+  if (String(scope || '').toLowerCase() === 'live') {
+    queryParams.set('scope', 'live')
+  }
+  const playlistQuery = queryParams.toString() ? `?${queryParams.toString()}` : ''
   const playlistUrl = buildApiUrl(`/m3u/${user.code}.m3u${playlistQuery}`)
   const rawCacheKey = buildRawCacheKey(user.code, tokenKey)
   const cached = !disableCache && !forceRefresh ? getCachedEntry(rawMemoryCache, rawCacheKey, ttlMs) : null
@@ -303,8 +311,9 @@ export async function fetchUserPlaylist(user, token, options = {}) {
     return cached
   }
 
-  const inflightKey = `playlist:${user.code}:${tokenKey}`
-  if (!forceRefresh && inflightPlaylistRequests.has(inflightKey)) {
+  const normalizedScope = String(scope || 'full').toLowerCase() === 'live' ? 'live' : 'full'
+  const inflightKey = `playlist:${user.code}:${tokenKey}:${normalizedScope}:${forceRefresh || disableCache ? 'refresh' : 'cached'}`
+  if (!forceRefresh && !disableCache && inflightPlaylistRequests.has(inflightKey)) {
     return inflightPlaylistRequests.get(inflightKey)
   }
 
@@ -388,6 +397,7 @@ export async function fetchParsedPlaylist(user, token, options = {}) {
     parser,
     forceRefresh = false,
     disableCache = false,
+    scope = 'full',
     ttlMs = DEFAULT_TTL_MS,
     signal
   } = options
@@ -417,6 +427,7 @@ export async function fetchParsedPlaylist(user, token, options = {}) {
     const text = await fetchUserPlaylist(user, token, {
       forceRefresh,
       disableCache,
+      scope,
       ttlMs,
       signal
     })

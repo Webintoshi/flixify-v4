@@ -105,7 +105,13 @@ function isLikelyLiveEntry(entry) {
 }
 
 export function normalizePlaylistGroup(rawGroup) {
-  return (rawGroup || 'Diger').replace(/^[A-Z]{2}:/, '').replace('INT:', '').replace('TR | ', '').trim() || 'Diger'
+  const normalized = String(rawGroup || 'Diger')
+    .replace(/^[A-Z]{2}\s*(?:[:|>-]|▹|»|›)\s*/u, '')
+    .replace(/^INT\s*(?:[:|>-]|▹|»|›)\s*/iu, '')
+    .replace(/^TR\s*\|\s*/i, '')
+    .trim()
+
+  return normalized || 'Diger'
 }
 
 function inferCountry(rawGroup, title, tvgCountry) {
@@ -113,7 +119,7 @@ function inferCountry(rawGroup, title, tvgCountry) {
     return tvgCountry.toUpperCase()
   }
 
-  const groupCodeMatch = (rawGroup || '').match(/^([A-Z]{2}):/)
+  const groupCodeMatch = (rawGroup || '').match(/^\s*([A-Z]{2})\s*(?:[:|>-]|▹|»|›)\s*/u)
   if (groupCodeMatch && VALID_COUNTRIES.includes(groupCodeMatch[1])) {
     return groupCodeMatch[1]
   }
@@ -121,8 +127,13 @@ function inferCountry(rawGroup, title, tvgCountry) {
   const groupLower = (rawGroup || '').toLowerCase()
   const titleLower = (title || '').toLowerCase()
 
+  const titleCodeMatch = (title || '').match(/^\s*([A-Z]{2})\s*(?:[:|>-]|\.)\s*/u)
+  if (titleCodeMatch && VALID_COUNTRIES.includes(titleCodeMatch[1])) {
+    return titleCodeMatch[1]
+  }
+
   if (groupLower.includes('turkiye') || groupLower.includes('turkey') || /^tr[ |.]/.test(titleLower)) return 'TR'
-  if (groupLower.includes('almanya') || groupLower.includes('germany')) return 'DE'
+  if (groupLower.includes('almanya') || groupLower.includes('germany') || groupLower.includes('deutsch')) return 'DE'
   if (groupLower.includes('ingiltere') || groupLower.includes('uk')) return 'GB'
   if (groupLower.includes('amerika') || groupLower.includes('usa')) return 'US'
   if (groupLower.includes('fransa') || groupLower.includes('france')) return 'FR'

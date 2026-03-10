@@ -34,11 +34,13 @@ function parseExtInfLine(line) {
 }
 
 function normalizePlaylistGroup(rawGroup) {
-  return (rawGroup || 'Diger')
-    .replace(/^[A-Z]{2}:/, '')
-    .replace('INT:', '')
-    .replace('TR | ', '')
-    .trim() || 'Diger';
+  const normalized = String(rawGroup || 'Diger')
+    .replace(/^[A-Z]{2}\s*(?:[:|>-]|▹|»|›)\s*/u, '')
+    .replace(/^INT\s*(?:[:|>-]|▹|»|›)\s*/iu, '')
+    .replace(/^TR\s*\|\s*/i, '')
+    .trim();
+
+  return normalized || 'Diger';
 }
 
 function normalizeSeriesGenre(rawGroup, fullTitle) {

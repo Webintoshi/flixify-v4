@@ -147,6 +147,31 @@ class M3uController {
     return normalizeProviderPlaylistUrl(value, { enforceHlsOutput: true });
   }
 
+  _parsePlaylistScope(value) {
+    return String(value || '').trim().toLowerCase() === 'live' ? 'live' : 'full';
+  }
+
+  _applyPlaylistScope(url, scope = 'full') {
+    if (scope !== 'live') {
+      return url;
+    }
+
+    try {
+      const parsed = new URL(url);
+      const pathname = String(parsed.pathname || '').toLowerCase();
+      if (
+        parsed.searchParams.has('output') ||
+        (pathname.includes('/playlist/') && pathname.includes('m3u_plus')) ||
+        pathname.endsWith('/get.php')
+      ) {
+        parsed.searchParams.set('output', 'hls');
+      }
+      return parsed.toString();
+    } catch {
+      return url;
+    }
+  }
+
   _createAxiosConfig(overrides = {}, proxy = null) {
     const config = {
       timeout: this._upstreamTimeoutMs,
@@ -244,9 +269,12 @@ class M3uController {
 
   _getContainerType(targetUrl, contentType = '') {
     const normalizedType = String(contentType || '').toLowerCase();
+    let queryOutput = '';
     const pathname = (() => {
       try {
-        return new URL(targetUrl).pathname.toLowerCase();
+        const parsed = new URL(targetUrl);
+        queryOutput = String(parsed.searchParams.get('output') || '').toLowerCase();
+        return parsed.pathname.toLowerCase();
       } catch {
         return String(targetUrl || '').toLowerCase();
       }
@@ -255,6 +283,8 @@ class M3uController {
     if (
       normalizedType.includes('application/vnd.apple.mpegurl') ||
       normalizedType.includes('application/x-mpegurl') ||
+      queryOutput === 'hls' ||
+      queryOutput === 'm3u8' ||
       pathname.endsWith('.m3u8')
     ) {
       return 'hls';
@@ -746,7 +776,8 @@ class M3uController {
     throw error;
   }
 
-  async _resolveUserPlaylistUrl(code) {
+  async _resolveUserPlaylistUrl(code, options = {}) {
+    const { scope = 'full' } = options;
     const result = await this._getUserM3U.execute({ code });
     const m3uUrl = this._normalizeProviderPlaylistUrl(result?.url);
 
@@ -756,19 +787,24 @@ class M3uController {
       throw error;
     }
 
-    this._userProviderOrigins.set(code, new URL(m3uUrl).origin);
-    return m3uUrl;
+    const scopedUrl = this._applyPlaylistScope(m3uUrl, this._parsePlaylistScope(scope));
+    this._userProviderOrigins.set(code, new URL(scopedUrl).origin);
+    return scopedUrl;
   }
 
   async _getRawPlaylistForCode(code, options = {}) {
-    const { forceRefresh = false } = options;
-    const m3uUrl = await this._resolveUserPlaylistUrl(code);
-    const cacheKey = `m3u:content:${code}`;
-    let rawPlaylist = !forceRefresh ? await this._cacheService.get(cacheKey) : null;
+    const { forceRefresh = false, scope = 'full' } = options;
+    const normalizedScope = this._parsePlaylistScope(scope);
+    const m3uUrl = await this._resolveUserPlaylistUrl(code, { scope: normalizedScope });
+    const cacheKey = `m3u:content:${code}:${normalizedScope}`;
+    const shouldUseCache = normalizedScope !== 'live';
+    let rawPlaylist = !forceRefresh && shouldUseCache ? await this._cacheService.get(cacheKey) : null;
 
     if (!rawPlaylist) {
       rawPlaylist = await this._circuitBreaker.fire(m3uUrl);
-      await this._cacheService.set(cacheKey, rawPlaylist, 300);
+      if (shouldUseCache) {
+        await this._cacheService.set(cacheKey, rawPlaylist, 300);
+      }
     }
 
     await this._rememberAllowedOrigins(code, rawPlaylist, m3uUrl);
@@ -1286,10 +1322,11 @@ class M3uController {
     const accessToken = req.user.token;
     const baseApiUrl = this._getBaseApiUrl(req);
     const forceRefresh = String(req.query.forceRefresh || '').toLowerCase() === 'true' || req.query.forceRefresh === '1';
+    const scope = this._parsePlaylistScope(req.query.scope);
     let rawPlaylist;
 
     try {
-      ({ rawPlaylist } = await this._getRawPlaylistForCode(code, { forceRefresh }));
+      ({ rawPlaylist } = await this._getRawPlaylistForCode(code, { forceRefresh, scope }));
     } catch (error) {
       const statusCode = error.statusCode || (error.message.includes('No M3U URL') ? 404 : 502);
       logger.error('Provider playlist fetch failed', {
@@ -1408,6 +1445,42 @@ class M3uController {
       await this._assertAllowedProxyTarget(code, targetUrl);
       const requestMethod = req.method === 'HEAD' ? 'head' : 'get';
       const upstreamRequestHeaders = this._buildUpstreamStreamHeaders(req);
+
+      // Known HLS manifests do not need a preflight stream request.
+      if (requestMethod === 'get' && this._isPlaylistResponse(targetUrl)) {
+        const playlistResponse = await this._requestViaProviderProxy({
+          method: 'get',
+          url: targetUrl,
+          responseType: 'text',
+          timeout: this._streamProxyTimeoutMs,
+          headers: this._buildUpstreamStreamHeaders(req, 'application/vnd.apple.mpegurl,*/*'),
+          validateStatus: () => true
+        }, this._validateStreamResponse.bind(this), {
+          preferredProxyIndex
+        });
+
+        const optimizedPlaylist = this._pruneLivePlaylistWindow(playlistResponse.data);
+        const resolvedProxyIndex = Number.isInteger(playlistResponse.__providerProxyIndex) && playlistResponse.__providerProxyIndex >= 0
+          ? playlistResponse.__providerProxyIndex
+          : preferredProxyIndex;
+
+        res.status(playlistResponse.status);
+        this._setProxyMediaHeaders(
+          res,
+          playlistResponse.headers,
+          req,
+          'application/vnd.apple.mpegurl'
+        );
+
+        return res.send(this._rewriteHlsPlaylist(optimizedPlaylist, {
+          baseApiUrl: this._getBaseApiUrl(req),
+          baseTargetUrl: targetUrl,
+          code,
+          token: accessToken,
+          preferredProxyIndex: resolvedProxyIndex
+        }));
+      }
+
       const upstream = await this._requestViaProviderProxy({
         method: requestMethod,
         url: targetUrl,
