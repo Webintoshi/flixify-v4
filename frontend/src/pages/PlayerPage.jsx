@@ -158,7 +158,7 @@ function PlayerPage() {
             cacheKey: `live-channels:${normalizedCountry}:v3`,
             parser: (playlistText) => parseLiveChannelsByCountry(playlistText, normalizedCountry),
             forceRefresh: false,
-            disableCache: false,
+            disableCache: true,
             scope: 'live'
           })
 

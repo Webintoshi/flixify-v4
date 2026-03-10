@@ -39,10 +39,15 @@ class M3uController {
     this._streamProxyTimeoutMs = parseInt(process.env.STREAM_PROXY_TIMEOUT_MS, 10) || 120000;
     this._streamProxyReadTimeoutMs = parseInt(process.env.STREAM_PROXY_READ_TIMEOUT_MS, 10) || 0;
     this._providerUserAgent = process.env.PROVIDER_USER_AGENT || 'VLC/3.0.18 LibVLC/3.0.18';
+    const hasConfiguredLiveKeepSegments = Object.prototype.hasOwnProperty.call(process.env, 'LIVE_HLS_KEEP_SEGMENTS');
     const configuredLiveKeepSegments = Number.parseInt(process.env.LIVE_HLS_KEEP_SEGMENTS || '', 10);
-    this._liveHlsKeepSegments = Number.isInteger(configuredLiveKeepSegments) && configuredLiveKeepSegments > 0
-      ? configuredLiveKeepSegments
-      : 0;
+    if (hasConfiguredLiveKeepSegments) {
+      this._liveHlsKeepSegments = Number.isInteger(configuredLiveKeepSegments) && configuredLiveKeepSegments > 0
+        ? configuredLiveKeepSegments
+        : 0;
+    } else {
+      this._liveHlsKeepSegments = 24;
+    }
     this._httpAgent = new http.Agent({
       keepAlive: true,
       keepAliveMsecs: 10000,

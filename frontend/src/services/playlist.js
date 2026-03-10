@@ -35,12 +35,16 @@ function tokenFingerprint(token) {
   return signaturePart.slice(-16)
 }
 
-function buildRawCacheKey(userCode, tokenKey) {
-  return `${PLAYLIST_RAW_CACHE_PREFIX}${userCode}_${tokenKey}`
+function normalizeScope(scope) {
+  return String(scope || 'full').toLowerCase() === 'live' ? 'live' : 'full'
 }
 
-function buildParsedCacheKey(userCode, tokenKey, cacheKey) {
-  return `${PLAYLIST_PARSED_CACHE_PREFIX}${userCode}_${tokenKey}_${cacheKey}`
+function buildRawCacheKey(userCode, tokenKey, scope = 'full') {
+  return `${PLAYLIST_RAW_CACHE_PREFIX}${scope}_${userCode}_${tokenKey}`
+}
+
+function buildParsedCacheKey(userCode, tokenKey, cacheKey, scope = 'full') {
+  return `${PLAYLIST_PARSED_CACHE_PREFIX}${scope}_${userCode}_${tokenKey}_${cacheKey}`
 }
 
 function buildCatalogCacheKey(userCode, tokenKey, catalogType) {
@@ -294,24 +298,27 @@ export async function fetchUserPlaylist(user, token, options = {}) {
   }
 
   const tokenKey = tokenFingerprint(token)
+  const normalizedScope = normalizeScope(scope)
+  const isLiveScope = normalizedScope === 'live'
+  const shouldUseCache = !disableCache && !forceRefresh && !isLiveScope
+  const shouldStoreCache = !disableCache && !isLiveScope
   const queryParams = new URLSearchParams()
   if (forceRefresh || disableCache) {
     queryParams.set('forceRefresh', 'true')
   }
-  if (String(scope || '').toLowerCase() === 'live') {
+  if (isLiveScope) {
     queryParams.set('scope', 'live')
   }
   const playlistQuery = queryParams.toString() ? `?${queryParams.toString()}` : ''
   const playlistUrl = buildApiUrl(`/m3u/${user.code}.m3u${playlistQuery}`)
-  const rawCacheKey = buildRawCacheKey(user.code, tokenKey)
-  const cached = !disableCache && !forceRefresh ? getCachedEntry(rawMemoryCache, rawCacheKey, ttlMs) : null
-  const staleCached = !disableCache ? getAnyCachedEntry(rawMemoryCache, rawCacheKey) : null
+  const rawCacheKey = buildRawCacheKey(user.code, tokenKey, normalizedScope)
+  const cached = shouldUseCache ? getCachedEntry(rawMemoryCache, rawCacheKey, ttlMs) : null
+  const staleCached = shouldStoreCache ? getAnyCachedEntry(rawMemoryCache, rawCacheKey) : null
 
   if (cached) {
     return cached
   }
 
-  const normalizedScope = String(scope || 'full').toLowerCase() === 'live' ? 'live' : 'full'
   const inflightKey = `playlist:${user.code}:${tokenKey}:${normalizedScope}:${forceRefresh || disableCache ? 'refresh' : 'cached'}`
   if (!forceRefresh && !disableCache && inflightPlaylistRequests.has(inflightKey)) {
     return inflightPlaylistRequests.get(inflightKey)
@@ -352,7 +359,7 @@ export async function fetchUserPlaylist(user, token, options = {}) {
           throw new Error('Playlist bos dondu')
         }
 
-        return disableCache ? text : cacheEntry(rawMemoryCache, rawCacheKey, text)
+        return shouldStoreCache ? cacheEntry(rawMemoryCache, rawCacheKey, text) : text
       } catch (error) {
         lastError = error
 
@@ -371,7 +378,7 @@ export async function fetchUserPlaylist(user, token, options = {}) {
           continue
         }
 
-        if (!disableCache && staleCached && isTransient) {
+        if (shouldStoreCache && staleCached && isTransient) {
           return staleCached
         }
 
@@ -415,9 +422,13 @@ export async function fetchParsedPlaylist(user, token, options = {}) {
   }
 
   const tokenKey = tokenFingerprint(token)
-  const parsedCacheKey = buildParsedCacheKey(user.code, tokenKey, cacheKey)
-  const cached = !disableCache && !forceRefresh ? getCachedEntry(parsedMemoryCache, parsedCacheKey, ttlMs) : null
-  const staleCached = !disableCache ? getAnyCachedEntry(parsedMemoryCache, parsedCacheKey) : null
+  const normalizedScope = normalizeScope(scope)
+  const isLiveScope = normalizedScope === 'live'
+  const shouldUseCache = !disableCache && !forceRefresh && !isLiveScope
+  const shouldStoreCache = !disableCache && !isLiveScope
+  const parsedCacheKey = buildParsedCacheKey(user.code, tokenKey, cacheKey, normalizedScope)
+  const cached = shouldUseCache ? getCachedEntry(parsedMemoryCache, parsedCacheKey, ttlMs) : null
+  const staleCached = shouldStoreCache ? getAnyCachedEntry(parsedMemoryCache, parsedCacheKey) : null
 
   if (cached) {
     return cached
@@ -427,15 +438,15 @@ export async function fetchParsedPlaylist(user, token, options = {}) {
     const text = await fetchUserPlaylist(user, token, {
       forceRefresh,
       disableCache,
-      scope,
+      scope: normalizedScope,
       ttlMs,
       signal
     })
 
     const parsed = parser(text)
-    return disableCache ? parsed : cacheEntry(parsedMemoryCache, parsedCacheKey, parsed)
+    return shouldStoreCache ? cacheEntry(parsedMemoryCache, parsedCacheKey, parsed) : parsed
   } catch (error) {
-    if (!disableCache && staleCached) {
+    if (shouldStoreCache && staleCached) {
       return staleCached
     }
 
