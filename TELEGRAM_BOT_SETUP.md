@@ -55,11 +55,13 @@ TELEGRAM_WEBHOOK_SECRET=uzun_ve_tahmin_edilemez_bir_secret
 TELEGRAM_WEBHOOK_URL=https://api.sizin-domain.com/api/v1/telegram/webhook/uzun_ve_tahmin_edilemez_bir_secret
 TELEGRAM_WEBHOOK_HEADER_SECRET=opsiyonel_ek_secret
 TELEGRAM_ALLOWED_CHAT_IDS=123456789,987654321
+TELEGRAM_NOTIFICATION_CHAT_IDS=-1001234567890
 TELEGRAM_BOT_ADMIN_ID=admin_uuid_buraya
 ```
 
 Notlar:
 - `TELEGRAM_ALLOWED_CHAT_IDS`: bota komut verebilecek chat id listesi (virgulle ayirin).
+- `TELEGRAM_NOTIFICATION_CHAT_IDS`: bildirim gidecek chat id listesi (grup id'si genelde `-100` ile baslar).
 - `TELEGRAM_BOT_ADMIN_ID`: odeme onay/red icin kullanilan admin UUID.
 - `TELEGRAM_WEBHOOK_URL`: HTTPS olmalidir.
 
@@ -83,13 +85,23 @@ Bota su komutlari sirayla gonderin:
 1. `/help`
 2. `/status`
 3. `/stats`
-4. `/payments`
+4. `/pending`
+5. `/payments`
 
 Odeme islemleri:
 
 ```text
 /approve <paymentId>
 /reject <paymentId> neden
+```
+
+Kullanici yonetim komutlari:
+
+```text
+/chatid
+/user <code>
+/setm3u <code> <m3uUrl> [gun]
+/extend <code> <gun>
 ```
 
 ## 7) 7/24 calisma icin zorunlu checklist
@@ -104,7 +116,7 @@ Odeme islemleri:
 
 ## Guvenlik onerileri
 
-1. Botu gruba eklemeyin, sadece ozel sohbette kullanin.
+1. Botu gruba ekleyecekseniz sadece admin grubuna ekleyin ve grup id'sini env'de whitelist edin.
 2. Token sizarsa BotFather'dan `/revoke` ile yeni token alin.
 3. `TELEGRAM_WEBHOOK_SECRET` ve `TELEGRAM_WEBHOOK_HEADER_SECRET` degerlerini periyodik degistirin.
 4. Sadece super admin UUID'sini `TELEGRAM_BOT_ADMIN_ID` olarak verin.

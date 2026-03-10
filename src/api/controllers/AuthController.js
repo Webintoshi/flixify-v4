@@ -14,12 +14,13 @@ const logger = require('../../config/logger');
 const { asyncHandler } = require('../middleware/errorHandler');
 
 class AuthController {
-  constructor(registerUser, loginUser, userRepository, cacheService, jwtConfig) {
+  constructor(registerUser, loginUser, userRepository, cacheService, jwtConfig, telegramBotService = null) {
     this._registerUser = registerUser;
     this._loginUser = loginUser;
     this._userRepository = userRepository;
     this._cacheService = cacheService;
     this._jwtConfig = jwtConfig;
+    this._telegramBotService = telegramBotService;
   }
 
   _sanitizeUserData(userData, req = null) {
@@ -45,6 +46,22 @@ class AuthController {
     const { adminNotes } = req.body;
 
     const result = await this._registerUser.execute({ adminNotes });
+
+    if (this._telegramBotService) {
+      try {
+        await this._telegramBotService.notifyNewRegistration({
+          code: result.code,
+          status: result.user.status.toString(),
+          createdAt: result.user.createdAt.toISOString(),
+          source: 'admin-register',
+          userId: result.user.id || null
+        });
+      } catch (error) {
+        logger.warn('Failed to send telegram registration notification', {
+          error: error.message
+        });
+      }
+    }
 
     res.status(201).json({
       status: 'success',

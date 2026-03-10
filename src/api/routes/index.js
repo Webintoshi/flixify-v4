@@ -27,7 +27,8 @@ function createRoutes({
   subscriptionCheckMiddleware,
   rateLimiters,
   validators,
-  userRepository
+  userRepository,
+  telegramBotService = null
 }) {
   // Statik paketler için database bağlantısı gerekmez
   const packageController = new PackageController();
@@ -76,6 +77,22 @@ function createRoutes({
         logger.info('Public user registered', { 
           codeMasked: codeString.substring(0, 4) + '****' 
         });
+
+        if (telegramBotService) {
+          try {
+            await telegramBotService.notifyNewRegistration({
+              code: codeString,
+              status: savedUser.status.toString(),
+              createdAt: savedUser.createdAt?.toISOString?.() || new Date().toISOString(),
+              source: 'public-register',
+              userId: savedUser.id || null
+            });
+          } catch (notifyError) {
+            logger.warn('Failed to send public registration telegram notification', {
+              error: notifyError.message
+            });
+          }
+        }
         
         res.status(201).json({
           status: 'success',

@@ -1,5 +1,7 @@
 const axios = require('axios');
 const logger = require('../../config/logger');
+const Code = require('../../domain/value-objects/Code');
+const M3uUrl = require('../../domain/value-objects/M3uUrl');
 
 function toChatIdSet(value) {
   return new Set(
@@ -19,6 +21,25 @@ function formatUptime(totalSeconds) {
   return `${days}g ${hours}s ${minutes}d`;
 }
 
+function normalizeProviderPlaylistUrl(value) {
+  if (!value || typeof value !== 'string') {
+    return value;
+  }
+
+  return value
+    .trim()
+    .replace('/playlisth/', '/playlist/')
+    .replace('/playlists/', '/playlist/');
+}
+
+function parsePositiveInt(value, fieldName) {
+  const parsed = Number.parseInt(String(value || '').trim(), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new Error(`${fieldName} pozitif tam sayi olmalidir.`);
+  }
+  return parsed;
+}
+
 class TelegramBotService {
   constructor({
     token,
@@ -26,18 +47,22 @@ class TelegramBotService {
     webhookUrl,
     webhookHeaderSecret,
     allowedChatIds,
+    notificationChatIds,
     actorAdminId,
     userRepository,
-    adminRepository
+    adminRepository,
+    cacheService = null
   }) {
     this._token = token;
     this._webhookSecret = webhookSecret;
     this._webhookUrl = webhookUrl;
     this._webhookHeaderSecret = webhookHeaderSecret || '';
     this._allowedChatIds = toChatIdSet(allowedChatIds);
+    this._notificationChatIds = toChatIdSet(notificationChatIds);
     this._actorAdminId = actorAdminId || null;
     this._userRepository = userRepository;
     this._adminRepository = adminRepository;
+    this._cacheService = cacheService;
   }
 
   isEnabled() {
@@ -95,6 +120,38 @@ class TelegramBotService {
     }
   }
 
+  async notifyNewRegistration({
+    code,
+    status = 'pending',
+    createdAt = new Date().toISOString(),
+    source = 'unknown',
+    userId = null
+  }) {
+    if (!this._token) {
+      return;
+    }
+
+    const targetChats = this._getNotificationChatIds();
+    if (targetChats.length === 0) {
+      return;
+    }
+
+    const lines = [
+      'Yeni Kayit',
+      `Kod: ${code}`,
+      `Durum: ${status}`,
+      `Kaynak: ${source}`,
+      `Tarih: ${new Date(createdAt).toISOString()}`,
+      `Kullanim: /setm3u ${code} http://panel.example.com/playlist/${code}.m3u 30`
+    ];
+
+    if (userId) {
+      lines.push(`User ID: ${userId}`);
+    }
+
+    await this._broadcastMessage(targetChats, lines.join('\n'));
+  }
+
   async handleUpdate(update) {
     if (!this.isEnabled() || !update || typeof update !== 'object') {
       return;
@@ -145,11 +202,26 @@ class TelegramBotService {
       case '/help':
         await this._sendHelp(chatId);
         return;
+      case '/chatid':
+        await this._sendCurrentChatId(chatId);
+        return;
       case '/status':
         await this._sendStatus(chatId);
         return;
       case '/stats':
         await this._sendStats(chatId);
+        return;
+      case '/pending':
+        await this._sendPendingUsers(chatId);
+        return;
+      case '/user':
+        await this._sendUserDetails(chatId, args);
+        return;
+      case '/setm3u':
+        await this._setUserM3u(chatId, args);
+        return;
+      case '/extend':
+        await this._extendUser(chatId, args);
         return;
       case '/payments':
         await this._sendPendingPayments(chatId);
@@ -170,13 +242,22 @@ class TelegramBotService {
       'Flixify Admin Bot',
       '',
       'Komutlar:',
+      '/chatid - Mevcut sohbet ID',
       '/status - Sunucu durumu',
       '/stats - Kullanici istatistikleri',
+      '/pending - Bekleyen kayitlar',
+      '/user <code> - Kullanici detay',
+      '/setm3u <code> <m3uUrl> [gun] - M3U tanimla/aktif et',
+      '/extend <code> <gun> - Sure uzat',
       '/payments - Bekleyen odemeler',
       '/approve <paymentId> - Odemeyi onayla',
       '/reject <paymentId> [neden] - Odemeyi reddet'
     ];
     await this._sendMessage(chatId, lines.join('\n'));
+  }
+
+  async _sendCurrentChatId(chatId) {
+    await this._sendMessage(chatId, `Bu sohbetin chat_id degeri: ${chatId}`);
   }
 
   async _sendStatus(chatId) {
@@ -213,6 +294,150 @@ class TelegramBotService {
     ];
 
     await this._sendMessage(chatId, lines.join('\n'));
+  }
+
+  async _sendPendingUsers(chatId) {
+    const pendingUsers = await this._userRepository.findByStatus('pending');
+    const limited = pendingUsers.slice(0, 20);
+
+    if (limited.length === 0) {
+      await this._sendMessage(chatId, 'Bekleyen kayit bulunmuyor.');
+      return;
+    }
+
+    const lines = ['Bekleyen Kayitlar (ilk 20):'];
+    limited.forEach((user, index) => {
+      lines.push(
+        `${index + 1}) ${user.code.toString()} - ${user.createdAt.toISOString()}`
+      );
+    });
+
+    lines.push('');
+    lines.push('Atama ornegi: /setm3u <code> <m3uUrl> 30');
+    await this._sendMessage(chatId, lines.join('\n'));
+  }
+
+  async _sendUserDetails(chatId, args) {
+    const codeInput = String(args[0] || '').trim();
+    if (!codeInput) {
+      await this._sendMessage(chatId, 'Kullanim: /user <code>');
+      return;
+    }
+
+    const codeVo = Code.create(codeInput);
+    const user = await this._userRepository.findByCode(codeVo);
+    if (!user) {
+      await this._sendMessage(chatId, `Kullanici bulunamadi: ${codeInput}`);
+      return;
+    }
+
+    const access = user.canAccessContent();
+    const lines = [
+      `Kod: ${user.code.toString()}`,
+      `Durum: ${user.status.toString()}`,
+      `Olusturma: ${user.createdAt.toISOString()}`,
+      `Bitis: ${user.expiresAt ? user.expiresAt.toISOString() : '-'}`,
+      `M3U: ${user.m3uUrl ? user.m3uUrl.toLogString() : '-'}`,
+      `Erisim: ${access.allowed ? 'ACIK' : `KAPALI (${access.reason})`}`
+    ];
+
+    await this._sendMessage(chatId, lines.join('\n'));
+  }
+
+  async _setUserM3u(chatId, args) {
+    const codeInput = String(args[0] || '').trim();
+    const rawUrl = String(args[1] || '').trim();
+
+    if (!codeInput || !rawUrl) {
+      await this._sendMessage(chatId, 'Kullanim: /setm3u <code> <m3uUrl> [gun]');
+      return;
+    }
+
+    const codeVo = Code.create(codeInput);
+    const user = await this._userRepository.findByCode(codeVo);
+    if (!user) {
+      await this._sendMessage(chatId, `Kullanici bulunamadi: ${codeInput}`);
+      return;
+    }
+
+    const normalizedUrl = normalizeProviderPlaylistUrl(rawUrl);
+    const m3uVo = M3uUrl.create(normalizedUrl);
+
+    const hasDaysArgument = typeof args[2] !== 'undefined';
+    const days = hasDaysArgument ? parsePositiveInt(args[2], 'Gun') : null;
+    const expiresAt = days ? new Date(Date.now() + (days * 24 * 60 * 60 * 1000)) : user.expiresAt;
+
+    if (user.status.canActivate) {
+      const activatedUser = user.activate(
+        m3uVo,
+        expiresAt || null,
+        'Telegram /setm3u komutu ile guncellendi'
+      );
+      await this._userRepository.update(activatedUser);
+    } else {
+      const updates = {
+        m3u_url: m3uVo.toString()
+      };
+      if (expiresAt) {
+        updates.expires_at = expiresAt.toISOString();
+      }
+      if (user.status.toString() === 'expired' && expiresAt) {
+        updates.status = 'active';
+      }
+      await this._userRepository.updateById(user.id, updates);
+    }
+
+    if (this._cacheService) {
+      await this._cacheService.invalidateUser(codeVo.toString());
+    }
+
+    const lines = [
+      `M3U tanimlandi: ${codeVo.toString()}`,
+      `Durum: ${user.status.canActivate ? 'active yapildi' : 'm3u guncellendi'}`,
+      `Bitis: ${expiresAt ? expiresAt.toISOString() : '-'}`
+    ];
+    await this._sendMessage(chatId, lines.join('\n'));
+  }
+
+  async _extendUser(chatId, args) {
+    const codeInput = String(args[0] || '').trim();
+    if (!codeInput || typeof args[1] === 'undefined') {
+      await this._sendMessage(chatId, 'Kullanim: /extend <code> <gun>');
+      return;
+    }
+
+    const days = parsePositiveInt(args[1], 'Gun');
+    const codeVo = Code.create(codeInput);
+    const user = await this._userRepository.findByCode(codeVo);
+
+    if (!user) {
+      await this._sendMessage(chatId, `Kullanici bulunamadi: ${codeInput}`);
+      return;
+    }
+
+    const now = new Date();
+    const currentExpiry = user.expiresAt ? new Date(user.expiresAt) : null;
+    const baseDate = currentExpiry && currentExpiry > now ? currentExpiry : now;
+    const newExpiry = new Date(baseDate.getTime() + (days * 24 * 60 * 60 * 1000));
+
+    const updates = {
+      expires_at: newExpiry.toISOString()
+    };
+
+    if (user.status.toString() === 'expired' && user.m3uUrl) {
+      updates.status = 'active';
+    }
+
+    await this._userRepository.updateById(user.id, updates);
+
+    if (this._cacheService) {
+      await this._cacheService.invalidateUser(codeVo.toString());
+    }
+
+    await this._sendMessage(
+      chatId,
+      `Sure uzatildi: ${codeVo.toString()}\nYeni bitis: ${newExpiry.toISOString()}`
+    );
   }
 
   async _sendPendingPayments(chatId) {
@@ -279,6 +504,26 @@ class TelegramBotService {
       chat_id: chatId,
       text
     });
+  }
+
+  _getNotificationChatIds() {
+    if (this._notificationChatIds.size > 0) {
+      return Array.from(this._notificationChatIds);
+    }
+    return Array.from(this._allowedChatIds);
+  }
+
+  async _broadcastMessage(chatIds, text) {
+    for (const chatId of chatIds) {
+      try {
+        await this._sendMessage(chatId, text);
+      } catch (error) {
+        logger.error('Telegram notification send failed', {
+          chatId,
+          error: error.message
+        });
+      }
+    }
   }
 
   async _telegramRequest(method, payload) {

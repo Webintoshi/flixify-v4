@@ -177,9 +177,28 @@ async function startServer() {
   const loginUser = new LoginUser(userRepository, cacheService, jwtConfig);
   const activateUser = new ActivateUser(userRepository, cacheService);
   const getUserM3U = new GetUserM3U(userRepository, cacheService);
+  const telegramBotService = new TelegramBotService({
+    token: process.env.TELEGRAM_BOT_TOKEN,
+    webhookSecret: process.env.TELEGRAM_WEBHOOK_SECRET,
+    webhookUrl: process.env.TELEGRAM_WEBHOOK_URL,
+    webhookHeaderSecret: process.env.TELEGRAM_WEBHOOK_HEADER_SECRET,
+    allowedChatIds: process.env.TELEGRAM_ALLOWED_CHAT_IDS,
+    notificationChatIds: process.env.TELEGRAM_NOTIFICATION_CHAT_IDS,
+    actorAdminId: process.env.TELEGRAM_BOT_ADMIN_ID,
+    userRepository,
+    adminRepository,
+    cacheService
+  });
 
   // Controllers
-  const authController = new AuthController(registerUser, loginUser, userRepository, cacheService, jwtConfig);
+  const authController = new AuthController(
+    registerUser,
+    loginUser,
+    userRepository,
+    cacheService,
+    jwtConfig,
+    telegramBotService
+  );
   const adminController = new AdminController(userRepository, activateUser, cacheService, adminRepository);
   const m3uController = new M3uController(getUserM3U, cacheService, jwtConfig.secret);
 
@@ -189,16 +208,6 @@ async function startServer() {
   const optionalAuthMiddleware = createOptionalAuthMiddleware({ jwtSecret: jwtConfig.secret, cacheService });
   const subscriptionCheckMiddleware = createSubscriptionCheckMiddleware(userRepository);
   const rateLimiters = createRateLimiters(redisClient);
-  const telegramBotService = new TelegramBotService({
-    token: process.env.TELEGRAM_BOT_TOKEN,
-    webhookSecret: process.env.TELEGRAM_WEBHOOK_SECRET,
-    webhookUrl: process.env.TELEGRAM_WEBHOOK_URL,
-    webhookHeaderSecret: process.env.TELEGRAM_WEBHOOK_HEADER_SECRET,
-    allowedChatIds: process.env.TELEGRAM_ALLOWED_CHAT_IDS,
-    actorAdminId: process.env.TELEGRAM_BOT_ADMIN_ID,
-    userRepository,
-    adminRepository
-  });
 
   // ============================================================================
   // EXPRESS APPLICATION
@@ -281,7 +290,8 @@ async function startServer() {
     rateLimiters,
     validators,
     userRepository,
-    supabaseClient
+    supabaseClient,
+    telegramBotService
   });
 
   app.use('/api/v1', routes);
