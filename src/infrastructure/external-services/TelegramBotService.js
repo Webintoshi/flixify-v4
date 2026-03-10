@@ -104,6 +104,14 @@ const M3U_MONTH_OPTIONS = {
   12: 365
 };
 
+const EXTEND_PLAN_OPTIONS = {
+  m1: { label: '1 Ay', days: 30 },
+  m3: { label: '3 Ay', days: 90 },
+  m6: { label: '6 Ay', days: 180 },
+  m12: { label: '12 Ay', days: 365 },
+  d7: { label: '+7 Gun', days: 7 }
+};
+
 class TelegramBotService {
   constructor({
     token,
@@ -134,6 +142,8 @@ class TelegramBotService {
     this._expiryAlertIntervalMs = normalizeIntervalMs(expiryAlertIntervalMs);
     this._expiryAlertTimer = null;
     this._localAlertDedup = new Map();
+    this._localActionDedup = new Map();
+    this._pendingExtendActions = new Set();
   }
 
   isEnabled() {
@@ -376,6 +386,43 @@ class TelegramBotService {
       return;
     }
 
+    if (action === 'extend_months') {
+      await this._sendExtendMonthOptions(chatId, codeInput);
+      await this._answerCallbackQuery(callbackQuery.id, 'Uzatma suresi secin.');
+      return;
+    }
+
+    if (action === 'extend_apply') {
+      const planKey = String(parts[2] || '').trim();
+      const plan = EXTEND_PLAN_OPTIONS[planKey];
+      if (!plan) {
+        await this._answerCallbackQuery(callbackQuery.id, 'Desteklenmeyen uzatma plani.', true);
+        return;
+      }
+
+      const dedupKey = this._buildExtendActionDedupKey(callbackQuery, codeInput, planKey);
+      const inProgress = this._pendingExtendActions.has(dedupKey);
+      const alreadyHandled = await this._hasHandledAction(dedupKey);
+      if (inProgress || alreadyHandled) {
+        await this._answerCallbackQuery(callbackQuery.id, 'Bu islem zaten uygulandi.');
+        return;
+      }
+
+      this._pendingExtendActions.add(dedupKey);
+      try {
+        await this._extendUser(chatId, [codeInput, String(plan.days)], {
+          planLabel: plan.label,
+          trigger: 'callback'
+        });
+        await this._markHandledAction(dedupKey, 10 * 60);
+      } finally {
+        this._pendingExtendActions.delete(dedupKey);
+      }
+
+      await this._answerCallbackQuery(callbackQuery.id, `Sure uzatildi (${plan.label}).`);
+      return;
+    }
+
     await this._answerCallbackQuery(callbackQuery.id, 'Bilinmeyen secim.', true);
   }
 
@@ -427,6 +474,40 @@ class TelegramBotService {
               text: '⚡ Komutu Hazirla',
               switch_inline_query_current_chat: `/setm3u ${codeInput} `
             }
+          ]
+        ]
+      }
+    });
+  }
+
+  async _sendExtendMonthOptions(chatId, codeInput) {
+    const codeVo = Code.create(codeInput);
+    const user = await this._userRepository.findByCode(codeVo);
+    if (!user) {
+      await this._sendMessage(chatId, `Kullanici bulunamadi: ${codeInput}`);
+      return;
+    }
+
+    const text = [
+      'Sure Uzatma Plani',
+      `Kod: ${codeVo.toString()}`,
+      '',
+      'Ne kadar uzatilsin?'
+    ].join('\n');
+
+    await this._sendMessage(chatId, text, {
+      replyMarkup: {
+        inline_keyboard: [
+          [
+            { text: '1 Ay', callback_data: `extend_apply:${codeVo.toString()}:m1` },
+            { text: '3 Ay', callback_data: `extend_apply:${codeVo.toString()}:m3` }
+          ],
+          [
+            { text: '6 Ay', callback_data: `extend_apply:${codeVo.toString()}:m6` },
+            { text: '12 Ay', callback_data: `extend_apply:${codeVo.toString()}:m12` }
+          ],
+          [
+            { text: '+7 Gun', callback_data: `extend_apply:${codeVo.toString()}:d7` }
           ]
         ]
       }
@@ -670,7 +751,7 @@ class TelegramBotService {
     await this._sendMessage(chatId, lines.join('\n'));
   }
 
-  async _extendUser(chatId, args) {
+  async _extendUser(chatId, args, options = {}) {
     const codeInput = String(args[0] || '').trim();
     if (!codeInput || typeof args[1] === 'undefined') {
       await this._sendMessage(chatId, 'Kullanim: /extend <code> <gun>');
@@ -688,6 +769,7 @@ class TelegramBotService {
 
     const now = new Date();
     const currentExpiry = user.expiresAt ? new Date(user.expiresAt) : null;
+    const previousExpiry = currentExpiry;
     const baseDate = currentExpiry && currentExpiry > now ? currentExpiry : now;
     const newExpiry = new Date(baseDate.getTime() + (days * 24 * 60 * 60 * 1000));
 
@@ -705,10 +787,39 @@ class TelegramBotService {
       await this._cacheService.invalidateUser(codeVo.toString());
     }
 
-    await this._sendMessage(
-      chatId,
-      `Sure uzatildi: ${codeVo.toString()}\nYeni bitis: ${newExpiry.toISOString()}`
-    );
+    const durationLabel = String(options.planLabel || `${days} gun`).trim();
+    const lines = [
+      '<b>Sure Uzatildi</b>',
+      '',
+      `<b>Kullanici Kodu:</b> <code>${escapeHtml(codeVo.toString())}</code>`,
+      `<b>Eklenen Sure:</b> ${escapeHtml(durationLabel)} (${days} gun)`,
+      `<b>Eski Bitis:</b> ${escapeHtml(previousExpiry ? formatDateTr(previousExpiry) : '-')}`,
+      `<b>Yeni Bitis:</b> ${escapeHtml(formatDateTr(newExpiry))}`
+    ];
+
+    await this._sendMessage(chatId, lines.join('\n'), {
+      parseMode: 'HTML',
+      replyMarkup: {
+        inline_keyboard: [
+          [
+            { text: 'Kodu Kopyala', copy_text: { text: codeVo.toString() } }
+          ],
+          [
+            { text: 'Kullanici Detayi', callback_data: `user:${codeVo.toString()}` },
+            { text: 'Sure Uzat', callback_data: `extend_months:${codeVo.toString()}` }
+          ]
+        ]
+      }
+    });
+
+    logger.info('Telegram user subscription extended', {
+      code: codeVo.toMaskedString(),
+      days,
+      previousExpiry: previousExpiry ? previousExpiry.toISOString() : null,
+      newExpiry: newExpiry.toISOString(),
+      trigger: options.trigger || 'command',
+      chatId
+    });
   }
 
   async _sendPendingPayments(chatId) {
@@ -939,7 +1050,7 @@ class TelegramBotService {
               { text: '👤 Kullanici Detayi', callback_data: `user:${code}` },
               {
                 text: '⏳ Sure Uzat',
-                switch_inline_query_current_chat: `/extend ${code} `
+                callback_data: `extend_months:${code}`
               }
             ]
           ]
@@ -994,6 +1105,53 @@ class TelegramBotService {
       await this._cacheService.set(`telegram-alert:${key}`, { sent: true }, ttlSeconds);
     } catch (error) {
       logger.warn('Failed to write expiry alert key to cache', { error: error.message, key });
+    }
+  }
+
+  _buildExtendActionDedupKey(callbackQuery, codeInput, planKey) {
+    const callbackMessage = callbackQuery.message || {};
+    const messageId = callbackMessage.message_id || callbackQuery.id || 'unknown';
+    const callbackChatId = String(callbackMessage.chat?.id || callbackQuery.from?.id || 'unknown');
+    return `extend:${callbackChatId}:${messageId}:${codeInput}:${planKey}`;
+  }
+
+  async _hasHandledAction(key) {
+    if (this._cacheService) {
+      try {
+        const exists = await this._cacheService.exists(`telegram-action:${key}`);
+        if (exists) {
+          return true;
+        }
+      } catch (error) {
+        logger.warn('Failed to read action dedup key from cache', { error: error.message, key });
+      }
+    }
+
+    const localExpiresAt = this._localActionDedup.get(key);
+    if (!localExpiresAt) {
+      return false;
+    }
+
+    if (localExpiresAt < Date.now()) {
+      this._localActionDedup.delete(key);
+      return false;
+    }
+
+    return true;
+  }
+
+  async _markHandledAction(key, ttlSeconds) {
+    const expiresAtMs = Date.now() + (ttlSeconds * 1000);
+    this._localActionDedup.set(key, expiresAtMs);
+
+    if (!this._cacheService) {
+      return;
+    }
+
+    try {
+      await this._cacheService.set(`telegram-action:${key}`, { handled: true }, ttlSeconds);
+    } catch (error) {
+      logger.warn('Failed to write action dedup key to cache', { error: error.message, key });
     }
   }
 
