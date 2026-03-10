@@ -228,68 +228,6 @@ function findTsFallbackChannel(currentChannel, allChannels = []) {
 
   return candidates[0] || null
 }
-
-function normalizeChannelBaseName(name = '') {
-  return String(name || '')
-    .toLowerCase()
-    .replace(/[|•·]/g, ' ')
-    .replace(/\b(tr|turkiye|türkiye)\b/g, ' ')
-    .replace(/\b(ultra|uhd|fhd|full\s*hd|hd|sd|4k|8k|raw|hevc|h\.?265|h\.?264)\b/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-}
-
-function getChannelQualityPriority(name = '') {
-  const lowered = String(name || '').toLowerCase()
-  if (/\bfhd\b|full\s*hd/.test(lowered)) return 100
-  if (/\bhd\b/.test(lowered)) return 90
-  if (/\bsd\b/.test(lowered)) return 80
-  if (/\b4k\b|\buhd\b/.test(lowered)) return 70
-  if (/\bhevc\b|h\.?265/.test(lowered)) return 60
-  if (/\braw\b/.test(lowered)) return 50
-  return 75
-}
-
-function getSourceTypePriority(channel) {
-  const sourceType = channel?.sourceType || inferStreamContainer(channel?.originalUrl || channel?.url)
-  if (sourceType === 'hls') return 30
-  if (sourceType === 'mpegts') return 20
-  return 10
-}
-
-function findSiblingFallbackChannels(currentChannel, allChannels = []) {
-  if (!currentChannel?.name) {
-    return []
-  }
-
-  const currentUrl = String(currentChannel.url || '')
-  const baseName = normalizeChannelBaseName(currentChannel.name)
-  if (!baseName) {
-    return []
-  }
-
-  return allChannels
-    .filter((channel) => {
-      if (!channel?.url || String(channel.url) === currentUrl) {
-        return false
-      }
-
-      return normalizeChannelBaseName(channel.name) === baseName
-    })
-    .map((channel) => ({
-      ...channel,
-      sourceType: channel.sourceType || inferStreamContainer(channel.originalUrl || channel.url)
-    }))
-    .sort((left, right) => {
-      const sourceDiff = getSourceTypePriority(right) - getSourceTypePriority(left)
-      if (sourceDiff !== 0) {
-        return sourceDiff
-      }
-
-      return getChannelQualityPriority(right.name) - getChannelQualityPriority(left.name)
-    })
-}
-
 function PlayerPage() {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
@@ -696,40 +634,6 @@ function PlayerPage() {
       return true
     }
 
-    const activateSiblingFallback = (reason) => {
-      const candidates = findSiblingFallbackChannels(currentChannel, channels)
-
-      for (const candidate of candidates) {
-        const fallbackKey = `${primaryStreamKey}|sibling|${candidate.url}`
-        if (liveFallbackRef.current.has(fallbackKey)) {
-          continue
-        }
-
-        liveFallbackRef.current.add(fallbackKey)
-        console.warn('[Player] Switching to sibling fallback variant', {
-          channel: currentChannel?.name,
-          reason,
-          fromUrl: currentChannel?.url,
-          toUrl: candidate?.url,
-          toName: candidate?.name
-        })
-
-        clearStartupTimeout()
-        destroyLivePlayers()
-        setError(null)
-        setLoading(true)
-        setCurrentChannel({
-          ...candidate,
-          fallbackFrom: currentChannel.url,
-          fallbackReason: reason,
-          sourceType: candidate.sourceType || inferStreamContainer(candidate.originalUrl || candidate.url)
-        })
-        return true
-      }
-
-      return false
-    }
-
     const retryCurrentChannel = (reason) => {
       if (liveRetryRef.current.count >= 2) return false
       liveRetryRef.current.count += 1
@@ -758,10 +662,6 @@ function PlayerPage() {
     }
 
     const failHlsPlayback = (reason, message = 'HLS kanal yuklenemedi') => {
-      if (activateSiblingFallback(reason)) {
-        return
-      }
-
       if (activateTsFallback(reason)) {
         return
       }
@@ -822,10 +722,6 @@ function PlayerPage() {
         }
 
         if (softRecoveries >= 2) {
-          if (activateSiblingFallback('live-watchdog-hard-retry')) {
-            return
-          }
-
           if (!retryCurrentChannel('live-watchdog-hard-retry')) {
             setError('Yayin gecici olarak takildi. Kanal degistirip tekrar deneyin.')
             finishLoading()
@@ -1029,10 +925,6 @@ function PlayerPage() {
             playerRef.current = null
           }
 
-          if (activateSiblingFallback('mpegts-startup-timeout')) {
-            return
-          }
-
           if (!retryCurrentChannel('mpegts-startup-timeout')) {
             setError('Yayin baslatilamadi. Bu kanal su an gecersiz veya yanit vermiyor.')
             setLoading(false)
@@ -1059,17 +951,9 @@ function PlayerPage() {
           if (errorDetail?.code === 404 || errorDetail?.status === 404) {
             console.warn('[Player] Stream 404 - Clearing cache')
             M3UCache.clear(user?.code, selectedCountry)
-
-            if (activateSiblingFallback('mpegts-404')) {
-              return
-            }
           }
 
           if (retryableError && retryCurrentChannel('mpegts-retryable-error')) {
-            return
-          }
-
-          if (retryableError && activateSiblingFallback('mpegts-retryable-fallback')) {
             return
           }
 
