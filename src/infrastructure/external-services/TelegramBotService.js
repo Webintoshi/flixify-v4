@@ -289,10 +289,7 @@ class TelegramBotService {
 
   _buildRegistrationMessage({
     code,
-    status,
     createdAt,
-    userId,
-    source,
     paymentSummary
   }) {
     const lines = [
@@ -300,10 +297,7 @@ class TelegramBotService {
       '',
       `👤 <b>Kullanici Kodu:</b> <code>${escapeHtml(code)}</code>`,
       `💳 <b>Odeme Durumu:</b> ${escapeHtml(formatPaymentBadge(paymentSummary))}`,
-      `📌 <b>Kayit Durumu:</b> ${escapeHtml(status)}`,
-      `🆔 <b>User ID:</b> ${escapeHtml(userId || '-')}`,
-      `🗓️ <b>Tarih:</b> ${escapeHtml(formatDateTr(createdAt))}`,
-      `🔎 <b>Kaynak:</b> ${escapeHtml(source)}`
+      `🗓️ <b>Tarih:</b> ${escapeHtml(formatDateTr(createdAt))}`
     ];
 
     if (paymentSummary?.latestPayment?.id) {
