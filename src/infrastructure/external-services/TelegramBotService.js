@@ -166,10 +166,7 @@ class TelegramBotService {
 
   async notifyNewRegistration({
     code,
-    status = 'pending',
-    createdAt = new Date().toISOString(),
-    source = 'unknown',
-    userId = null
+    createdAt = new Date().toISOString()
   }) {
     if (!this._token) {
       return;
@@ -180,25 +177,9 @@ class TelegramBotService {
       return;
     }
 
-    let paymentSummary = null;
-    if (userId && this._adminRepository?.getPaymentSummaryByUserId) {
-      try {
-        paymentSummary = await this._adminRepository.getPaymentSummaryByUserId(userId);
-      } catch (error) {
-        logger.warn('Failed to resolve payment summary for registration notification', {
-          userId,
-          error: error.message
-        });
-      }
-    }
-
     const message = this._buildRegistrationMessage({
       code,
-      status,
-      createdAt,
-      userId,
-      source,
-      paymentSummary
+      createdAt
     });
 
     const replyMarkup = this._buildRegistrationKeyboard(code);
@@ -289,20 +270,14 @@ class TelegramBotService {
 
   _buildRegistrationMessage({
     code,
-    createdAt,
-    paymentSummary
+    createdAt
   }) {
     const lines = [
       '🆕 <b>Yeni Kayit</b>',
       '',
       `👤 <b>Kullanici Kodu:</b> <code>${escapeHtml(code)}</code>`,
-      `💳 <b>Odeme Durumu:</b> ${escapeHtml(formatPaymentBadge(paymentSummary))}`,
       `🗓️ <b>Tarih:</b> ${escapeHtml(formatDateTr(createdAt))}`
     ];
-
-    if (paymentSummary?.latestPayment?.id) {
-      lines.push(`💸 <b>Son Odeme ID:</b> ${escapeHtml(paymentSummary.latestPayment.id)}`);
-    }
 
     return lines.join('\n');
   }
