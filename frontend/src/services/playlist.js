@@ -1,4 +1,10 @@
 import { buildApiUrl } from '../config/api'
+import {
+  parseSeriesFromPlaylist,
+  groupSeriesEpisodes,
+  parseMoviesFromPlaylist,
+  dedupeByTitle
+} from '../utils/playlistParser'
 
 const PLAYLIST_RAW_CACHE_PREFIX = 'iptv_playlist_raw_v2_'
 const PLAYLIST_PARSED_CACHE_PREFIX = 'iptv_playlist_parsed_v2_'
@@ -148,6 +154,77 @@ function cacheEntry(cacheMap, key, value) {
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function uniqueStringList(values = []) {
+  const seen = new Set()
+  const result = []
+
+  values.forEach((value) => {
+    if (!value || typeof value !== 'string') {
+      return
+    }
+
+    const normalized = value.trim()
+    if (!normalized || seen.has(normalized)) {
+      return
+    }
+
+    seen.add(normalized)
+    result.push(normalized)
+  })
+
+  return result
+}
+
+function buildSeriesCatalogFallback(playlistText) {
+  const grouped = groupSeriesEpisodes(parseSeriesFromPlaylist(playlistText))
+
+  return grouped
+    .map((series) => {
+      const episodeLogos = Object.values(series?.seasons || {})
+        .flat()
+        .map((episodeItem) => episodeItem?.logo)
+      const logoCandidates = uniqueStringList([series.logo, ...episodeLogos])
+
+      return {
+        ...series,
+        logo: logoCandidates[0] || series.logo || '',
+        logoCandidates
+      }
+    })
+    .sort((left, right) => String(left?.name || '').localeCompare(String(right?.name || ''), 'tr'))
+}
+
+function buildMoviesCatalogFallback(playlistText) {
+  const movies = dedupeByTitle(parseMoviesFromPlaylist(playlistText))
+
+  return movies
+    .map((movie) => {
+      const logoCandidates = uniqueStringList([movie.logo])
+      return {
+        ...movie,
+        logo: logoCandidates[0] || '',
+        logoCandidates
+      }
+    })
+    .sort((left, right) => String(left?.title || '').localeCompare(String(right?.title || ''), 'tr'))
+}
+
+async function fetchCatalogFallback(user, token, catalogType, options = {}) {
+  const { forceRefresh = false, ttlMs = DEFAULT_TTL_MS, signal } = options
+  const parser =
+    catalogType === 'series'
+      ? buildSeriesCatalogFallback
+      : buildMoviesCatalogFallback
+
+  return fetchParsedPlaylist(user, token, {
+    cacheKey: `catalog-fallback:${catalogType}:v1`,
+    parser,
+    forceRefresh,
+    ttlMs,
+    signal
+  })
 }
 
 function invalidateMapByPrefix(cacheMap, prefix) {
@@ -401,6 +478,15 @@ async function fetchCatalog(user, token, catalogType, options = {}) {
         })
 
         if (!response.ok) {
+          if (response.status === 404) {
+            const fallbackItems = await fetchCatalogFallback(user, token, catalogType, {
+              signal,
+              forceRefresh,
+              ttlMs
+            })
+            return cacheEntry(catalogMemoryCache, catalogCacheKey, fallbackItems)
+          }
+
           const payload = await response.json().catch(() => ({}))
           const message = payload?.message || `Katalog yuklenemedi (HTTP ${response.status})`
           const error = new Error(message)
