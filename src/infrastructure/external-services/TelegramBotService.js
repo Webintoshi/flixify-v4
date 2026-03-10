@@ -38,7 +38,6 @@ class TelegramBotService {
     this._actorAdminId = actorAdminId || null;
     this._userRepository = userRepository;
     this._adminRepository = adminRepository;
-    this._lastUpdateId = null;
   }
 
   isEnabled() {
@@ -99,14 +98,6 @@ class TelegramBotService {
   async handleUpdate(update) {
     if (!this.isEnabled() || !update || typeof update !== 'object') {
       return;
-    }
-
-    const updateId = update.update_id;
-    if (typeof updateId === 'number') {
-      if (this._lastUpdateId !== null && updateId <= this._lastUpdateId) {
-        return;
-      }
-      this._lastUpdateId = updateId;
     }
 
     const message = update.message || update.edited_message;
