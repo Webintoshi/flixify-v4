@@ -52,7 +52,13 @@ function inferContainerFromUrl(streamUrl) {
 }
 
 function getFallbackStrategy(streamUrl) {
-  return inferContainerFromUrl(streamUrl) === 'hls' ? 'hls' : 'native'
+  const container = inferContainerFromUrl(streamUrl)
+  return container === 'hls' ? 'hls' : 'native'
+}
+
+function shouldUseImmediateRemux(streamUrl) {
+  const container = inferContainerFromUrl(streamUrl)
+  return container === 'mkv' || container === 'ts' || container === 'unknown'
 }
 
 function buildRemuxManifestUrl(streamUrl) {
@@ -100,7 +106,7 @@ export default function VodPlayer({
   const [runtimeStrategy, setRuntimeStrategy] = useState('native')
   const [useRemuxFallback, setUseRemuxFallback] = useState(false)
 
-  const { loading: probeLoading, data: probe } = useVodSourceProbe(videoUrl, Boolean(videoUrl))
+  const { data: probe, error: probeError } = useVodSourceProbe(videoUrl, Boolean(videoUrl))
 
   const remuxManifestUrl = useMemo(() => buildRemuxManifestUrl(videoUrl), [videoUrl])
 
@@ -111,9 +117,22 @@ export default function VodPlayer({
 
     // Fast-start policy: begin playback immediately with URL-inferred strategy.
     playbackStartedRef.current = false
-    setUseRemuxFallback(false)
+    setUseRemuxFallback(shouldUseImmediateRemux(videoUrl))
     setRuntimeStrategy(getFallbackStrategy(videoUrl))
   }, [videoUrl])
+
+  useEffect(() => {
+    if (!videoUrl || playbackStartedRef.current || !probeError) {
+      return
+    }
+
+    if (!shouldUseImmediateRemux(videoUrl)) {
+      return
+    }
+
+    setUseRemuxFallback(true)
+    setRuntimeStrategy('hls')
+  }, [probeError, videoUrl])
 
   useEffect(() => {
     if (!videoUrl || !probe?.playbackStrategy) {

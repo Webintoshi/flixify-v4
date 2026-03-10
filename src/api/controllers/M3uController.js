@@ -320,6 +320,39 @@ class M3uController {
     };
   }
 
+  _buildProviderSourceHeaders(targetUrl) {
+    const headers = [];
+
+    try {
+      const origin = new URL(targetUrl).origin;
+      headers.push(`Referer: ${origin}/`);
+      headers.push(`Origin: ${origin}`);
+    } catch {
+      // Keep headers empty when URL parsing fails.
+    }
+
+    return headers;
+  }
+
+  _buildConservativeProbeFallback(targetUrl, remuxReason = 'probe-request-failed') {
+    const containerType = this._getContainerType(targetUrl);
+    const fallbackProbe = this._buildProbePayload(targetUrl, {
+      headers: {
+        'content-type': 'application/octet-stream'
+      }
+    });
+
+    fallbackProbe.containerType = containerType;
+    fallbackProbe.acceptRanges = false;
+    fallbackProbe.seekableGuess = containerType === 'hls';
+    fallbackProbe.remuxReason = remuxReason;
+
+    const payload = this._buildPlaybackProbePayload(targetUrl, fallbackProbe, null);
+    payload.remuxReason = payload.remuxReason || remuxReason;
+
+    return payload;
+  }
+
   _canDirectPlayProbe(probe) {
     if (!probe) {
       return false;
@@ -433,6 +466,12 @@ class M3uController {
     const proxyUrl = this._getPreferredProviderProxyUrl();
     if (proxyUrl) {
       args.push('-http_proxy', proxyUrl);
+    }
+
+    args.push('-user_agent', this._providerUserAgent);
+    const providerHeaders = this._buildProviderSourceHeaders(targetUrl);
+    if (providerHeaders.length > 0) {
+      args.push('-headers', `${providerHeaders.join('\r\n')}\r\n`);
     }
     args.push(targetUrl);
 
@@ -814,7 +853,18 @@ class M3uController {
     const existingSession = this._vodSessions.get(sessionId);
     if (existingSession) {
       existingSession.lastAccessAt = Date.now();
-      return existingSession;
+      const isProcessActive = Boolean(
+        existingSession.process &&
+        existingSession.process.exitCode === null &&
+        !existingSession.process.killed
+      );
+
+      // If ffmpeg crashed previously, rebuild session instead of reusing a truncated manifest.
+      if (!isProcessActive && existingSession.lastError) {
+        await this._cleanupVodSession(sessionId);
+      } else {
+        return existingSession;
+      }
     }
 
     const ffmpegAvailable = await this._isCommandAvailable(this._ffmpegPath);
@@ -837,8 +887,10 @@ class M3uController {
     }
 
     args.push(
+      '-user_agent', this._providerUserAgent,
       '-reconnect', '1',
       '-reconnect_streamed', '1',
+      '-reconnect_at_eof', '1',
       '-reconnect_delay_max', '2',
       '-i', targetUrl,
       '-map', '0:v:0?',
@@ -847,6 +899,11 @@ class M3uController {
       '-dn',
       '-map_metadata', '-1'
     );
+
+    const providerHeaders = this._buildProviderSourceHeaders(targetUrl);
+    if (providerHeaders.length > 0) {
+      args.splice(args.indexOf('-i'), 0, '-headers', `${providerHeaders.join('\r\n')}\r\n`);
+    }
 
     if (profile.transcodeVideo) {
       args.push(
@@ -910,7 +967,9 @@ class M3uController {
 
     ffmpegProcess.on('close', (code) => {
       session.process = null;
-      if (code !== 0) {
+      if (code === 0) {
+        session.lastError = null;
+      } else {
         session.lastError = session.lastError || `ffmpeg exited with code ${code}`;
         logger.error('VOD remux session ended unexpectedly', {
           sessionId,
@@ -1397,6 +1456,31 @@ class M3uController {
         data: probe
       });
     } catch (error) {
+      const isProviderProbeFailure =
+        typeof error.message === 'string' &&
+        error.message.startsWith('Provider returned HTTP') &&
+        Boolean(targetUrl);
+
+      if (isProviderProbeFailure) {
+        const fallbackProbe = this._buildConservativeProbeFallback(targetUrl, 'probe-request-failed');
+
+        logger.warn('Stream probe degraded to conservative remux fallback', {
+          code,
+          targetUrl,
+          providerError: error.message,
+          playbackStrategy: fallbackProbe.playbackStrategy,
+          remuxReason: fallbackProbe.remuxReason
+        });
+
+        return res.json({
+          status: 'success',
+          data: {
+            ...fallbackProbe,
+            probeWarning: error.message
+          }
+        });
+      }
+
       const statusCode = error.statusCode || error.response?.status || 502;
       logger.error('Stream probe error', {
         code,
