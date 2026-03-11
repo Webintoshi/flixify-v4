@@ -1,1264 +1,490 @@
 import { useEffect, useRef, useState, useMemo, useCallback } from 'react'
-import { useSearchParams, useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router-dom'
 import { useAuthStore } from '../stores/authStore'
-import { 
-  Search,
-  Tv, X, Radio, Sparkles, RefreshCw, AlertCircle, Volume2, VolumeX, Maximize
-} from 'lucide-react'
+import { Search, Tv, Play, Volume2, VolumeX, Maximize, AlertCircle, RefreshCw } from 'lucide-react'
 import mpegts from 'mpegts.js'
 import Hls from 'hls.js'
 import { fetchParsedPlaylist, hasValidSubscription } from '../services/playlist'
-import { inferStreamContainer, parseLiveChannelsByCountry } from '../utils/playlistParser'
-import VodPlayer from '../components/player/VodPlayer'
+import { parseLiveChannelsByCountry } from '../utils/playlistParser'
 
 const PRIMARY = '#E50914'
 const BG_DARK = '#0a0a0a'
 const BG_SURFACE = '#141414'
 const BG_CARD = '#1a1a1a'
-const BORDER = '#2a2a2a'
-const CATEGORY_COLOR_PALETTE = [
-  '#E50914',
-  '#F97316',
-  '#10B981',
-  '#0EA5E9',
-  '#8B5CF6',
-  '#EC4899',
-  '#F59E0B',
-  '#06B6D4',
-  '#84CC16',
-  '#EF4444'
+
+// Basitleştirilmiş Kategoriler - Sadece en çok kullanılanlar
+const CATEGORIES = [
+  { id: 'all', name: 'Tümü', emoji: '📺' },
+  { id: 'ulusal', name: 'Ulusal', emoji: '📡' },
+  { id: 'haber', name: 'Haber', emoji: '📰' },
+  { id: 'spor', name: 'Spor', emoji: '⚽' },
+  { id: 'sinema', name: 'Sinema', emoji: '🎬' },
+  { id: 'cocuk', name: 'Çocuk', emoji: '🧸' },
+  { id: 'belgesel', name: 'Belgesel', emoji: '🌍' },
 ]
 
-const TR_LIVE_CATEGORY_PRIORITY = [
-  'ULUSAL',
-  'ULUSAL 4K',
-  'HABER',
-  'SPOR',
-  'BEINSPORT',
-  'S-SPORT PLUS',
-  'TABII SPORT',
-  'TIVIBU&SMART SPORT',
-  'SINEMA KANALLARI',
-  'BELGESEL',
-  'COCUK',
-  'YORESEL TV',
-  'DINI KANALLAR',
-  '7/24 SHOW',
-  '7/24 YABANCI DIZI',
-  '7/24 YERLI DIZI',
-  '7/24 YESILCAM',
-  '7/24 AMBIYANS',
-  'EXXEN SPORTS',
-  'RADIO',
-  'RAW'
-]
-const TR_LIVE_ALLOWED_GROUPS = new Set(TR_LIVE_CATEGORY_PRIORITY)
-const trGroupCollator = new Intl.Collator('tr', { sensitivity: 'base', numeric: true })
-
-// Custom hook for debounce
+// Debounce hook
 function useDebounce(value, delay) {
   const [debouncedValue, setDebouncedValue] = useState(value)
-  
   useEffect(() => {
-    const timer = setTimeout(() => {
-      setDebouncedValue(value)
-    }, delay)
-    
+    const timer = setTimeout(() => setDebouncedValue(value), delay)
     return () => clearTimeout(timer)
   }, [value, delay])
-  
   return debouncedValue
 }
 
-// Countries
-const COUNTRIES = [
-  { id: 'TR', name: 'Turkiye', flag: 'TR' },
-  { id: 'DE', name: 'Almanya', flag: 'DE' },
-  { id: 'GB', name: 'Ingiltere', flag: 'GB' },
-  { id: 'US', name: 'ABD', flag: 'US' },
-  { id: 'FR', name: 'Fransa', flag: 'FR' },
-  { id: 'IT', name: 'Italya', flag: 'IT' },
-  { id: 'NL', name: 'Hollanda', flag: 'NL' },
-  { id: 'RU', name: 'Rusya', flag: 'RU' },
-  { id: 'AR', name: 'Arap', flag: 'AR' },
-]
-
-const normalizeLiveGroupLabel = (value) => String(value || '')
-  .replace(/\s+/g, ' ')
-  .trim()
-
-const normalizeLiveGroupKey = (value) => normalizeLiveGroupLabel(value).toLocaleUpperCase('tr-TR')
-
-const buildLiveCategoryIcon = (value) => {
-  const cleaned = normalizeLiveGroupLabel(value)
-    .replace(/[^0-9A-Za-z/&\s-]/g, ' ')
-    .trim()
-
-  if (!cleaned) {
-    return 'TV'
-  }
-
-  const tokens = cleaned.split(/\s+/).filter(Boolean)
-  if (tokens.length === 1) {
-    const word = tokens[0]
-    if (word.length >= 2) {
-      return word.slice(0, 2).toLocaleUpperCase('tr-TR')
-    }
-
-    return word.toLocaleUpperCase('tr-TR')
-  }
-
-  return `${tokens[0][0] || ''}${tokens[1][0] || ''}`.toLocaleUpperCase('tr-TR')
-}
-
-const getLiveCategoryColor = (index) => CATEGORY_COLOR_PALETTE[index % CATEGORY_COLOR_PALETTE.length]
-
-const filterChannelsBySelectedTrGroups = (channelList = [], countryCode = 'TR') => {
-  if (String(countryCode || '').toUpperCase() !== 'TR') {
-    return channelList
-  }
-
-  return channelList.filter((channel) => TR_LIVE_ALLOWED_GROUPS.has(normalizeLiveGroupKey(channel?.group)))
-}
-
-
-function PlayerPage() {
+export default function PlayerPage() {
   const navigate = useNavigate()
-  const [searchParams] = useSearchParams()
   const videoRef = useRef(null)
-  const playerRef = useRef(null)
   const hlsPlayerRef = useRef(null)
-  const observerRef = useRef(null)
-  const liveStartupTimeoutRef = useRef(null)
-  const liveRetryRef = useRef({ key: '', count: 0 })
+  const playerRef = useRef(null)
+  const controlsTimeoutRef = useRef(null)
   
-  const type = searchParams.get('type')
-  const videoUrl = searchParams.get('url')
-  const videoTitle = searchParams.get('title')
-  
-  // Get user and token from auth store - MUST BE BEFORE any useEffect that uses user
   const { user, token } = useAuthStore()
   
-  // Check subscription for live TV
-  useEffect(() => {
-    if (!type && user && !hasValidSubscription(user)) {
-      // Live TV mode without subscription
-      navigate('/profil/paketler', { 
-        state: { 
-          message: 'Canli TV izlemek icin aktif bir paket satin almalisiniz.'
-        } 
-      })
-    }
-  }, [type, user, navigate])
-  
-  const [videoMode, setVideoMode] = useState('loading')
+  // States
+  const [channels, setChannels] = useState([])
+  const [currentChannel, setCurrentChannel] = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState(null)
+  const [searchQuery, setSearchQuery] = useState('')
+  const [selectedCategory, setSelectedCategory] = useState('all')
   const [showControls, setShowControls] = useState(true)
-  const controlsTimeoutRef = useRef(null)
   const [volume, setVolume] = useState(1)
   const [isMuted, setIsMuted] = useState(false)
   const [isFullscreen, setIsFullscreen] = useState(false)
   
-  // Live TV states
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState(null)
-  const [channels, setChannels] = useState([])
-  const [currentChannel, setCurrentChannel] = useState(null)
-  const [selectedCountry, setSelectedCountry] = useState('TR')
-  const [selectedCategory, setSelectedCategory] = useState('all')
-  const [searchQuery, setSearchQuery] = useState('')
-  const [displayedChannels, setDisplayedChannels] = useState([])
-  const [hasMore, setHasMore] = useState(true)
-  const [page, setPage] = useState(1)
-  const ITEMS_PER_PAGE = 20
+  const debouncedSearch = useDebounce(searchQuery, 200)
 
-  // Debounce search query - 300ms gecikme
-  const debouncedSearchQuery = useDebounce(searchQuery, 300)
-
-  const liveCategories = useMemo(() => {
-    const groupMap = new Map()
-
-    channels.forEach((channel) => {
-      const groupLabel = normalizeLiveGroupLabel(channel?.group)
-      const groupKey = normalizeLiveGroupKey(groupLabel)
-      if (!groupKey) {
-        return
-      }
-
-      if (!groupMap.has(groupKey)) {
-        groupMap.set(groupKey, {
-          id: `group:${groupKey}`,
-          key: groupKey,
-          name: groupLabel,
-          count: 0
-        })
-      }
-
-      groupMap.get(groupKey).count += 1
-    })
-
-    const dynamicGroups = Array.from(groupMap.values())
-      .sort((left, right) => {
-        const leftPriority = TR_LIVE_CATEGORY_PRIORITY.indexOf(left.key)
-        const rightPriority = TR_LIVE_CATEGORY_PRIORITY.indexOf(right.key)
-        const safeLeftPriority = leftPriority === -1 ? Number.MAX_SAFE_INTEGER : leftPriority
-        const safeRightPriority = rightPriority === -1 ? Number.MAX_SAFE_INTEGER : rightPriority
-
-        if (safeLeftPriority !== safeRightPriority) {
-          return safeLeftPriority - safeRightPriority
-        }
-
-        return trGroupCollator.compare(left.name, right.name)
+  // Paket kontrolü
+  useEffect(() => {
+    if (user && !hasValidSubscription(user)) {
+      navigate('/profil/paketler', { 
+        state: { message: 'Canlı TV izlemek için aktif paket gerekli.' }
       })
-      .map((item, index) => ({
-        id: item.id,
-        name: item.name,
-        icon: buildLiveCategoryIcon(item.name),
-        color: getLiveCategoryColor(index),
-        count: item.count
-      }))
-
-    return [
-      {
-        id: 'all',
-        name: 'Tumu',
-        icon: '*',
-        color: PRIMARY,
-        count: channels.length
-      },
-      ...dynamicGroups
-    ]
-  }, [channels])
-
-  useEffect(() => {
-    if (selectedCategory === 'all') {
-      return
     }
+  }, [user, navigate])
 
-    if (!liveCategories.some((category) => category.id === selectedCategory)) {
-      setSelectedCategory('all')
-    }
-  }, [liveCategories, selectedCategory])
-
-  // Determine video mode
+  // Kanalları çek
   useEffect(() => {
-    if (type === 'movie' && videoUrl) {
-      setVideoMode('movie')
-      setLoading(false)
-    } else if (type === 'series' && videoUrl) {
-      setVideoMode('series')
-      setLoading(false)
-    } else {
-      setVideoMode('live')
-    }
-  }, [type, videoUrl])
-
-  // Fetch channels when in live mode and user is available
-  useEffect(() => {
-    if (videoMode === 'live') {
-      if (!user) {
-        // User has not been loaded yet, wait
+    if (!user?.hasM3U) return
+    
+    const loadChannels = async () => {
+      try {
         setLoading(true)
-        return
-      }
-      if (!(user?.hasM3U ?? user?.m3uUrl)) {
-        setError('M3U URL bulunamadi. Lutfen yonetici ile iletisime gecin.')
+        const parsed = await fetchParsedPlaylist(user, token, {
+          parser: (text) => parseLiveChannelsByCountry(text, 'TR'),
+          forceRefresh: false
+        })
+        setChannels(parsed)
+        if (parsed.length > 0) setCurrentChannel(parsed[0])
+      } catch (err) {
+        setError('Kanallar yüklenemedi')
+      } finally {
         setLoading(false)
-        return
       }
-      fetchChannels(selectedCountry)
     }
-  }, [videoMode, user, token, user?.hasM3U, user?.code, selectedCountry])
+    
+    loadChannels()
+  }, [user, token])
 
-  // Live TV
-  const fetchChannels = async (countryCode = selectedCountry) => {
-    try {
-      // Check user's assigned M3U URL
-      if (!(user?.hasM3U ?? user?.m3uUrl)) {
-        setError('M3U URL bulunamadi. Lutfen yonetici ile iletisime gecin.')
-        setLoading(false)
-        return
-      }
-      
-      setLoading(true)
-
-      const normalizedCountry = String(countryCode || 'TR').toUpperCase()
-      const parsed = await fetchParsedPlaylist(user, token, {
-        cacheKey: `live-channels:${normalizedCountry}:v3`,
-        parser: (playlistText) => parseLiveChannelsByCountry(playlistText, normalizedCountry),
-        forceRefresh: false,
-        disableCache: true,
-        scope: 'live'
-      })
-      const scopedChannels = filterChannelsBySelectedTrGroups(parsed, normalizedCountry)
-
-      setChannels(scopedChannels)
-      if (scopedChannels.length > 0) {
-        setCurrentChannel(scopedChannels[0])
-      } else {
-        setCurrentChannel(null)
-      }
-
-      setLoading(false)
-      return
-    } catch (err) {
-      console.error('M3U fetch error:', err)
-      setError('Kanallar yuklenemedi: ' + err.message)
-      setLoading(false)
-    }
-  }
-
-  // Filtreleme - Debounced arama kullanarak
+  // Filtreleme
   const filteredChannels = useMemo(() => {
     let filtered = channels
     
-    // Arama filtresi (debounced)
-    if (debouncedSearchQuery.trim()) {
-      const query = debouncedSearchQuery.toLowerCase()
+    // Kategori filtresi
+    if (selectedCategory !== 'all') {
+      filtered = filtered.filter(ch => {
+        const group = ch.group?.toLowerCase() || ''
+        const name = ch.name?.toLowerCase() || ''
+        switch(selectedCategory) {
+          case 'ulusal': return group.includes('ulusal') || group.includes('ulusal')
+          case 'haber': return group.includes('haber') || name.includes('haber')
+          case 'spor': return group.includes('spor') || group.includes('sport') || name.includes('spor')
+          case 'sinema': return group.includes('sinema') || group.includes('movie') || name.includes('sinema')
+          case 'cocuk': return group.includes('cocuk') || group.includes('kids') || group.includes('cizgi')
+          case 'belgesel': return group.includes('belgesel') || group.includes('documentary')
+          default: return true
+        }
+      })
+    }
+    
+    // Arama filtresi
+    if (debouncedSearch.trim()) {
+      const query = debouncedSearch.toLowerCase()
       filtered = filtered.filter(ch => ch.name?.toLowerCase().includes(query))
     }
     
-    // Ulke filtresi
-    filtered = filtered.filter(ch => (ch.country || 'TR').toUpperCase() === selectedCountry)
-    
-    // Kategori filtresi
-    if (selectedCategory !== 'all') {
-      filtered = filtered.filter((channel) => `group:${normalizeLiveGroupKey(channel?.group)}` === selectedCategory)
-    }
-    
     return filtered
-  }, [channels, selectedCategory, selectedCountry, debouncedSearchQuery])
+  }, [channels, selectedCategory, debouncedSearch])
 
-  // Lazy loading
+  // Player - Kanal değişimi
   useEffect(() => {
-    setPage(1)
-    setDisplayedChannels(filteredChannels.slice(0, ITEMS_PER_PAGE))
-    setHasMore(filteredChannels.length > ITEMS_PER_PAGE)
-  }, [filteredChannels])
-
-  const loadMore = useCallback(() => {
-    const nextPage = page + 1
-    const start = (nextPage - 1) * ITEMS_PER_PAGE
-    const end = start + ITEMS_PER_PAGE
-    const newChannels = filteredChannels.slice(0, end)
-    setDisplayedChannels(newChannels)
-    setPage(nextPage)
-    setHasMore(end < filteredChannels.length)
-  }, [filteredChannels, page])
-
-  const lastChannelRef = useCallback(node => {
-    if (loading) return
-    if (observerRef.current) observerRef.current.disconnect()
-    observerRef.current = new IntersectionObserver(entries => {
-      if (entries[0].isIntersecting && hasMore) loadMore()
-    })
-    if (node) observerRef.current.observe(node)
-  }, [loading, hasMore, loadMore])
-
-  const handleMouseMove = useCallback(() => {
-    setShowControls(true)
-    if (controlsTimeoutRef.current) clearTimeout(controlsTimeoutRef.current)
-    controlsTimeoutRef.current = setTimeout(() => {
-      setShowControls(false)
-    }, 3000)
-  }, [])
-
-  const toggleMute = useCallback(() => {
+    if (!currentChannel || !videoRef.current) return
+    
     const video = videoRef.current
-    if (!video) return
-    video.muted = !video.muted
-    setIsMuted(video.muted)
-  }, [])
-
-  const handleVolumeChange = useCallback((e) => {
-    const video = videoRef.current
-    if (!video) return
-    const newVolume = parseFloat(e.target.value)
-    video.volume = newVolume
-    if (newVolume > 0 && video.muted) {
-      video.muted = false
-    }
-    setVolume(video.volume)
-    setIsMuted(video.muted || newVolume === 0)
-  }, [])
-
-  const toggleFullscreen = useCallback(() => {
-    const videoContainer = document.getElementById('video-player-wrapper')
-    if (!videoContainer) return
-    if (!document.fullscreenElement) {
-      videoContainer.requestFullscreen().catch(() => {})
-    } else {
-      document.exitFullscreen().catch(() => {})
-    }
-  }, [])
-
-  const destroyLivePlayers = useCallback(() => {
+    const url = currentChannel.url
+    setError(null)
+    setLoading(true)
+    
+    // Cleanup önceki player
     if (hlsPlayerRef.current) {
       hlsPlayerRef.current.destroy()
       hlsPlayerRef.current = null
     }
-
     if (playerRef.current) {
-      playerRef.current.pause()
-      playerRef.current.unload()
-      playerRef.current.detachMediaElement()
       playerRef.current.destroy()
       playerRef.current = null
     }
-  }, [])
-
-  useEffect(() => {
-    const handleFullscreenChange = () => {
-      setIsFullscreen(!!document.fullscreenElement)
-    }
-    document.addEventListener('fullscreenchange', handleFullscreenChange)
-    return () => document.removeEventListener('fullscreenchange', handleFullscreenChange)
-  }, [])
-
-  useEffect(() => {
-    if (videoMode !== 'live') {
-      return undefined
-    }
-
-    const handleKeyDown = (e) => {
-      const video = videoRef.current
-      const activeTag = document.activeElement?.tagName
-      const isTypingTarget = ['INPUT', 'TEXTAREA', 'SELECT'].includes(activeTag) || document.activeElement?.isContentEditable
-      if (isTypingTarget) return
-
-      if (e.code === 'ArrowRight') {
-        e.preventDefault()
-        const currentIndex = channels.findIndex(ch => ch.name === currentChannel?.name)
-        if (currentIndex < channels.length - 1) {
-          setCurrentChannel(channels[currentIndex + 1])
-          setLoading(true)
-          setError(null)
-        }
-      } else if (e.code === 'ArrowLeft') {
-        e.preventDefault()
-        const currentIndex = channels.findIndex(ch => ch.name === currentChannel?.name)
-        if (currentIndex > 0) {
-          setCurrentChannel(channels[currentIndex - 1])
-          setLoading(true)
-          setError(null)
-        }
-      } else if (e.code === 'KeyF') {
-        e.preventDefault()
-        toggleFullscreen()
-      } else if (e.code === 'KeyM' && video) {
-        e.preventDefault()
-        video.muted = !video.muted
-        setIsMuted(video.muted)
-      } else if (e.code === 'Escape' && document.fullscreenElement) {
-        document.exitFullscreen().catch(() => {})
-      }
-    }
-
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [videoMode, channels, currentChannel, toggleFullscreen])
-
-  // Live TV Player
-  useEffect(() => {
-    if (videoMode !== 'live' || !currentChannel || !videoRef.current) return
-
-    const video = videoRef.current
-    const streamUrl = currentChannel.url
-    const streamType = currentChannel.sourceType || inferStreamContainer(currentChannel.originalUrl || currentChannel.url)
-    const streamKey = `${currentChannel?.name || ''}|${currentChannel?.url || ''}`
-    let retryTimer = null
-
-    if (liveRetryRef.current.key !== streamKey) {
-      liveRetryRef.current = { key: streamKey, count: 0 }
-    }
-
-    const clearStartupTimeout = () => {
-      if (liveStartupTimeoutRef.current) {
-        clearTimeout(liveStartupTimeoutRef.current)
-        liveStartupTimeoutRef.current = null
-      }
-    }
-
-    const finishLoading = () => {
-      clearStartupTimeout()
-      setLoading(false)
-    }
-
-    const retryCurrentChannel = (reason) => {
-      if (liveRetryRef.current.count >= 2) return false
-      liveRetryRef.current.count += 1
-
-      console.warn('[Player] Retrying channel playback', {
-        channel: currentChannel?.name,
-        streamType,
-        reason,
-        attempt: liveRetryRef.current.count
-      })
-
-      clearStartupTimeout()
-      destroyLivePlayers()
-      setError(null)
-      setLoading(true)
-
-      if (retryTimer) {
-        clearTimeout(retryTimer)
-      }
-
-      retryTimer = setTimeout(() => {
-        setCurrentChannel(prev => (prev ? { ...prev } : prev))
-      }, 900)
-
-      return true
-    }
-
-    const failHlsPlayback = (reason, message = 'HLS kanal yuklenemedi') => {
-      if (retryCurrentChannel(reason)) {
-        return
-      }
-
-      destroyLivePlayers()
-      setError(message)
-      finishLoading()
-    }
-
-    const LIVE_STALL_INTERVAL_MS = 5000
-    const LIVE_STALL_THRESHOLD_MS = 30000
-    let stallWatchdogTimer = null
-    let lastObservedTime = 0
-    let lastProgressAt = Date.now()
-    let softRecoveries = 0
-
-    const markNetworkActivity = () => {
-      lastProgressAt = Date.now()
-    }
-
-    const markPlaybackProgress = () => {
-      const currentTime = Number(video.currentTime || 0)
-      if (Math.abs(currentTime - lastObservedTime) > 0.15) {
-        lastObservedTime = currentTime
-        markNetworkActivity()
-        softRecoveries = 0
-      }
-    }
-
-    const markPotentialStall = () => {
-      lastProgressAt = Math.min(lastProgressAt, Date.now() - Math.floor(LIVE_STALL_THRESHOLD_MS / 2))
-    }
-
-    const stopStallWatchdog = () => {
-      if (stallWatchdogTimer) {
-        clearInterval(stallWatchdogTimer)
-        stallWatchdogTimer = null
-      }
-    }
-
-    const startStallWatchdog = () => {
-      stopStallWatchdog()
-
-      stallWatchdogTimer = setInterval(() => {
-        if (!video || video.paused || video.ended || document.hidden) {
-          return
-        }
-
-        const currentTime = Number(video.currentTime || 0)
-        if (Math.abs(currentTime - lastObservedTime) > 0.15) {
-          lastObservedTime = currentTime
-          lastProgressAt = Date.now()
-          return
-        }
-
-        if (Date.now() - lastProgressAt < LIVE_STALL_THRESHOLD_MS) {
-          return
-        }
-
-        if (softRecoveries >= 2) {
-          if (streamType === 'hls' && hlsPlayerRef.current) {
-            console.warn('[Player] HLS watchdog hard recovery', {
-              channel: currentChannel?.name
-            })
-            try {
-              hlsPlayerRef.current.startLoad(-1)
-              video.play().catch(() => {})
-            } catch {
-              // ignore hard recovery failures
-            }
-            softRecoveries = 0
-            lastProgressAt = Date.now()
-            return
-          }
-
-          if (!retryCurrentChannel('live-watchdog-hard-retry')) {
-            setError('Yayin gecici olarak takildi. Kanal degistirip tekrar deneyin.')
-            finishLoading()
-          }
-          lastProgressAt = Date.now()
-          return
-        }
-
-        softRecoveries += 1
-        lastProgressAt = Date.now()
-
-        if (streamType === 'hls' && hlsPlayerRef.current) {
-          console.warn('[Player] HLS watchdog soft recovery', {
-            channel: currentChannel?.name,
-            recoveryAttempt: softRecoveries
-          })
-          try {
-            hlsPlayerRef.current.startLoad(-1)
-            video.play().catch(() => {})
-          } catch {
-            // ignore soft recovery failures
-          }
-          return
-        }
-
-        if (playerRef.current) {
-          console.warn('[Player] MPEGTS watchdog soft recovery', {
-            channel: currentChannel?.name,
-            recoveryAttempt: softRecoveries
-          })
-          try {
-            playerRef.current.unload()
-            playerRef.current.load()
-            playerRef.current.play().catch(() => {})
-          } catch {
-            // ignore soft recovery failures
-          }
-        }
-      }, LIVE_STALL_INTERVAL_MS)
-    }
-
-    const handleProgressTick = () => {
-      markPlaybackProgress()
-    }
-
-    const handlePlaybackStall = () => {
-      markPotentialStall()
-    }
-
-    video.muted = false
-    setIsMuted(false)
-    setError(null)
-    setLoading(true)
-    destroyLivePlayers()
+    
     video.pause()
     video.removeAttribute('src')
     video.load()
-    video.addEventListener('timeupdate', handleProgressTick)
-    video.addEventListener('stalled', handlePlaybackStall)
-    video.addEventListener('waiting', handlePlaybackStall)
-    video.addEventListener('progress', markNetworkActivity)
-
-    if (streamType === 'hls') {
-      liveStartupTimeoutRef.current = setTimeout(() => {
-        if (video.readyState >= 2) {
-          return
-        }
-
-        failHlsPlayback('hls-startup-timeout')
-      }, 20000)
-
-      const handleNativeHlsError = () => {
-        failHlsPlayback('hls-native-error')
-      }
-
-      video.addEventListener('loadeddata', finishLoading)
-      video.addEventListener('playing', finishLoading)
-      video.addEventListener('canplay', finishLoading)
-      video.addEventListener('error', handleNativeHlsError)
-
-      if (Hls.isSupported()) {
-        const hls = new Hls({
-          enableWorker: true,
-          lowLatencyMode: false,
-          backBufferLength: 120,
-          maxBufferLength: 45,
-          maxMaxBufferLength: 90,
-          liveSyncDurationCount: 6,
-          liveMaxLatencyDurationCount: 18,
-          manifestLoadingTimeOut: 15000,
-          manifestLoadingMaxRetry: 4,
-          manifestLoadingRetryDelay: 500,
-          manifestLoadingMaxRetryTimeout: 4000,
-          levelLoadingTimeOut: 15000,
-          levelLoadingMaxRetry: 6,
-          levelLoadingRetryDelay: 500,
-          levelLoadingMaxRetryTimeout: 4000,
-          fragLoadingTimeOut: 20000,
-          fragLoadingMaxRetry: 6,
-          fragLoadingRetryDelay: 500,
-          fragLoadingMaxRetryTimeout: 4000,
-          appendErrorMaxRetry: 6,
-          startFragPrefetch: true
-        })
-
-        hlsPlayerRef.current = hls
-        hls.loadSource(streamUrl)
-        hls.attachMedia(video)
-        hls.on(Hls.Events.FRAG_LOADED, markNetworkActivity)
-        hls.on(Hls.Events.LEVEL_UPDATED, markNetworkActivity)
-        hls.on(Hls.Events.MANIFEST_PARSED, () => {
-          finishLoading()
-          video.play().catch(() => {
-            failHlsPlayback('hls-play-rejected')
-          })
-        })
-
-        hls.on(Hls.Events.ERROR, (_, data) => {
-          console.error('[HLS Player Error]', data)
-          if (!data?.fatal) return
-
-          if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-            hls.recoverMediaError()
-            return
-          }
-
-          if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-            hls.startLoad(-1)
-            if (retryCurrentChannel('hls-network-fatal')) {
-              return
-            }
-          }
-
-          failHlsPlayback(`hls-${String(data.type || 'fatal').toLowerCase()}`)
-        })
-      } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-        video.src = streamUrl
-        video.load()
-        video.play().catch(() => {
-          failHlsPlayback('hls-native-play-rejected')
-        })
-      } else {
-        failHlsPlayback('hls-unsupported', 'Bu kanal formati mevcut tarayicida desteklenmiyor.')
-      }
-
-      startStallWatchdog()
-
-      return () => {
-        clearStartupTimeout()
-        stopStallWatchdog()
-        if (retryTimer) {
-          clearTimeout(retryTimer)
-          retryTimer = null
-        }
-        video.removeEventListener('timeupdate', handleProgressTick)
-        video.removeEventListener('stalled', handlePlaybackStall)
-        video.removeEventListener('waiting', handlePlaybackStall)
-        video.removeEventListener('progress', markNetworkActivity)
-        video.removeEventListener('loadeddata', finishLoading)
-        video.removeEventListener('playing', finishLoading)
-        video.removeEventListener('canplay', finishLoading)
-        video.removeEventListener('error', handleNativeHlsError)
-        destroyLivePlayers()
-      }
+    
+    // HLS stream
+    if (Hls.isSupported()) {
+      const hls = new Hls({
+        enableWorker: true,
+        maxBufferLength: 30,
+        liveSyncDurationCount: 3,
+      })
+      hlsPlayerRef.current = hls
+      hls.loadSource(url)
+      hls.attachMedia(video)
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        setLoading(false)
+        video.play().catch(() => {})
+      })
+      hls.on(Hls.Events.ERROR, (_, data) => {
+        if (data.fatal) setError('Yayın yüklenemedi')
+      })
+    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      video.src = url
+      video.addEventListener('loadedmetadata', () => {
+        setLoading(false)
+        video.play().catch(() => {})
+      }, { once: true })
+    } else if (mpegts.getFeatureList().mseLivePlayback) {
+      const player = mpegts.createPlayer({
+        type: 'mpegts',
+        url: url,
+        isLive: true,
+      })
+      playerRef.current = player
+      player.attachMediaElement(video)
+      player.load()
+      player.play().catch(() => {})
+      setLoading(false)
     }
-
-    if (mpegts.getFeatureList().mseLivePlayback) {
-      try {
-        // Low latency mode for live MPEG-TS playback
-        playerRef.current = mpegts.createPlayer({
-          type: 'mpegts',
-          url: streamUrl,
-          isLive: true,
-          enableWorker: true,
-          enableStashBuffer: true,
-          stashInitialSize: 384,
-          lazyLoad: false,
-          lazyLoadMaxDuration: 300,
-          liveBufferLatencyChasing: true,
-          liveBufferLatencyMaxLatency: 6.0,
-          liveBufferLatencyMinRemain: 2.0,
-          autoCleanupSourceBuffer: true,
-          autoCleanupMaxBackwardDuration: 90,
-          autoCleanupMinBackwardDuration: 30,
-          fixAudioTimestampGap: true
-        })
-
-        liveStartupTimeoutRef.current = setTimeout(() => {
-          if (!playerRef.current) return
-
-          console.warn('[Player] Live stream startup timed out', {
-            channel: currentChannel?.name,
-            streamUrl
-          })
-
-          try {
-            playerRef.current.pause()
-            playerRef.current.unload()
-            playerRef.current.detachMediaElement()
-            playerRef.current.destroy()
-          } catch {
-            // ignore cleanup failures
-          } finally {
-            playerRef.current = null
-          }
-
-          if (!retryCurrentChannel('mpegts-startup-timeout')) {
-            setError('Yayin baslatilamadi. Bu kanal su an gecersiz veya yanit vermiyor.')
-            setLoading(false)
-          }
-        }, 20000)
-
-        video.addEventListener('loadeddata', finishLoading)
-        video.addEventListener('playing', finishLoading)
-
-        playerRef.current.attachMediaElement(video)
-        playerRef.current.load()
-        playerRef.current.play().catch(() => {})
-        startStallWatchdog()
-
-        playerRef.current.on(mpegts.Events.ERROR, (errorType, errorDetail, errorInfo) => {
-          console.error('[Player Error]', { errorType, errorDetail, errorInfo })
-
-          const statusCode = Number(errorDetail?.status ?? errorDetail?.code ?? 0)
-          const detailMessage = String(errorDetail?.msg || errorDetail?.message || '')
-          const lowered = `${String(errorType || '').toLowerCase()} ${detailMessage.toLowerCase()}`
-          const retryableStatus = [0, 408, 429, 500, 502, 503, 504].includes(statusCode)
-          const retryableError = retryableStatus || /network|timeout|io|eof|disconnect|abort/.test(lowered)
-
-          if (retryableError && retryCurrentChannel('mpegts-retryable-error')) {
-            return
-          }
-
-          setError('Kanal yuklenemedi')
-          finishLoading()
-        })
-
-        playerRef.current.on(mpegts.Events.MEDIA_INFO, () => {
-          finishLoading()
-        })
-      } catch {
-        setError('Player hatasi')
-        finishLoading()
-      }
-    }
-
+    
     return () => {
-      clearStartupTimeout()
-      stopStallWatchdog()
-      if (retryTimer) {
-        clearTimeout(retryTimer)
-        retryTimer = null
-      }
-      video.removeEventListener('timeupdate', handleProgressTick)
-      video.removeEventListener('stalled', handlePlaybackStall)
-      video.removeEventListener('waiting', handlePlaybackStall)
-      video.removeEventListener('progress', markNetworkActivity)
-      video.removeEventListener('loadeddata', finishLoading)
-      video.removeEventListener('playing', finishLoading)
-      destroyLivePlayers()
+      hlsPlayerRef.current?.destroy()
+      playerRef.current?.destroy()
     }
-  }, [channels, currentChannel, videoMode, user?.code, selectedCountry, destroyLivePlayers])
+  }, [currentChannel])
 
-  // Loading
-  if (videoMode === 'loading') {
+  // Kontrolleri gizle/göster
+  const handleMouseMove = useCallback(() => {
+    setShowControls(true)
+    clearTimeout(controlsTimeoutRef.current)
+    controlsTimeoutRef.current = setTimeout(() => setShowControls(false), 3000)
+  }, [])
+
+  // Ses kontrolü
+  const toggleMute = () => {
+    const video = videoRef.current
+    if (!video) return
+    video.muted = !video.muted
+    setIsMuted(video.muted)
+  }
+
+  const handleVolumeChange = (e) => {
+    const video = videoRef.current
+    if (!video) return
+    const newVol = parseFloat(e.target.value)
+    video.volume = newVol
+    setVolume(newVol)
+    setIsMuted(newVol === 0)
+  }
+
+  // Fullscreen
+  const toggleFullscreen = () => {
+    const container = document.getElementById('video-container')
+    if (!container) return
+    if (!document.fullscreenElement) {
+      container.requestFullscreen().catch(() => {})
+    } else {
+      document.exitFullscreen().catch(() => {})
+    }
+  }
+
+  useEffect(() => {
+    const handler = () => setIsFullscreen(!!document.fullscreenElement)
+    document.addEventListener('fullscreenchange', handler)
+    return () => document.removeEventListener('fullscreenchange', handler)
+  }, [])
+
+  // Kanal değiştir (ok tuşları)
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+        e.preventDefault()
+        const currentIndex = filteredChannels.findIndex(ch => ch.name === currentChannel?.name)
+        if (e.key === 'ArrowUp' && currentIndex > 0) {
+          setCurrentChannel(filteredChannels[currentIndex - 1])
+        } else if (e.key === 'ArrowDown' && currentIndex < filteredChannels.length - 1) {
+          setCurrentChannel(filteredChannels[currentIndex + 1])
+        }
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [filteredChannels, currentChannel])
+
+  if (!user?.hasM3U) {
     return (
-      <div className="fixed inset-0 bg-black z-50 flex items-center justify-center">
-        <div className="text-center">
-          <div className="w-16 h-16 border-4 border-t-transparent rounded-full animate-spin mx-auto mb-4" style={{ borderColor: PRIMARY }} />
-          <p className="text-white text-lg">Yukleniyor...</p>
+      <div className="min-h-screen flex items-center justify-center" style={{ backgroundColor: BG_DARK }}>
+        <div className="text-center p-8">
+          <AlertCircle className="w-16 h-16 mx-auto mb-4" style={{ color: PRIMARY }} />
+          <h2 className="text-2xl font-bold text-white mb-2">M3U URL Bulunamadı</h2>
+          <p className="text-white/60">Yönetici ile iletişime geçin</p>
         </div>
       </div>
     )
   }
 
-  // Movie/Series Player
-  if (videoMode === 'movie' || videoMode === 'series') {
-    return (
-      <VodPlayer
-        mode={videoMode}
-        videoUrl={videoUrl}
-        videoTitle={videoTitle}
-        onBack={() => navigate(-1)}
-      />
-    )
-  }
-
-  // ===== LIVE TV - YARATICI TASARIM =====
   return (
     <div className="min-h-screen" style={{ backgroundColor: BG_DARK }}>
-      {/* Hero Header - Gradient Background ile */}
-      <header className="relative overflow-hidden">
-        {/* Gradient Background */}
-        <div 
-          className="absolute inset-0"
-          style={{ 
-            background: 'linear-gradient(135deg, rgba(229,9,20,0.3) 0%, rgba(10,10,10,0) 50%, rgba(229,9,20,0.1) 100%)'
-          }}
-        />
-        
-        <div className="relative max-w-7xl mx-auto px-4 py-6">
-          {/* Ust Bar */}
-          <div className="flex items-center justify-between mb-6">
-            <div className="flex items-center gap-3">
-              <div 
-                className="w-12 h-12 rounded-2xl flex items-center justify-center"
-                style={{ backgroundColor: PRIMARY }}
-              >
-                <Radio className="w-6 h-6 text-white" />
-              </div>
-              <div>
-                <h1 className="text-2xl font-black text-white tracking-tight">Canli TV</h1>
-                <p className="text-sm text-white/50 flex items-center gap-1">
-                  <Sparkles className="w-3 h-3" />
-                  TR kategori yapisina gore optimize edilmis kanal listesi
-                </p>
-              </div>
+      {/* ========== HEADER - Minimal ========== */}
+      <header className="px-6 py-4" style={{ backgroundColor: BG_SURFACE, borderBottom: '1px solid rgba(255,255,255,0.1)' }}>
+        <div className="max-w-7xl mx-auto flex items-center justify-between gap-4">
+          {/* Logo */}
+          <div className="flex items-center gap-3">
+            <div 
+              className="w-12 h-12 rounded-2xl flex items-center justify-center"
+              style={{ backgroundColor: PRIMARY }}
+            >
+              <Tv className="w-6 h-6 text-white" />
             </div>
-            
-            {/* Arama - Modern */}
-            <div className="flex-1 max-w-md ml-8">
-              <div className="relative group">
-                <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-white/40 group-focus-within:text-white transition-colors" />
-                <input
-                  type="text"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Kanal ara..."
-                  className="w-full pl-12 pr-4 py-3.5 rounded-2xl text-white placeholder-white/40 focus:outline-none transition-all"
-                  style={{ 
-                    backgroundColor: BG_SURFACE, 
-                    border: `2px solid ${searchQuery ? PRIMARY : BORDER}`,
-                  }}
-                />
-                {searchQuery && (
-                  <button
-                    onClick={() => setSearchQuery('')}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 p-1.5 rounded-full hover:bg-white/10 transition-colors"
-                  >
-                    <X className="w-4 h-4 text-white/60" />
-                  </button>
-                )}
-              </div>
+            <div>
+              <h1 className="text-xl font-black text-white">Canlı TV</h1>
+              <p className="text-xs text-white/50">{filteredChannels.length} kanal</p>
             </div>
           </div>
-
-          {/* Ulke Filtreleri - Buyuk Bayrakli */}
-          <div className="flex items-center gap-3 overflow-x-auto pb-2 hide-scrollbar">
-            {COUNTRIES.map(country => (
-              <button
-                key={country.id}
-                onClick={() => setSelectedCountry(country.id)}
-                className="flex items-center gap-2.5 px-5 py-3.5 rounded-2xl whitespace-nowrap transition-all hover:scale-105"
-                style={{
-                  backgroundColor: selectedCountry === country.id ? PRIMARY : BG_SURFACE,
-                  color: 'white',
-                  border: `2px solid ${selectedCountry === country.id ? PRIMARY : BORDER}`,
-                  boxShadow: selectedCountry === country.id ? `0 4px 20px rgba(229,9,20,0.4)` : 'none'
+          
+          {/* Arama - TV için büyük */}
+          <div className="flex-1 max-w-md">
+            <div className="relative">
+              <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-white/40" />
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Kanal ara..."
+                className="w-full pl-12 pr-4 py-3 rounded-2xl text-white placeholder-white/40 text-lg outline-none transition-all focus:ring-2"
+                style={{ 
+                  backgroundColor: BG_CARD, 
+                  border: '2px solid rgba(255,255,255,0.1)',
                 }}
-              >
-                <span className="text-2xl">{country.flag}</span>
-                <span className="font-bold">{country.name}</span>
-              </button>
-            ))}
+              />
+            </div>
           </div>
         </div>
       </header>
 
-      {/* Kategori Pills - Renkli ve Ikonlu */}
-      <div className="sticky top-0 z-30 border-b" style={{ backgroundColor: BG_DARK, borderColor: BORDER }}>
-        <div className="max-w-7xl mx-auto px-4 py-4">
-          <div className="flex items-center gap-2 overflow-x-auto hide-scrollbar">
-            {liveCategories.map(cat => (
+      {/* ========== KATEGORİLER - Büyük TV Dostu Butonlar ========== */}
+      <div className="px-6 py-4 overflow-x-auto" style={{ backgroundColor: BG_DARK }}>
+        <div className="max-w-7xl mx-auto">
+          <div className="flex gap-3 min-w-max">
+            {CATEGORIES.map((cat) => (
               <button
                 key={cat.id}
                 onClick={() => setSelectedCategory(cat.id)}
-                className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-bold whitespace-nowrap transition-all hover:scale-105"
+                className="flex items-center gap-2 px-6 py-3 rounded-2xl font-bold text-lg transition-all whitespace-nowrap"
                 style={{
-                  backgroundColor: selectedCategory === cat.id ? cat.color : BG_SURFACE,
+                  backgroundColor: selectedCategory === cat.id ? PRIMARY : BG_CARD,
                   color: 'white',
-                  border: `2px solid ${selectedCategory === cat.id ? cat.color : BORDER}`,
-                  boxShadow: selectedCategory === cat.id ? `0 4px 15px ${cat.color}40` : 'none'
+                  border: `2px solid ${selectedCategory === cat.id ? PRIMARY : 'rgba(255,255,255,0.1)'}`,
+                  transform: selectedCategory === cat.id ? 'scale(1.05)' : 'scale(1)',
                 }}
               >
-                <span>{cat.icon}</span>
+                <span className="text-2xl">{cat.emoji}</span>
                 <span>{cat.name}</span>
-                <span className="text-[11px] px-2 py-0.5 rounded-full bg-black/25">{cat.count}</span>
               </button>
             ))}
           </div>
         </div>
       </div>
 
-      {/* Ana Icerik */}
-      <div className="max-w-7xl mx-auto px-4 py-6">
-        {/* Video ve Kanal Listesi - Yatay Layout */}
-        <div className="grid lg:grid-cols-3 gap-6">
-          {/* Video Player - Sinematik */}
-          <div className={`${isFullscreen ? 'fixed inset-0 z-50 bg-black' : 'lg:col-span-2'}`}>
-            <div 
-              id="video-player-wrapper"
-              className={`${isFullscreen ? 'w-full h-screen bg-black' : 'rounded-3xl overflow-hidden shadow-2xl'}`}
-              style={!isFullscreen ? { 
-                backgroundColor: BG_CARD, 
-                border: `2px solid ${BORDER}`,
-                boxShadow: '0 25px 50px -12px rgba(0,0,0,0.5)'
-              } : {}}
-            >
-              <div 
-                className={`bg-black relative ${isFullscreen ? 'fixed inset-0 z-50' : 'aspect-video rounded-3xl overflow-hidden'}`}
-                onMouseMove={handleMouseMove}
-                onClick={() => setShowControls(true)}
-              >
-                {loading && (
-                  <div className="absolute inset-0 flex items-center justify-center z-10">
-                    <div className="text-center">
-                      <div className="w-16 h-16 border-4 border-t-transparent rounded-full animate-spin mx-auto mb-3" style={{ borderColor: PRIMARY }} />
-                      <p className="text-white/70">Yukleniyor...</p>
-                    </div>
-                  </div>
-                )}
-                
-                {error && (
-                  <div className="absolute inset-0 flex items-center justify-center z-10">
-                    <div className="text-center p-8">
-                      <div className="w-20 h-20 rounded-full flex items-center justify-center mx-auto mb-4" style={{ backgroundColor: 'rgba(229,9,20,0.2)' }}>
-                        <AlertCircle className="w-10 h-10" style={{ color: PRIMARY }} />
-                      </div>
-                      <p className="text-white mb-4">{error}</p>
-                      <button 
-                        onClick={() => { setError(null); setLoading(true) }}
-                        className="px-6 py-3 rounded-xl text-white font-bold transition-transform hover:scale-105"
-                        style={{ backgroundColor: PRIMARY }}
-                      >
-                        Tekrar Dene
-                      </button>
-                    </div>
-                  </div>
-                )}
-                
-                <video 
-                  ref={videoRef} 
-                  className={`${isFullscreen ? 'w-full h-full object-cover' : 'w-full h-full object-contain'}`}
-                  autoPlay 
-                  playsInline 
-                />
-                
-                {/* Controls - Modern Minimal Design */}
-                <div 
-                  id="video-container"
-                  className={`absolute bottom-0 left-0 right-0 p-4 transition-opacity duration-300 ${showControls ? 'opacity-100' : 'opacity-0'}`}
-                  style={{ 
-                    background: showControls ? 'linear-gradient(to top, rgba(0,0,0,0.8) 0%, transparent 100%)' : 'transparent',
-                  }}
-                >
-                  <div className="flex items-center justify-center gap-6">
-                    {/* Volume Control - Hover to expand */}
-                    <div className="flex items-center group">
-                      <button 
-                        onClick={toggleMute}
-                        className="w-10 h-10 rounded-full flex items-center justify-center transition-all hover:bg-white/20"
-                      >
-                        {isMuted ? <VolumeX className="w-5 h-5 text-white" /> : <Volume2 className="w-5 h-5 text-white" />}
-                      </button>
-                      
-                      {/* Volume Slider - Hidden by default, shows on hover */}
-                      <div className="w-0 overflow-hidden group-hover:w-24 transition-all duration-300 ease-out">
-                        <input
-                          type="range"
-                          min="0"
-                          max="1"
-                          step="0.01"
-                          value={isMuted ? 0 : volume}
-                          onChange={handleVolumeChange}
-                          className="w-20 h-1 ml-2 rounded-full appearance-none cursor-pointer"
-                          style={{ 
-                            background: `linear-gradient(to right, ${PRIMARY} ${(isMuted ? 0 : volume) * 100}%, rgba(255,255,255,0.3) ${(isMuted ? 0 : volume) * 100}%)` 
-                          }}
-                        />
-                      </div>
-                    </div>
-                    
-                    {/* Fullscreen Toggle */}
-                    <button 
-                      onClick={toggleFullscreen}
-                      className="w-10 h-10 rounded-full flex items-center justify-center transition-all hover:bg-white/20"
-                    >
-                      {isFullscreen ? (
-                        <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
-                        </svg>
-                      ) : (
-                        <Maximize className="w-5 h-5 text-white" />
-                      )}
-                    </button>
-                  </div>
+      {/* ========== ANA İÇERİK ========== */}
+      <div className="px-6 py-4">
+        <div className="max-w-7xl mx-auto grid lg:grid-cols-[1fr_400px] gap-6">
+          
+          {/* ========== VIDEO PLAYER ========== */}
+          <div 
+            id="video-container"
+            className="relative rounded-3xl overflow-hidden"
+            style={{ 
+              backgroundColor: BG_CARD, 
+              border: '2px solid rgba(255,255,255,0.1)',
+              aspectRatio: '16/9'
+            }}
+            onMouseMove={handleMouseMove}
+            onClick={() => setShowControls(true)}
+          >
+            {/* Loading */}
+            {loading && (
+              <div className="absolute inset-0 flex items-center justify-center z-10">
+                <div className="text-center">
+                  <div 
+                    className="w-16 h-16 border-4 border-t-transparent rounded-full animate-spin mx-auto mb-4"
+                    style={{ borderColor: PRIMARY, borderTopColor: 'transparent' }}
+                  />
+                  <p className="text-white/70 text-lg">Yükleniyor...</p>
                 </div>
               </div>
-              
-              {/* Kanal Bilgisi - Normal Mod (Fullscreen'de gizli) */}
-              {!isFullscreen && currentChannel && (
-                <div className="p-5 flex items-center gap-5">
-                  {currentChannel.logo ? (
-                    <div className="relative">
-                      <img 
-                        src={currentChannel.logo} 
-                        alt="" 
-                        className="w-20 h-20 object-contain rounded-2xl p-2"
-                        style={{ backgroundColor: BG_DARK, border: `2px solid ${BORDER}` }}
-                      />
-                      <div 
-                        className="absolute -bottom-1 -right-1 w-4 h-4 rounded-full border-2"
-                        style={{ backgroundColor: '#46d369', borderColor: BG_CARD }}
-                      />
-                    </div>
-                  ) : (
-                    <div 
-                      className="w-20 h-20 rounded-2xl flex items-center justify-center"
-                      style={{ backgroundColor: BG_DARK, border: `2px solid ${BORDER}` }}
-                    >
-                      <Tv className="w-10 h-10 text-white/30" />
-                    </div>
-                  )}
-                  <div className="flex-1">
-                    <h2 className="text-2xl font-black text-white mb-1">{currentChannel.name}</h2>
-                    <div className="flex items-center gap-3">
-                      <span className="text-sm text-white/50">{currentChannel.group}</span>
-                      <span className="w-1 h-1 rounded-full bg-white/30" />
-                      <span className="text-sm font-bold" style={{ color: '#46d369' }}>LIVE YAYIN</span>
-                    </div>
-                  </div>
-                  <div 
-                    className="px-4 py-2 rounded-xl font-bold text-sm"
-                    style={{ backgroundColor: 'rgba(229,9,20,0.2)', color: PRIMARY, border: `1px solid ${PRIMARY}` }}
+            )}
+            
+            {/* Error */}
+            {error && (
+              <div className="absolute inset-0 flex items-center justify-center z-10">
+                <div className="text-center p-8">
+                  <AlertCircle className="w-16 h-16 mx-auto mb-4" style={{ color: PRIMARY }} />
+                  <p className="text-white mb-4">{error}</p>
+                  <button 
+                    onClick={() => window.location.reload()}
+                    className="flex items-center gap-2 px-6 py-3 rounded-xl mx-auto font-bold"
+                    style={{ backgroundColor: PRIMARY, color: 'white' }}
                   >
-                    HD
-                  </div>
+                    <RefreshCw className="w-5 h-5" />
+                    Yeniden Dene
+                  </button>
                 </div>
-              )}
+              </div>
+            )}
+            
+            {/* Video */}
+            <video 
+              ref={videoRef}
+              className="w-full h-full object-contain"
+              autoPlay
+              playsInline
+            />
+            
+            {/* Kontroller */}
+            <div 
+              className={`absolute bottom-0 left-0 right-0 p-6 transition-opacity duration-300 ${showControls ? 'opacity-100' : 'opacity-0'}`}
+              style={{ background: 'linear-gradient(to top, rgba(0,0,0,0.9) 0%, transparent 100%)' }}
+            >
+              {/* Kanal Bilgisi */}
+              <div className="mb-4">
+                <h2 className="text-2xl font-bold text-white">{currentChannel?.name}</h2>
+                <p className="text-white/60">{currentChannel?.group}</p>
+              </div>
+              
+              {/* Kontrol Butonları */}
+              <div className="flex items-center gap-6">
+                {/* Ses */}
+                <div className="flex items-center gap-3">
+                  <button 
+                    onClick={toggleMute}
+                    className="w-12 h-12 rounded-full flex items-center justify-center text-white hover:bg-white/20 transition-colors"
+                  >
+                    {isMuted ? <VolumeX className="w-6 h-6" /> : <Volume2 className="w-6 h-6" />}
+                  </button>
+                  <input
+                    type="range"
+                    min="0"
+                    max="1"
+                    step="0.1"
+                    value={isMuted ? 0 : volume}
+                    onChange={handleVolumeChange}
+                    className="w-32 h-2 rounded-lg appearance-none cursor-pointer"
+                    style={{ backgroundColor: 'rgba(255,255,255,0.3)' }}
+                  />
+                </div>
+                
+                {/* Fullscreen */}
+                <button 
+                  onClick={toggleFullscreen}
+                  className="w-12 h-12 rounded-full flex items-center justify-center text-white hover:bg-white/20 transition-colors ml-auto"
+                >
+                  <Maximize className="w-6 h-6" />
+                </button>
+              </div>
             </div>
           </div>
 
-          {/* Kanal Listesi - Grid */}
-          {!isFullscreen && (
-            <div className="lg:col-span-1">
-              <div 
-                className="rounded-3xl overflow-hidden"
-                style={{ backgroundColor: BG_CARD, border: `2px solid ${BORDER}` }}
-              >
-                {/* Header */}
-                <div className="p-5 border-b flex items-center justify-between" style={{ borderColor: BORDER }}>
-                  <div>
-                    <h3 className="font-black text-white text-lg">Kanallar</h3>
-                    <p className="text-sm text-white/50">{filteredChannels.length} kanal bulundu</p>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    {/* Yenile Butonu */}
-                    <button
-                      onClick={() => {
-                        fetchChannels(selectedCountry)
-                      }}
-                      disabled={loading}
-                      className="w-10 h-10 rounded-xl flex items-center justify-center transition-all hover:scale-110 disabled:opacity-50"
-                      style={{ backgroundColor: BG_DARK }}
-                      title="KanallarÄ± Yenile"
-                    >
-                      <RefreshCw className={`w-5 h-5 text-white/70 ${loading ? 'animate-spin' : ''}`} />
-                    </button>
-                    <div 
-                      className="w-10 h-10 rounded-xl flex items-center justify-center"
-                      style={{ backgroundColor: BG_DARK }}
-                    >
-                      <Tv className="w-5 h-5 text-white/50" />
-                    </div>
-                  </div>
-                </div>
-                
-                {/* Kanal Arama - Kanal Listesi Ustu */}
-                <div className="px-4 py-3 border-b" style={{ borderColor: BORDER, backgroundColor: BG_DARK }}>
-                  <div className="relative group">
-                    <Search className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-white/30 group-focus-within:text-white/60 transition-colors" />
-                    <input
-                      type="text"
-                      value={searchQuery}
-                      onChange={(e) => setSearchQuery(e.target.value)}
-                      placeholder="Kanal ara..."
-                      className="w-full pl-10 pr-9 py-2.5 rounded-xl text-sm text-white placeholder-white/30 focus:outline-none transition-all"
-                      style={{ 
-                        backgroundColor: BG_SURFACE, 
-                        border: `1px solid ${searchQuery ? PRIMARY : BORDER}`,
-                      }}
-                    />
-                    {searchQuery && (
-                      <button
-                        onClick={() => setSearchQuery('')}
-                        className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 rounded-full hover:bg-white/10 transition-colors"
-                      >
-                        <X className="w-3.5 h-3.5 text-white/40" />
-                      </button>
-                    )}
-                  </div>
-                  {searchQuery && (
-                    <p className="text-xs text-white/40 mt-2 ml-1">
-                      {filteredChannels.length} sonuc bulundu
-                    </p>
-                  )}
-                </div>
-
-                {/* Channel Grid */}
-                <div className="overflow-y-auto p-3" style={{ maxHeight: 'calc(100vh - 420px)' }}>
-                  <div className="grid grid-cols-1 gap-2">
-                    {displayedChannels.map((ch, index) => {
-                      const isLast = index === displayedChannels.length - 1
-                      const isActive = currentChannel?.name === ch.name
-                      return (
-                        <button
-                          key={index}
-                          ref={isLast ? lastChannelRef : null}
-                          onClick={() => { setCurrentChannel(ch); setLoading(true); setError(null) }}
-                          className="flex items-center gap-4 p-3 rounded-2xl text-left transition-all hover:scale-[1.02]"
-                          style={{
-                            backgroundColor: isActive ? 'rgba(229,9,20,0.15)' : BG_DARK,
-                            border: `2px solid ${isActive ? PRIMARY : 'transparent'}`
-                          }}
-                        >
-                          {ch.logo ? (
-                            <img 
-                              src={ch.logo} 
-                              alt="" 
-                              className="w-14 h-14 object-contain rounded-xl p-1 flex-shrink-0"
-                              style={{ backgroundColor: isActive ? 'rgba(255,255,255,0.1)' : BG_SURFACE }}
-                              loading="lazy"
-                            />
-                          ) : (
-                            <div 
-                              className="w-14 h-14 rounded-xl flex items-center justify-center flex-shrink-0"
-                              style={{ backgroundColor: BG_SURFACE }}
-                            >
-                              <Tv className="w-7 h-7 text-white/30" />
-                            </div>
-                          )}
-                          <div className="flex-1 min-w-0">
-                            <p className={`font-bold truncate ${isActive ? 'text-white' : 'text-white/90'}`}>
-                              {ch.name}
-                            </p>
-                            <p className="text-xs text-white/40 truncate">{ch.group}</p>
-                          </div>
-                          {isActive && (
-                            <div 
-                              className="w-3 h-3 rounded-full flex-shrink-0 animate-pulse"
-                              style={{ backgroundColor: PRIMARY }}
-                            />
-                          )}
-                        </button>
-                      )
-                    })}
-                  </div>
-                  
-                  {hasMore && (
-                    <div className="p-4 text-center">
-                      <div className="w-8 h-8 border-3 border-t-transparent rounded-full animate-spin mx-auto" style={{ borderColor: PRIMARY }} />
-                    </div>
-                  )}
-                </div>
-              </div>
+          {/* ========== KANAL LİSTESİ - TV Dostu Büyük Kartlar ========== */}
+          <div 
+            className="rounded-3xl overflow-hidden"
+            style={{ 
+              backgroundColor: BG_SURFACE, 
+              border: '2px solid rgba(255,255,255,0.1)',
+              maxHeight: 'calc(100vh - 250px)',
+              overflowY: 'auto'
+            }}
+          >
+            {/* Liste Başlığı */}
+            <div 
+              className="sticky top-0 px-6 py-4 flex items-center justify-between"
+              style={{ backgroundColor: BG_SURFACE, borderBottom: '1px solid rgba(255,255,255,0.1)' }}
+            >
+              <h3 className="text-lg font-bold text-white">Kanallar</h3>
+              <span className="text-sm text-white/50">{filteredChannels.length}</span>
             </div>
-          )}
+            
+            {/* Kanal Kartları - Büyük ve TV Dostu */}
+            <div className="p-4 space-y-3">
+              {filteredChannels.map((channel, index) => {
+                const isActive = currentChannel?.name === channel.name
+                return (
+                  <button
+                    key={channel.name + index}
+                    onClick={() => setCurrentChannel(channel)}
+                    className="w-full flex items-center gap-4 p-4 rounded-2xl transition-all text-left"
+                    style={{
+                      backgroundColor: isActive ? PRIMARY : BG_CARD,
+                      border: `2px solid ${isActive ? PRIMARY : 'transparent'}`,
+                      transform: isActive ? 'scale(1.02)' : 'scale(1)',
+                    }}
+                  >
+                    {/* Kanal Numarası */}
+                    <span 
+                      className="w-12 h-12 rounded-xl flex items-center justify-center font-black text-xl"
+                      style={{ backgroundColor: isActive ? 'rgba(255,255,255,0.2)' : 'rgba(255,255,255,0.05)' }}
+                    >
+                      {index + 1}
+                    </span>
+                    
+                    {/* Kanal Bilgisi */}
+                    <div className="flex-1 min-w-0">
+                      <h4 className={`font-bold text-lg truncate ${isActive ? 'text-white' : 'text-white/90'}`}>
+                        {channel.name}
+                      </h4>
+                      <p className={`text-sm truncate ${isActive ? 'text-white/80' : 'text-white/50'}`}>
+                        {channel.group}
+                      </p>
+                    </div>
+                    
+                    {/* Aktif İndikatör */}
+                    {isActive && (
+                      <div className="w-3 h-3 rounded-full bg-white animate-pulse" />
+                    )}
+                  </button>
+                )
+              })}
+            </div>
+          </div>
         </div>
+      </div>
+      
+      {/* TV Kullanımı İçin Bilgi */}
+      <div className="px-6 py-4 text-center">
+        <p className="text-white/40 text-sm">
+          📺 TV Kumandası: ↑↓ Kanal değiştir • Ses: Mute/Unmute
+        </p>
       </div>
     </div>
   )
 }
-
-export default PlayerPage
-
-
