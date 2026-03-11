@@ -80,6 +80,39 @@ describe('M3uController live proxy helpers', () => {
     expect(controller._liveHlsKeepSegments).toBe(60)
   })
 
+  test('uses short shared live catalog and allowed origin cache defaults', () => {
+    const previousLiveCatalogTtl = process.env.LIVE_CATALOG_CACHE_TTL_SEC
+    const previousAllowedOriginsTtl = process.env.ALLOWED_ORIGINS_CACHE_TTL_SEC
+    const previousCacheVersion = process.env.LIVE_SHARED_CATALOG_CACHE_VERSION
+    delete process.env.LIVE_CATALOG_CACHE_TTL_SEC
+    delete process.env.ALLOWED_ORIGINS_CACHE_TTL_SEC
+    delete process.env.LIVE_SHARED_CATALOG_CACHE_VERSION
+
+    const controller = buildController()
+
+    if (previousLiveCatalogTtl === undefined) {
+      delete process.env.LIVE_CATALOG_CACHE_TTL_SEC
+    } else {
+      process.env.LIVE_CATALOG_CACHE_TTL_SEC = previousLiveCatalogTtl
+    }
+
+    if (previousAllowedOriginsTtl === undefined) {
+      delete process.env.ALLOWED_ORIGINS_CACHE_TTL_SEC
+    } else {
+      process.env.ALLOWED_ORIGINS_CACHE_TTL_SEC = previousAllowedOriginsTtl
+    }
+
+    if (previousCacheVersion === undefined) {
+      delete process.env.LIVE_SHARED_CATALOG_CACHE_VERSION
+    } else {
+      process.env.LIVE_SHARED_CATALOG_CACHE_VERSION = previousCacheVersion
+    }
+
+    expect(controller._liveCatalogCacheTtlSec).toBe(300)
+    expect(controller._allowedOriginsCacheTtlSec).toBe(180)
+    expect(controller._liveCatalogCacheVersion).toBe('v3')
+  })
+
   test('prunes old live segments and adjusts media sequence', () => {
     const controller = buildController()
     const raw = [
@@ -197,6 +230,33 @@ describe('M3uController live proxy helpers', () => {
 
     expect(headers.Referer).toBe('http://provider.example/')
     expect(headers.Origin).toBe('http://provider.example')
+  })
+
+  test('applies hardened media proxy headers with no-store and no buffering', () => {
+    const controller = buildController()
+    const headers = {}
+    const res = {
+      setHeader: (name, value) => {
+        headers[name] = value
+      }
+    }
+
+    controller._setProxyMediaHeaders(
+      res,
+      {
+        'content-type': 'application/vnd.apple.mpegurl',
+        'content-length': '128'
+      },
+      { headers: {} },
+      'application/vnd.apple.mpegurl'
+    )
+
+    expect(headers['Cache-Control']).toBe('private, no-store')
+    expect(headers['Pragma']).toBe('no-cache')
+    expect(headers['Surrogate-Control']).toBe('no-store')
+    expect(headers['X-Accel-Buffering']).toBe('no')
+    expect(headers['Cross-Origin-Resource-Policy']).toBe('cross-origin')
+    expect(headers['Content-Type']).toBe('application/vnd.apple.mpegurl')
   })
 
   test('builds compact series summary catalog with counts and first episode', () => {

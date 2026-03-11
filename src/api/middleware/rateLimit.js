@@ -120,10 +120,14 @@ function createRateLimiter(options) {
     skip: (req) => {
       // Skip rate limiting for health checks
       return (
+        req.path === '/' ||
         req.path === '/health' ||
         req.path === '/ready' ||
+        req.path === '/api/v1' ||
         req.path === '/api/health' ||
+        req.path === '/api/v1/health' ||
         req.path === '/api/v1/ready' ||
+        req.path === '/api/v1/m3u/health' ||
         isSkippedMediaPath(req.path)
       );
     }

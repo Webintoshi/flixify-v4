@@ -13,6 +13,7 @@
     "build": "npm run client:build",
     "client:build": "cd frontend && vite build",
     "start": "NODE_ENV=production node src/server.js",
+    "smoke:api": "node scripts/smoke-api.js",
     "test": "jest --coverage --verbose",
     "test:watch": "jest --watch",
     "test:integration": "jest --config jest.integration.config.js",

@@ -74,3 +74,30 @@ server {
 ```bash
 certbot --nginx -d YOUR_DOMAIN.com
 ```
+
+## API Host Nginx
+- Use `deploy/nginx/api-v4.flixify.pro.conf` for the dedicated API host.
+- It keeps `/` and `/api/v1` on the same Node upstream.
+- It disables proxy buffering and proxy cache for `/api/v1/stream/*` and `/api/v1/m3u/logo/*`.
+
+## Deploy Order
+1. Checkout the target branch and commit.
+2. Run `npm install`.
+3. Run `cd frontend && npm install && npm run build && cd ..`.
+4. Restart the service (`pm2 restart iptv-platform` or the matching systemd unit).
+5. Run the smoke checks:
+
+```bash
+API_BASE_URL=https://api-v4.flixify.pro npm run smoke:api
+```
+
+Optional media proxy smoke checks:
+
+```bash
+API_BASE_URL=https://api-v4.flixify.pro \
+SMOKE_USER_CODE=YOUR_CODE \
+SMOKE_ACCESS_TOKEN=YOUR_TOKEN \
+SMOKE_STREAM_TARGET_URL=https://provider.example/live/index.m3u8 \
+SMOKE_LOGO_TARGET_URL=https://provider.example/logo.png \
+npm run smoke:api
+```

@@ -70,6 +70,7 @@ class ServiceUnavailableError extends AppError {
  * RFC 7807 Problem Details response
  */
 function createProblemDetails(error, req) {
+  const releaseInfo = req.app?.locals?.releaseInfo || null;
   const problem = {
     type: `https://api.iptv-platform.com/errors/${error.code || 'INTERNAL_ERROR'}`,
     title: error.name || 'Error',
@@ -83,6 +84,14 @@ function createProblemDetails(error, req) {
   // Add correlation ID for troubleshooting
   if (req.correlationId) {
     problem.correlationId = req.correlationId;
+  }
+
+  if (releaseInfo?.version) {
+    problem.version = releaseInfo.version;
+  }
+
+  if (releaseInfo?.releaseId) {
+    problem.releaseId = releaseInfo.releaseId;
   }
 
   // Include validation details if available
@@ -151,6 +160,7 @@ function errorHandler(err, req, res, _next) {
  */
 function notFoundHandler(req, res) {
   logger.debug('Route not found', { path: req.originalUrl, method: req.method });
+  const releaseInfo = req.app?.locals?.releaseInfo || null;
   
   res.status(404).json({
     type: 'https://api.iptv-platform.com/errors/NOT_FOUND',
@@ -159,7 +169,9 @@ function notFoundHandler(req, res) {
     detail: `Route ${req.method} ${req.originalUrl} not found`,
     code: 'NOT_FOUND',
     instance: req.originalUrl,
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    version: releaseInfo?.version || undefined,
+    releaseId: releaseInfo?.releaseId || undefined
   });
 }
 

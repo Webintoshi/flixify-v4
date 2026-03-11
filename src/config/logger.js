@@ -12,6 +12,7 @@
  */
 
 const winston = require('winston');
+const { getReleaseInfo } = require('./release');
 
 // Sensitive fields to redact
 const SENSITIVE_FIELDS = ['code', 'token', 'password', 'secret', 'authorization', 'cookie', 'm3uUrl'];
@@ -63,6 +64,7 @@ const addCorrelationId = winston.format((info) => {
 // Determine log level from environment
 const LOG_LEVEL = process.env.LOG_LEVEL || (process.env.NODE_ENV === 'production' ? 'info' : 'debug');
 const LOG_FORMAT = process.env.LOG_FORMAT || (process.env.NODE_ENV === 'production' ? 'json' : 'combined');
+const releaseInfo = getReleaseInfo();
 
 // Create format chain
 const formats = [
@@ -86,9 +88,10 @@ if (LOG_FORMAT === 'json') {
 const logger = winston.createLogger({
   level: LOG_LEVEL,
   defaultMeta: {
-    service: 'iptv-platform',
-    environment: process.env.NODE_ENV || 'development',
-    version: process.env.npm_package_version || '1.0.0'
+    service: releaseInfo.service,
+    environment: releaseInfo.environment,
+    version: releaseInfo.version,
+    releaseId: releaseInfo.releaseId
   },
   format: winston.format.combine(...formats),
   transports: [

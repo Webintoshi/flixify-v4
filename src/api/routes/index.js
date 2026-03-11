@@ -25,6 +25,16 @@ function setNoStoreHeaders(res) {
   res.setHeader('Surrogate-Control', 'no-store');
 }
 
+function getRequestReleaseInfo(req) {
+  return req.app?.locals?.releaseInfo || {
+    service: 'iptv-platform',
+    version: process.env.npm_package_version || '1.0.0',
+    releaseId: process.env.RELEASE_ID || process.env.npm_package_version || '1.0.0',
+    environment: process.env.NODE_ENV || 'development',
+    apiRoot: '/api/v1'
+  };
+}
+
 function createRoutes({
   authController,
   adminController,
@@ -47,12 +57,16 @@ function createRoutes({
     const runtimeStatus = typeof req.app.locals.getRuntimeStatus === 'function'
       ? await req.app.locals.getRuntimeStatus()
       : null;
+    const releaseInfo = getRequestReleaseInfo(req);
 
     res.json({
       status: 'success',
       data: {
-        service: 'iptv-platform',
-        version: runtimeStatus?.version || process.env.npm_package_version || '1.0.0',
+        service: releaseInfo.service,
+        version: runtimeStatus?.version || releaseInfo.version,
+        releaseId: runtimeStatus?.releaseId || releaseInfo.releaseId,
+        environment: runtimeStatus?.environment || releaseInfo.environment,
+        apiRoot: runtimeStatus?.apiRoot || releaseInfo.apiRoot,
         timestamp: runtimeStatus?.timestamp || new Date().toISOString(),
         serverIp: req.socket.localAddress,
         uptimeSeconds: runtimeStatus?.uptimeSeconds || Math.round(process.uptime()),
@@ -67,6 +81,7 @@ function createRoutes({
     const runtimeStatus = typeof req.app.locals.getRuntimeStatus === 'function'
       ? await req.app.locals.getRuntimeStatus({ forceRefresh: true })
       : null;
+    const releaseInfo = getRequestReleaseInfo(req);
 
     const databaseHealthy = runtimeStatus?.dependencies?.database?.healthy !== false;
     const mediaHealthy = runtimeStatus?.dependencies?.media?.healthy !== false;
@@ -74,25 +89,40 @@ function createRoutes({
 
     return res.status(ready ? 200 : 503).json({
       status: ready ? 'ready' : 'degraded',
-      data: runtimeStatus || {
-        timestamp: new Date().toISOString(),
-        service: 'iptv-platform'
-      }
+      data: runtimeStatus
+        ? {
+          ...runtimeStatus,
+          service: runtimeStatus.service || releaseInfo.service,
+          version: runtimeStatus.version || releaseInfo.version,
+          releaseId: runtimeStatus.releaseId || releaseInfo.releaseId,
+          environment: runtimeStatus.environment || releaseInfo.environment,
+          apiRoot: runtimeStatus.apiRoot || releaseInfo.apiRoot
+        }
+        : {
+          timestamp: new Date().toISOString(),
+          service: releaseInfo.service,
+          version: releaseInfo.version,
+          releaseId: releaseInfo.releaseId,
+          environment: releaseInfo.environment,
+          apiRoot: releaseInfo.apiRoot
+        }
     });
   });
 
-  router.get('/', (_req, res) => {
+  router.get('/', (req, res) => {
     setNoStoreHeaders(res);
+    const releaseInfo = getRequestReleaseInfo(req);
     res.json({
       status: 'success',
       data: {
-        service: 'iptv-platform',
-        version: process.env.npm_package_version || '1.0.0',
-        endpoints: {
-          health: '/api/v1/health',
-          ready: '/api/v1/ready',
-          m3uHealth: '/api/v1/m3u/health'
-        }
+        service: releaseInfo.service,
+        version: releaseInfo.version,
+        releaseId: releaseInfo.releaseId,
+        environment: releaseInfo.environment,
+        apiRoot: releaseInfo.apiRoot,
+        health: '/api/v1/health',
+        ready: '/api/v1/ready',
+        m3uHealth: '/api/v1/m3u/health'
       }
     });
   });

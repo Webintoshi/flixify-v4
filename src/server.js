@@ -28,6 +28,7 @@ const { spawn } = require('child_process');
 
 // Configuration
 const logger = require('./config/logger');
+const { applyReleaseHeaders, getReleaseInfo } = require('./config/release');
 
 // Infrastructure
 const SupabaseUserRepository = require('./infrastructure/persistence/SupabaseUserRepository');
@@ -108,7 +109,8 @@ function createRuntimeStatusProvider({
   useMockRepository,
   mediaTooling,
   telegramBotService,
-  redisClient
+  redisClient,
+  releaseInfo
 }) {
   const cacheTtlMs = Number.parseInt(process.env.HEALTHCHECK_CACHE_TTL_MS || '30000', 10);
   let cachedSnapshot = null;
@@ -192,8 +194,11 @@ function createRuntimeStatusProvider({
         status: summaryStatus,
         timestamp: new Date().toISOString(),
         uptimeSeconds: Math.round(process.uptime()),
-        version: process.env.npm_package_version || '1.0.0',
-        environment: process.env.NODE_ENV || 'development',
+        service: releaseInfo.service,
+        version: releaseInfo.version,
+        releaseId: releaseInfo.releaseId,
+        environment: releaseInfo.environment,
+        apiRoot: releaseInfo.apiRoot,
         memory: formatMemoryUsage(process.memoryUsage()),
         dependencies: {
           database,
@@ -396,6 +401,7 @@ async function startServer() {
   // ============================================================================
 
   const app = express();
+  const releaseInfo = getReleaseInfo();
 
   // Trust proxy (for X-Forwarded-For behind reverse proxy)
   app.set('trust proxy', 1);
@@ -403,13 +409,15 @@ async function startServer() {
   // Store Redis client in app locals for access in routes
   app.locals.redisClient = redisClient;
   app.locals.mediaTooling = mediaTooling;
+  app.locals.releaseInfo = releaseInfo;
   app.locals.getRuntimeStatus = createRuntimeStatusProvider({
     cacheService,
     supabaseClient,
     useMockRepository,
     mediaTooling,
     telegramBotService,
-    redisClient
+    redisClient,
+    releaseInfo
   });
 
   // Security middleware
@@ -465,6 +473,11 @@ async function startServer() {
     next();
   });
 
+  app.use((req, res, next) => {
+    applyReleaseHeaders(res, req.app.locals.releaseInfo || releaseInfo);
+    next();
+  });
+
   // Global rate limiting
   app.use(rateLimiters.global);
 
@@ -516,20 +529,22 @@ async function startServer() {
     });
   });
 
-  app.get('/', async (_req, res) => {
+  app.get('/', async (req, res) => {
     setNoStoreHeaders(res);
+    const publicReleaseInfo = req.app.locals.releaseInfo || releaseInfo;
 
     res.json({
       status: 'success',
       data: {
-        service: 'iptv-platform',
-        version: process.env.npm_package_version || '1.0.0',
-        documentation: {
-          apiRoot: '/api/v1',
-          health: '/api/v1/health',
-          readiness: '/api/v1/ready',
-          m3uHealth: '/api/v1/m3u/health'
-        }
+        service: publicReleaseInfo.service,
+        version: publicReleaseInfo.version,
+        releaseId: publicReleaseInfo.releaseId,
+        environment: publicReleaseInfo.environment,
+        apiRoot: publicReleaseInfo.apiRoot,
+        health: '/health',
+        apiHealth: '/api/v1/health',
+        ready: '/api/v1/ready',
+        m3uHealth: '/api/v1/m3u/health'
       }
     });
   });
@@ -546,11 +561,16 @@ async function startServer() {
     const runtimeStatus = typeof req.app.locals.getRuntimeStatus === 'function'
       ? await req.app.locals.getRuntimeStatus()
       : null;
+    const publicReleaseInfo = req.app.locals.releaseInfo || releaseInfo;
 
     res.status(200).json({
       status: runtimeStatus?.status === 'degraded' ? 'degraded' : 'healthy',
+      service: publicReleaseInfo.service,
       timestamp: runtimeStatus?.timestamp || new Date().toISOString(),
-      version: runtimeStatus?.version || process.env.npm_package_version || '1.0.0',
+      version: runtimeStatus?.version || publicReleaseInfo.version,
+      releaseId: runtimeStatus?.releaseId || publicReleaseInfo.releaseId,
+      environment: runtimeStatus?.environment || publicReleaseInfo.environment,
+      apiRoot: runtimeStatus?.apiRoot || publicReleaseInfo.apiRoot,
       uptimeSeconds: runtimeStatus?.uptimeSeconds || Math.round(process.uptime()),
       dependencies: runtimeStatus?.dependencies || null
     });

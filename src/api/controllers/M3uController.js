@@ -41,10 +41,12 @@ class M3uController {
     this._rawPlaylistInflight = new Map();
     this._catalogInflight = new Map();
     this._sharedLiveCatalogInflight = new Map();
+    this._allowedOriginsCacheTtlSec = parseInt(process.env.ALLOWED_ORIGINS_CACHE_TTL_SEC, 10) || 180;
     this._vodSessionTtlMs = parseInt(process.env.VOD_SESSION_TTL_MS, 10) || 60 * 60 * 1000;
     this._playlistCacheTtlSec = parseInt(process.env.PLAYLIST_CACHE_TTL_SEC, 10) || 900;
     this._catalogCacheTtlSec = parseInt(process.env.CATALOG_CACHE_TTL_SEC, 10) || 900;
-    this._liveCatalogCacheTtlSec = parseInt(process.env.LIVE_CATALOG_CACHE_TTL_SEC, 10) || 900;
+    this._liveCatalogCacheTtlSec = parseInt(process.env.LIVE_CATALOG_CACHE_TTL_SEC, 10) || 300;
+    this._liveCatalogCacheVersion = process.env.LIVE_SHARED_CATALOG_CACHE_VERSION || 'v3';
     this._ffmpegPath = process.env.FFMPEG_PATH || 'ffmpeg';
     this._ffprobePath = process.env.FFPROBE_PATH || 'ffprobe';
     this._upstreamTimeoutMs = parseInt(process.env.PROXY_TIMEOUT_MS, 10) || 30000;
@@ -226,6 +228,38 @@ class M3uController {
     }
   }
 
+  _getReleaseId(req) {
+    return req?.app?.locals?.releaseInfo?.releaseId || 'unknown';
+  }
+
+  _maskUserCode(code) {
+    const normalized = String(code || '').trim();
+    if (!normalized) {
+      return null;
+    }
+
+    return normalized.length <= 4 ? `${normalized}****` : `${normalized.slice(0, 4)}****`;
+  }
+
+  _getTargetOrigin(value) {
+    try {
+      return new URL(value).origin;
+    } catch {
+      return null;
+    }
+  }
+
+  _buildProxyLogContext(req, code, targetUrl, cache = 'bypass') {
+    return {
+      route: req?.route?.path || req?.path || req?.originalUrl || '',
+      correlationId: req?.correlationId || req?.headers?.['x-request-id'] || 'unknown',
+      userCode: this._maskUserCode(code),
+      targetOrigin: this._getTargetOrigin(targetUrl),
+      cache,
+      releaseId: this._getReleaseId(req)
+    };
+  }
+
   _buildProviderRequestHeaderMap(targetUrl) {
     if (!targetUrl) {
       return {};
@@ -284,7 +318,7 @@ class M3uController {
     this._copyHeaderIfPresent(res, upstreamHeaders, 'Content-Type', fallbackContentType);
     this._copyHeaderIfPresent(res, upstreamHeaders, 'Content-Length');
     this._copyHeaderIfPresent(res, upstreamHeaders, 'Content-Range');
-    this._copyHeaderIfPresent(res, upstreamHeaders, 'Accept-Ranges', req.headers.range ? 'bytes' : null);
+    this._copyHeaderIfPresent(res, upstreamHeaders, 'Accept-Ranges', req?.headers?.range ? 'bytes' : null);
     this._copyHeaderIfPresent(res, upstreamHeaders, 'Last-Modified');
     this._copyHeaderIfPresent(res, upstreamHeaders, 'ETag');
   }
@@ -809,8 +843,41 @@ class M3uController {
     }
   }
 
+  _validateLogoResponse(response) {
+    if (!response) {
+      const error = new Error('Provider returned an empty logo response');
+      error.statusCode = 502;
+      throw error;
+    }
+
+    if (response.status >= 400) {
+      const error = new Error(`Provider returned HTTP ${response.status}`);
+      error.statusCode = response.status;
+      throw error;
+    }
+
+    const contentType = (response.headers['content-type'] || '').toLowerCase();
+    const contentLength = response.headers['content-length'];
+
+    if (contentLength === '0') {
+      const error = new Error('Provider returned an empty logo');
+      error.statusCode = 502;
+      throw error;
+    }
+
+    if (
+      contentType.includes('text/html') ||
+      contentType.includes('application/json') ||
+      contentType.includes('text/plain')
+    ) {
+      const error = new Error(`Provider returned invalid logo content-type: ${contentType || 'unknown'}`);
+      error.statusCode = 502;
+      throw error;
+    }
+  }
+
   async _requestViaProviderProxy(overrides = {}, responseValidator = null, options = {}) {
-    const { preferredProxyIndex = null } = options;
+    const { preferredProxyIndex = null, logContext = null } = options;
     const proxies = this._getProxyConfigs();
     const candidates = this._buildProxyCandidates(proxies, preferredProxyIndex);
     let lastError = null;
@@ -818,6 +885,7 @@ class M3uController {
     for (const candidate of candidates) {
       const proxy = candidate.proxy;
       const proxyLabel = proxy ? `${proxy.host}:${proxy.port}` : 'DIRECT';
+      const startedAt = Date.now();
 
       try {
         const response = await axios(this._createAxiosConfig(overrides, proxy));
@@ -833,14 +901,26 @@ class M3uController {
 
         response.__providerProxyIndex = candidate.proxyIndex;
         response.__providerProxyLabel = proxyLabel;
+        response.__upstreamElapsedMs = Date.now() - startedAt;
+        response.__upstreamTargetOrigin = this._getTargetOrigin(overrides.url);
+        response.__upstreamUrl = overrides.url;
+        logger.debug('Provider upstream request succeeded', {
+          ...logContext,
+          proxy: proxyLabel,
+          upstreamStatus: response.status,
+          latencyMs: response.__upstreamElapsedMs
+        });
         return response;
       } catch (error) {
         lastError = error;
         logger.warn('Provider upstream attempt failed', {
+          ...logContext,
           proxy: proxyLabel,
           url: overrides.url,
+          targetOrigin: this._getTargetOrigin(overrides.url),
           error: error.message,
-          statusCode: error.response?.status
+          upstreamStatus: error.statusCode || error.response?.status || null,
+          latencyMs: Date.now() - startedAt
         });
       }
     }
@@ -1020,7 +1100,7 @@ class M3uController {
     }
 
     const providerSignature = buildProviderCatalogSignature(m3uUrl);
-    const cacheKey = `catalog:live:shared:${providerSignature}:v2`;
+    const cacheKey = `catalog:live:shared:${providerSignature}:${this._liveCatalogCacheVersion}`;
     const inflightKey = `catalog:live:shared:${providerSignature}:${forceRefresh ? 'refresh' : 'cached'}`;
     let sharedCatalog = !forceRefresh ? await this._cacheService.get(cacheKey) : null;
 
@@ -1594,7 +1674,7 @@ class M3uController {
     const originSet = new Set(origins);
 
     this._userAllowedOrigins.set(code, originSet);
-    await this._cacheService.set(cacheKey, origins, 300);
+    await this._cacheService.set(cacheKey, origins, this._allowedOriginsCacheTtlSec);
 
     return originSet;
   }
@@ -1615,7 +1695,7 @@ class M3uController {
       const cacheKey = `m3u:allowed-origins:${code}`;
       const serializedOrigins = Array.from(allowedOrigins);
       this._userAllowedOrigins.set(code, new Set(serializedOrigins));
-      await this._cacheService.set(cacheKey, serializedOrigins, 300);
+      await this._cacheService.set(cacheKey, serializedOrigins, this._allowedOriginsCacheTtlSec);
     }
 
     return allowedOrigins;
@@ -1795,10 +1875,7 @@ class M3uController {
       token: accessToken
     });
 
-    res.set({
-      'Content-Type': 'application/x-mpegURL',
-      'Cache-Control': 'private, no-store'
-    });
+    this._setProxyMediaHeaders(res, null, req, 'application/x-mpegURL');
 
     res.send(rewrittenPlaylist);
   });
@@ -1984,6 +2061,7 @@ class M3uController {
     const { code } = req.params;
     const targetUrl = req.query.url;
     const preferredProxyIndex = this._parsePreferredProxyIndex(req.query.up);
+    const logContext = this._buildProxyLogContext(req, code, targetUrl);
 
     try {
       const accessToken = this._resolveAccessToken(req);
@@ -2000,7 +2078,8 @@ class M3uController {
           headers: this._buildUpstreamStreamHeaders(req, 'application/vnd.apple.mpegurl,*/*', targetUrl),
           validateStatus: () => true
         }, this._validatePlaylistResponse.bind(this), {
-          preferredProxyIndex
+          preferredProxyIndex,
+          logContext
         });
 
         const resolvedPlaylistUrl = this._resolveUpstreamResponseUrl(targetUrl, playlistResponse);
@@ -2035,7 +2114,8 @@ class M3uController {
         headers: this._buildUpstreamStreamHeaders(req, '*/*', targetUrl),
         validateStatus: () => true
       }, this._validateStreamResponse.bind(this), {
-        preferredProxyIndex
+        preferredProxyIndex,
+        logContext
       });
       this._validateStreamResponse(upstream);
 
@@ -2063,7 +2143,8 @@ class M3uController {
           headers: this._buildUpstreamStreamHeaders(req, 'application/vnd.apple.mpegurl,*/*', targetUrl),
           validateStatus: () => true
         }, this._validatePlaylistResponse.bind(this), {
-          preferredProxyIndex: playlistProxyIndex
+          preferredProxyIndex: playlistProxyIndex,
+          logContext
         });
 
         const resolvedPlaylistUrl = this._resolveUpstreamResponseUrl(targetUrl, playlistResponse);
@@ -2097,9 +2178,10 @@ class M3uController {
     } catch (error) {
       const statusCode = error.statusCode || error.response?.status || 502;
       logger.error('Stream proxy error', {
-        code,
+        ...logContext,
         error: error.message,
-        statusCode
+        statusCode,
+        upstreamStatus: error.response?.status || null
       });
 
       res.status(statusCode).json({
@@ -2253,10 +2335,7 @@ class M3uController {
 
       session.lastAccessAt = Date.now();
 
-      res.set({
-        'Content-Type': 'application/vnd.apple.mpegurl',
-        'Cache-Control': 'private, no-store'
-      });
+      this._setProxyMediaHeaders(res, null, req, 'application/vnd.apple.mpegurl');
 
       res.send(this._rewriteVodManifest(manifestContent, {
         baseApiUrl: this._getBaseApiUrl(req),
@@ -2344,6 +2423,7 @@ class M3uController {
   proxyLogo = asyncHandler(async (req, res) => {
     const { code } = req.params;
     const targetUrl = req.query.url;
+    const logContext = this._buildProxyLogContext(req, code, targetUrl);
 
     try {
       const accessToken = this._resolveAccessToken(req);
@@ -2360,21 +2440,21 @@ class M3uController {
           'Accept': 'image/*,*/*;q=0.8',
           ...this._buildProviderRequestHeaderMap(targetUrl)
         }
+      }, this._validateLogoResponse.bind(this), {
+        logContext
       });
 
-      res.set({
-        'Content-Type': upstream.headers['content-type'] || 'image/png',
-        'Cache-Control': 'private, max-age=300',
-        'Cross-Origin-Resource-Policy': 'cross-origin'
-      });
+      res.status(upstream.status);
+      this._setProxyMediaHeaders(res, upstream.headers, req, 'image/png');
 
       upstream.data.pipe(res);
     } catch (error) {
       const statusCode = error.statusCode || error.response?.status || 502;
       logger.error('Logo proxy error', {
-        code,
+        ...logContext,
         error: error.message,
-        statusCode
+        statusCode,
+        upstreamStatus: error.response?.status || null
       });
 
       res.status(statusCode).json({
@@ -2388,10 +2468,22 @@ class M3uController {
     const cacheStatus = typeof this._cacheService?.getStatus === 'function'
       ? this._cacheService.getStatus()
       : null;
+    const releaseInfo = req.app?.locals?.releaseInfo || null;
+
+    res.set({
+      'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+      'Pragma': 'no-cache',
+      'Expires': '0',
+      'Surrogate-Control': 'no-store'
+    });
 
     res.json({
       status: 'success',
       data: {
+        service: releaseInfo?.service || 'iptv-platform',
+        version: releaseInfo?.version || '1.0.0',
+        releaseId: releaseInfo?.releaseId || 'unknown',
+        environment: releaseInfo?.environment || process.env.NODE_ENV || 'development',
         circuitBreaker: {
           state: this._circuitBreaker.opened ? 'OPEN' : 'CLOSED',
           stats: this._circuitBreaker.stats
@@ -2413,7 +2505,10 @@ class M3uController {
           upstreamTimeoutMs: this._upstreamTimeoutMs,
           streamTimeoutMs: this._streamProxyTimeoutMs,
           streamReadTimeoutMs: this._streamProxyReadTimeoutMs,
-          liveHlsKeepSegments: this._liveHlsKeepSegments
+          liveHlsKeepSegments: this._liveHlsKeepSegments,
+          allowedOriginsCacheTtlSec: this._allowedOriginsCacheTtlSec,
+          liveCatalogCacheTtlSec: this._liveCatalogCacheTtlSec,
+          liveCatalogCacheVersion: this._liveCatalogCacheVersion
         }
       }
     });
@@ -2456,8 +2551,9 @@ class M3uController {
       return res.status(400).json({ error: 'User code required' });
     }
 
-    const cacheKey = `m3u:content:${code}`;
-    await this._cacheService.delete(cacheKey);
+    await this._cacheService.delete(`m3u:content:${code}`);
+    await this._cacheService.delete(`m3u:content:${code}:full`);
+    await this._cacheService.delete(`m3u:content:${code}:live`);
     await this._cacheService.delete(`m3u:allowed-origins:${code}`);
     await this._cacheService.delete(`catalog:series:${code}:v1`);
     await this._cacheService.delete(`catalog:movies:${code}:v1`);
@@ -2469,6 +2565,7 @@ class M3uController {
       const providerSignature = buildProviderCatalogSignature(url);
       await this._cacheService.delete(`catalog:live:shared:${providerSignature}:v1`);
       await this._cacheService.delete(`catalog:live:shared:${providerSignature}:v2`);
+      await this._cacheService.delete(`catalog:live:shared:${providerSignature}:${this._liveCatalogCacheVersion}`);
     } catch {
       // Ignore live catalog cache cleanup failures for inactive users.
     }
