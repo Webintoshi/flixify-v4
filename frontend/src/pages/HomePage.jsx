@@ -1,13 +1,15 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useAuthStore } from '../stores/authStore'
-import { Tv, Film, Clapperboard, Play, Sparkles, Zap } from 'lucide-react'
+import { Tv, Film, Clapperboard, Play, Sparkles, Zap, MessageCircle, Package, X, Crown, ArrowRight } from 'lucide-react'
+import { hasValidSubscription } from '../services/playlist'
 
 const PRIMARY = '#E50914'
 const BG_DARK = '#0a0a0a'
 const BG_CARD = '#141414'
+const WHATSAPP_GREEN = '#25D366'
 
-// Ana kategoriler - Sadece bunlar var!
+// Ana kategoriler
 const CATEGORIES = [
   {
     id: 'live',
@@ -46,6 +48,14 @@ function HomePage() {
   const { user } = useAuthStore()
   const [isLoading, setIsLoading] = useState(true)
   const [hoveredCard, setHoveredCard] = useState(null)
+  const [showPurchaseModal, setShowPurchaseModal] = useState(false)
+
+  // Paket kontrolü
+  useEffect(() => {
+    if (user && !hasValidSubscription(user)) {
+      setShowPurchaseModal(true)
+    }
+  }, [user])
 
   // Hızlı yükleme için minimal efekt
   useEffect(() => {
@@ -68,9 +78,8 @@ function HomePage() {
 
   return (
     <div className="min-h-screen" style={{ backgroundColor: BG_DARK }}>
-      {/* ========== HERO SECTION - Minimal ========== */}
+      {/* ========== HERO SECTION ========== */}
       <section className="relative px-6 pt-16 pb-12 lg:pt-24 lg:pb-16">
-        {/* Arka plan gradyanı */}
         <div 
           className="absolute inset-0 pointer-events-none"
           style={{
@@ -79,7 +88,6 @@ function HomePage() {
         />
 
         <div className="relative max-w-6xl mx-auto text-center">
-          {/* Badge */}
           <div className="inline-flex items-center gap-2 px-4 py-2 rounded-full mb-6"
             style={{ backgroundColor: 'rgba(229,9,20,0.1)', border: '1px solid rgba(229,9,20,0.2)' }}
           >
@@ -87,20 +95,17 @@ function HomePage() {
             <span className="text-sm font-medium text-white/80">Premium IPTV Deneyimi</span>
           </div>
 
-          {/* Başlık */}
           <h1 className="text-4xl md:text-6xl lg:text-7xl font-black text-white mb-6 tracking-tight">
             İstediğiniz içeriğe{' '}
             <span style={{ color: PRIMARY }}>anında</span>{' '}
             ulaşın
           </h1>
 
-          {/* Açıklama */}
           <p className="text-lg md:text-xl text-white/60 max-w-2xl mx-auto mb-10 leading-relaxed">
             Canlı TV, film ve dizi arşivimizi keşfedin. 
             Yüksek kaliteli yayınlar için kategorinizi seçin.
           </p>
 
-          {/* CTA Butonu */}
           <button
             onClick={() => navigate('/live-tv')}
             className="inline-flex items-center gap-3 px-8 py-4 rounded-2xl font-bold text-lg text-white transition-all hover:scale-105"
@@ -116,10 +121,9 @@ function HomePage() {
         </div>
       </section>
 
-      {/* ========== KATEGORİLER - Sadece 3 Kart ========== */}
+      {/* ========== KATEGORİLER ========== */}
       <section className="px-6 pb-20">
         <div className="max-w-6xl mx-auto">
-          {/* Grid */}
           <div className="grid md:grid-cols-3 gap-6">
             {CATEGORIES.map((category) => {
               const Icon = category.icon
@@ -141,13 +145,11 @@ function HomePage() {
                       : '0 10px 30px -15px rgba(0,0,0,0.5)'
                   }}
                 >
-                  {/* Gradient Arka Plan */}
                   <div 
                     className={`absolute inset-0 bg-gradient-to-br ${category.gradient} opacity-60 transition-opacity duration-500`}
                     style={{ opacity: isHovered ? 1 : 0.6 }}
                   />
 
-                  {/* Glow Efekti */}
                   <div 
                     className="absolute top-0 right-0 w-40 h-40 rounded-full blur-3xl transition-opacity duration-500"
                     style={{ 
@@ -156,9 +158,7 @@ function HomePage() {
                     }}
                   />
 
-                  {/* İçerik */}
                   <div className="relative p-8 h-full flex flex-col min-h-[280px]">
-                    {/* İkon */}
                     <div 
                       className="w-16 h-16 rounded-2xl flex items-center justify-center mb-6 transition-transform duration-500"
                       style={{ 
@@ -169,49 +169,148 @@ function HomePage() {
                       <Icon className="w-8 h-8 text-white" />
                     </div>
 
-                    {/* Başlık */}
                     <h3 className="text-2xl font-bold text-white mb-2">
                       {category.title}
                     </h3>
 
-                    {/* Alt Başlık */}
                     <p className="text-sm font-semibold mb-3" style={{ color: category.color }}>
                       {category.subtitle}
                     </p>
 
-                    {/* Açıklama */}
                     <p className="text-white/50 text-sm leading-relaxed mb-6 flex-grow">
                       {category.description}
                     </p>
 
-                    {/* Ok İndikatörü */}
                     <div className="flex items-center gap-2 text-white/40 group-hover:text-white transition-colors">
                       <span className="text-sm font-medium">Keşfet</span>
-                      <svg 
-                        className="w-4 h-4 transition-transform group-hover:translate-x-1" 
-                        fill="none" 
-                        viewBox="0 0 24 24" 
-                        stroke="currentColor"
-                      >
-                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                      </svg>
+                      <ArrowRight className="w-4 h-4 transition-transform group-hover:translate-x-1" />
                     </div>
                   </div>
                 </button>
               )
             })}
           </div>
-
-          {/* Alt Bilgi */}
-          <div className="mt-12 text-center">
-            <p className="text-white/40 text-sm">
-              Aktif paketiniz: <span className="text-white font-medium">
-                {user?.status === 'active' ? 'Premium' : 'Beklemede'}
-              </span>
-            </p>
-          </div>
         </div>
       </section>
+
+      {/* ========== PAKET SATIN ALMA MODAL - Modern Tasarım ========== */}
+      {showPurchaseModal && (
+        <div 
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 animate-in fade-in duration-300"
+          style={{ backgroundColor: 'rgba(0,0,0,0.9)', backdropFilter: 'blur(10px)' }}
+          onClick={(e) => e.target === e.currentTarget && setShowPurchaseModal(false)}
+        >
+          <div 
+            className="relative w-full max-w-lg rounded-3xl overflow-hidden animate-in zoom-in-95 duration-300"
+            style={{
+              background: 'linear-gradient(145deg, #1a1a1a 0%, #0d0d0d 100%)',
+              border: '1px solid rgba(255,255,255,0.1)'
+            }}
+          >
+            {/* Glow Efekti */}
+            <div 
+              className="absolute -top-20 -right-20 w-40 h-40 rounded-full blur-3xl opacity-50"
+              style={{ backgroundColor: PRIMARY }}
+            />
+            <div 
+              className="absolute -bottom-20 -left-20 w-40 h-40 rounded-full blur-3xl opacity-30"
+              style={{ backgroundColor: WHATSAPP_GREEN }}
+            />
+
+            {/* Kapat Butonu */}
+            <button
+              onClick={() => setShowPurchaseModal(false)}
+              className="absolute top-4 right-4 z-10 w-10 h-10 rounded-full flex items-center justify-center text-white/50 hover:text-white hover:bg-white/10 transition-all"
+            >
+              <X className="w-5 h-5" />
+            </button>
+
+            <div className="relative p-8">
+              {/* Header */}
+              <div className="text-center mb-8">
+                <div 
+                  className="w-20 h-20 rounded-3xl mx-auto mb-6 flex items-center justify-center"
+                  style={{ 
+                    background: `linear-gradient(135deg, ${PRIMARY}20, ${PRIMARY}40)`,
+                    border: `2px solid ${PRIMARY}60`
+                  }}
+                >
+                  <Crown className="w-10 h-10" style={{ color: PRIMARY }} />
+                </div>
+                
+                <h2 className="text-3xl font-black text-white mb-3">
+                  Premium Erişim
+                </h2>
+                <p className="text-white/60 text-lg leading-relaxed">
+                  Tüm içeriklere erişmek için aktif bir paket satın almalısınız
+                </p>
+              </div>
+
+              {/* Butonlar */}
+              <div className="space-y-4">
+                {/* WhatsApp ile İletişim */}
+                <a
+                  href="https://wa.me/447510223419"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="group w-full flex items-center gap-4 p-5 rounded-2xl transition-all hover:scale-[1.02]"
+                  style={{ 
+                    backgroundColor: `${WHATSAPP_GREEN}15`,
+                    border: `2px solid ${WHATSAPP_GREEN}40`
+                  }}
+                >
+                  <div 
+                    className="w-14 h-14 rounded-xl flex items-center justify-center transition-transform group-hover:scale-110"
+                    style={{ backgroundColor: WHATSAPP_GREEN }}
+                  >
+                    <MessageCircle className="w-7 h-7 text-white" fill="white" />
+                  </div>
+                  <div className="flex-1 text-left">
+                    <div className="font-bold text-white text-lg">WhatsApp ile İletişim</div>
+                    <div className="text-white/50 text-sm">+44 7510 223419</div>
+                  </div>
+                  <ArrowRight className="w-5 h-5 text-white/30 group-hover:text-white transition-colors" />
+                </a>
+
+                {/* Paket Satın Al */}
+                <button
+                  onClick={() => {
+                    setShowPurchaseModal(false)
+                    navigate('/profil/paketler')
+                  }}
+                  className="group w-full flex items-center gap-4 p-5 rounded-2xl transition-all hover:scale-[1.02]"
+                  style={{ 
+                    backgroundColor: `${PRIMARY}15`,
+                    border: `2px solid ${PRIMARY}40`
+                  }}
+                >
+                  <div 
+                    className="w-14 h-14 rounded-xl flex items-center justify-center transition-transform group-hover:scale-110"
+                    style={{ backgroundColor: PRIMARY }}
+                  >
+                    <Package className="w-7 h-7 text-white" />
+                  </div>
+                  <div className="flex-1 text-left">
+                    <div className="font-bold text-white text-lg">Paket Satın Al</div>
+                    <div className="text-white/50 text-sm">Tüm paketleri görüntüle</div>
+                  </div>
+                  <ArrowRight className="w-5 h-5 text-white/30 group-hover:text-white transition-colors" />
+                </button>
+              </div>
+
+              {/* Alt Bilgi */}
+              <div className="mt-8 pt-6 text-center" style={{ borderTop: '1px solid rgba(255,255,255,0.1)' }}>
+                <button
+                  onClick={() => setShowPurchaseModal(false)}
+                  className="text-white/40 hover:text-white text-sm font-medium transition-colors"
+                >
+                  Şimdi değil, daha sonra hatırlat
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
