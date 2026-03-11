@@ -5,7 +5,7 @@ import { Search, Tv, Play, Volume2, VolumeX, Maximize, AlertCircle, RefreshCw } 
 import mpegts from 'mpegts.js'
 import Hls from 'hls.js'
 import { fetchParsedPlaylist, hasAssignedPlaylist, hasValidSubscription } from '../services/playlist'
-import { parseLiveChannelsByCountry } from '../utils/playlistParser'
+import { parseLiveChannels, parseLiveChannelsByCountry } from '../utils/playlistParser'
 
 const PRIMARY = '#E50914'
 const BG_DARK = '#0a0a0a'
@@ -44,6 +44,8 @@ export default function PlayerPage() {
   const hlsPlayerRef = useRef(null)
   const playerRef = useRef(null)
   const controlsTimeoutRef = useRef(null)
+  const observerRef = useRef(null)
+  const channelListRef = useRef(null)
   
   const { user, token } = useAuthStore()
   
@@ -58,7 +60,12 @@ export default function PlayerPage() {
   const [volume, setVolume] = useState(1)
   const [isMuted, setIsMuted] = useState(false)
   const [isFullscreen, setIsFullscreen] = useState(false)
+  const [displayedChannels, setDisplayedChannels] = useState([])
+  const [page, setPage] = useState(1)
+  const [hasMore, setHasMore] = useState(false)
+  const [brokenLogoKeys, setBrokenLogoKeys] = useState(() => new Set())
   
+  const ITEMS_PER_PAGE = 40
   const debouncedSearch = useDebounce(searchQuery, 200)
 
   // Paket kontrolü
@@ -78,10 +85,17 @@ export default function PlayerPage() {
       try {
         setLoading(true)
         setError(null)
+        setBrokenLogoKeys(new Set())
 
         const parsed = await fetchParsedPlaylist(user, token, {
           cacheKey: 'live-channels-tr-v1',
-          parser: (text) => parseLiveChannelsByCountry(text, 'TR'),
+          parser: (text) => {
+            const trChannels = parseLiveChannelsByCountry(text, 'TR')
+            if (trChannels.length > 0) {
+              return trChannels
+            }
+            return parseLiveChannels(text)
+          },
           forceRefresh: true,
           disableCache: true,
           scope: 'live'
@@ -164,6 +178,81 @@ export default function PlayerPage() {
 
     return filtered
   }, [channels, selectedCategory, debouncedSearch])
+
+  useEffect(() => {
+    setPage(1)
+    setDisplayedChannels(filteredChannels.slice(0, ITEMS_PER_PAGE))
+    setHasMore(filteredChannels.length > ITEMS_PER_PAGE)
+  }, [filteredChannels])
+
+  const loadMoreChannels = useCallback(() => {
+    if (!hasMore) return
+
+    const nextPage = page + 1
+    const nextVisibleCount = nextPage * ITEMS_PER_PAGE
+    setDisplayedChannels(filteredChannels.slice(0, nextVisibleCount))
+    setPage(nextPage)
+    setHasMore(nextVisibleCount < filteredChannels.length)
+  }, [filteredChannels, hasMore, page])
+
+  const lastChannelRef = useCallback((node) => {
+    if (observerRef.current) {
+      observerRef.current.disconnect()
+    }
+
+    if (!node || !hasMore) {
+      return
+    }
+
+    observerRef.current = new IntersectionObserver(
+      (entries) => {
+        if (entries[0]?.isIntersecting) {
+          loadMoreChannels()
+        }
+      },
+      {
+        root: channelListRef.current || null,
+        rootMargin: '120px'
+      }
+    )
+
+    observerRef.current.observe(node)
+  }, [hasMore, loadMoreChannels])
+
+  const buildChannelLogoKey = useCallback(
+    (channel) => `${channel?.name || ''}|${channel?.logo || ''}`,
+    []
+  )
+
+  const isChannelLogoVisible = useCallback(
+    (channel) => {
+      const logo = String(channel?.logo || '').trim()
+      if (!logo) return false
+      return !brokenLogoKeys.has(buildChannelLogoKey(channel))
+    },
+    [brokenLogoKeys, buildChannelLogoKey]
+  )
+
+  const handleChannelLogoError = useCallback(
+    (channel) => {
+      const key = buildChannelLogoKey(channel)
+      setBrokenLogoKeys((prev) => {
+        if (prev.has(key)) return prev
+        const next = new Set(prev)
+        next.add(key)
+        return next
+      })
+    },
+    [buildChannelLogoKey]
+  )
+
+  useEffect(() => {
+    return () => {
+      if (observerRef.current) {
+        observerRef.current.disconnect()
+      }
+    }
+  }, [])
 
   // Player - Kanal değişimi
   useEffect(() => {
@@ -469,8 +558,7 @@ export default function PlayerPage() {
             style={{ 
               backgroundColor: BG_SURFACE, 
               border: '2px solid rgba(255,255,255,0.1)',
-              maxHeight: 'calc(100vh - 250px)',
-              overflowY: 'auto'
+              maxHeight: 'calc(100vh - 250px)'
             }}
           >
             {/* Liste Başlığı */}
@@ -483,12 +571,19 @@ export default function PlayerPage() {
             </div>
             
             {/* Kanal Kartları - Büyük ve TV Dostu */}
-            <div className="p-4 space-y-3">
-              {filteredChannels.map((channel, index) => {
+            <div
+              ref={channelListRef}
+              className="p-4 space-y-3 overflow-y-auto"
+              style={{ maxHeight: 'calc(100vh - 340px)' }}
+            >
+              {displayedChannels.map((channel, index) => {
                 const isActive = currentChannel?.name === channel.name
+                const isLastVisible = index === displayedChannels.length - 1
+                const showLogo = isChannelLogoVisible(channel)
                 return (
                   <button
                     key={channel.name + index}
+                    ref={isLastVisible ? lastChannelRef : null}
                     onClick={() => setCurrentChannel(channel)}
                     className="w-full flex items-center gap-4 p-4 rounded-2xl transition-all text-left"
                     style={{
@@ -497,15 +592,24 @@ export default function PlayerPage() {
                       transform: isActive ? 'scale(1.02)' : 'scale(1)',
                     }}
                   >
-                    {/* Kanal Numarası */}
-                    <span 
-                      className="w-12 h-12 rounded-xl flex items-center justify-center font-black text-xl"
-                      style={{ backgroundColor: isActive ? 'rgba(255,255,255,0.2)' : 'rgba(255,255,255,0.05)' }}
-                    >
-                      {index + 1}
-                    </span>
+                    {showLogo ? (
+                      <img
+                        src={channel.logo}
+                        alt={channel.name}
+                        loading="lazy"
+                        onError={() => handleChannelLogoError(channel)}
+                        className="w-12 h-12 rounded-xl object-contain p-1"
+                        style={{ backgroundColor: isActive ? 'rgba(255,255,255,0.2)' : 'rgba(255,255,255,0.06)' }}
+                      />
+                    ) : (
+                      <span
+                        className="w-12 h-12 rounded-xl flex items-center justify-center font-black text-sm"
+                        style={{ backgroundColor: isActive ? 'rgba(255,255,255,0.2)' : 'rgba(255,255,255,0.06)' }}
+                      >
+                        TV
+                      </span>
+                    )}
                     
-                    {/* Kanal Bilgisi */}
                     <div className="flex-1 min-w-0">
                       <h4 className={`font-bold text-lg truncate ${isActive ? 'text-white' : 'text-white/90'}`}>
                         {channel.name}
@@ -515,13 +619,18 @@ export default function PlayerPage() {
                       </p>
                     </div>
                     
-                    {/* Aktif İndikatör */}
                     {isActive && (
                       <div className="w-3 h-3 rounded-full bg-white animate-pulse" />
                     )}
                   </button>
                 )
               })}
+
+              {hasMore && (
+                <div className="py-4 text-center text-sm text-white/60">
+                  Kaydirinca daha fazla kanal yuklenir...
+                </div>
+              )}
             </div>
           </div>
         </div>
