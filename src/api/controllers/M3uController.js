@@ -32,7 +32,11 @@ class M3uController {
     this._userProviderOrigins = new Map();
     this._userAllowedOrigins = new Map();
     this._vodSessions = new Map();
+    this._rawPlaylistInflight = new Map();
+    this._catalogInflight = new Map();
     this._vodSessionTtlMs = parseInt(process.env.VOD_SESSION_TTL_MS, 10) || 60 * 60 * 1000;
+    this._playlistCacheTtlSec = parseInt(process.env.PLAYLIST_CACHE_TTL_SEC, 10) || 900;
+    this._catalogCacheTtlSec = parseInt(process.env.CATALOG_CACHE_TTL_SEC, 10) || 900;
     this._ffmpegPath = process.env.FFMPEG_PATH || 'ffmpeg';
     this._ffprobePath = process.env.FFPROBE_PATH || 'ffprobe';
     this._upstreamTimeoutMs = parseInt(process.env.PROXY_TIMEOUT_MS, 10) || 30000;
@@ -879,12 +883,27 @@ class M3uController {
     const m3uUrl = await this._resolveUserPlaylistUrl(code, { scope: normalizedScope });
     const cacheKey = `m3u:content:${code}:${normalizedScope}`;
     const shouldUseCache = normalizedScope !== 'live';
+    const inflightKey = `playlist:${code}:${normalizedScope}:${forceRefresh ? 'refresh' : 'cached'}`;
     let rawPlaylist = !forceRefresh && shouldUseCache ? await this._cacheService.get(cacheKey) : null;
 
     if (!rawPlaylist) {
-      rawPlaylist = await this._circuitBreaker.fire(m3uUrl);
-      if (shouldUseCache) {
-        await this._cacheService.set(cacheKey, rawPlaylist, 300);
+      if (this._rawPlaylistInflight.has(inflightKey)) {
+        rawPlaylist = await this._rawPlaylistInflight.get(inflightKey);
+      } else {
+        const loaderPromise = (async () => {
+          const playlist = await this._circuitBreaker.fire(m3uUrl);
+          if (shouldUseCache) {
+            await this._cacheService.set(cacheKey, playlist, this._playlistCacheTtlSec);
+          }
+          return playlist;
+        })();
+
+        this._rawPlaylistInflight.set(inflightKey, loaderPromise);
+        try {
+          rawPlaylist = await loaderPromise;
+        } finally {
+          this._rawPlaylistInflight.delete(inflightKey);
+        }
       }
     }
 
@@ -903,7 +922,94 @@ class M3uController {
 
   async _setCatalogCache(code, type, value) {
     const cacheKey = `catalog:${type}:${code}:v1`;
-    await this._cacheService.set(cacheKey, value, 300);
+    await this._cacheService.set(cacheKey, value, this._catalogCacheTtlSec);
+  }
+
+  async _getOrBuildCatalog(type, code, forceRefresh, builderFn) {
+    const inflightKey = `catalog:${type}:${code}:${forceRefresh ? 'refresh' : 'cached'}`;
+
+    if (this._catalogInflight.has(inflightKey)) {
+      return this._catalogInflight.get(inflightKey);
+    }
+
+    const task = (async () => {
+      let catalog = !forceRefresh ? await this._getCatalogFromCache(code, type) : null;
+
+      if (!Array.isArray(catalog)) {
+        catalog = await builderFn();
+        await this._setCatalogCache(code, type, catalog);
+      }
+
+      return catalog;
+    })();
+
+    this._catalogInflight.set(inflightKey, task);
+    try {
+      return await task;
+    } finally {
+      this._catalogInflight.delete(inflightKey);
+    }
+  }
+
+  _parseBooleanFlag(value) {
+    const normalized = String(value || '').trim().toLowerCase();
+    return normalized === '1' || normalized === 'true' || normalized === 'yes';
+  }
+
+  _buildSeriesSummaryItem(series) {
+    const seasons = series?.seasons && typeof series.seasons === 'object' ? series.seasons : {};
+    const orderedSeasonKeys = Object.keys(seasons)
+      .map((seasonKey) => Number.parseInt(seasonKey, 10))
+      .filter((seasonNumber) => Number.isFinite(seasonNumber))
+      .sort((left, right) => left - right);
+
+    let episodeCount = 0;
+    let firstEpisode = null;
+
+    orderedSeasonKeys.forEach((seasonNumber) => {
+      const seasonEpisodes = Array.isArray(seasons[seasonNumber]) ? seasons[seasonNumber] : [];
+      episodeCount += seasonEpisodes.length;
+      if (!firstEpisode && seasonEpisodes.length > 0) {
+        const first = seasonEpisodes[0];
+        firstEpisode = {
+          id: first?.id || '',
+          seriesName: first?.seriesName || series?.name || '',
+          season: first?.season || seasonNumber,
+          episode: first?.episode || 1,
+          fullTitle: first?.fullTitle || '',
+          logo: first?.logo || series?.logo || '',
+          genre: first?.genre || series?.genre || '',
+          url: first?.url || ''
+        };
+      }
+    });
+
+    const logoCandidates = Array.isArray(series?.logoCandidates)
+      ? series.logoCandidates.slice(0, 8)
+      : [];
+
+    return {
+      name: series?.name || '',
+      genre: series?.genre || '',
+      logo: series?.logo || logoCandidates[0] || '',
+      logoCandidates,
+      seasonCount: orderedSeasonKeys.length,
+      episodeCount,
+      firstEpisode
+    };
+  }
+
+  _buildSeriesSummaryCatalog(catalog = []) {
+    return catalog.map((series) => this._buildSeriesSummaryItem(series));
+  }
+
+  _findSeriesByName(catalog, seriesName) {
+    const normalizedName = String(seriesName || '').trim().toLowerCase();
+    if (!normalizedName) {
+      return null;
+    }
+
+    return catalog.find((series) => String(series?.name || '').trim().toLowerCase() === normalizedName) || null;
   }
 
   _getBaseApiUrl(req) {
@@ -1470,24 +1576,44 @@ class M3uController {
     const accessToken = req.user.token;
     const baseApiUrl = this._getBaseApiUrl(req);
     const forceRefresh = String(req.query.forceRefresh || '').toLowerCase() === 'true' || req.query.forceRefresh === '1';
+    const compact = this._parseBooleanFlag(req.query.compact);
+    const seriesNameFilter = String(req.query.seriesName || '').trim();
 
     try {
-      let catalog = !forceRefresh ? await this._getCatalogFromCache(code, 'series') : null;
-
-      if (!Array.isArray(catalog)) {
+      const catalog = await this._getOrBuildCatalog('series', code, forceRefresh, async () => {
         const { rawPlaylist } = await this._getRawPlaylistForCode(code, { forceRefresh });
-        catalog = buildSeriesCatalog(rawPlaylist, {
+        return buildSeriesCatalog(rawPlaylist, {
           streamProxyBuilder: (targetUrl) => this._buildStreamProxyUrl(baseApiUrl, code, accessToken, targetUrl),
           logoProxyBuilder: (targetUrl) => this._buildLogoProxyUrl(baseApiUrl, code, accessToken, targetUrl)
         });
-        await this._setCatalogCache(code, 'series', catalog);
+      });
+
+      if (seriesNameFilter) {
+        const seriesItem = this._findSeriesByName(catalog, seriesNameFilter);
+
+        if (!seriesItem) {
+          return res.status(404).json({
+            error: 'Series not found',
+            message: 'Dizi kaydi bulunamadi'
+          });
+        }
+
+        return res.json({
+          status: 'success',
+          data: {
+            item: seriesItem,
+            generatedAt: new Date().toISOString()
+          }
+        });
       }
+
+      const items = compact ? this._buildSeriesSummaryCatalog(catalog) : catalog;
 
       res.json({
         status: 'success',
         data: {
-          items: catalog,
-          total: catalog.length,
+          items,
+          total: items.length,
           generatedAt: new Date().toISOString()
         }
       });
@@ -1512,16 +1638,13 @@ class M3uController {
     const forceRefresh = String(req.query.forceRefresh || '').toLowerCase() === 'true' || req.query.forceRefresh === '1';
 
     try {
-      let catalog = !forceRefresh ? await this._getCatalogFromCache(code, 'movies') : null;
-
-      if (!Array.isArray(catalog)) {
+      const catalog = await this._getOrBuildCatalog('movies', code, forceRefresh, async () => {
         const { rawPlaylist } = await this._getRawPlaylistForCode(code, { forceRefresh });
-        catalog = buildMoviesCatalog(rawPlaylist, {
+        return buildMoviesCatalog(rawPlaylist, {
           streamProxyBuilder: (targetUrl) => this._buildStreamProxyUrl(baseApiUrl, code, accessToken, targetUrl),
           logoProxyBuilder: (targetUrl) => this._buildLogoProxyUrl(baseApiUrl, code, accessToken, targetUrl)
         });
-        await this._setCatalogCache(code, 'movies', catalog);
-      }
+      });
 
       res.json({
         status: 'success',

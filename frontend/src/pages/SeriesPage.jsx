@@ -3,9 +3,9 @@ import { useNavigate } from 'react-router-dom';
 import { useAuthStore } from '../stores/authStore';
 import { 
   Play, Plus, Info, Search, ChevronDown, X, Star, 
-  TrendingUp, Clock, Calendar, ChevronLeft, ChevronRight
+  TrendingUp, ChevronLeft, ChevronRight
 } from 'lucide-react';
-import { fetchSeriesCatalog, hasValidSubscription } from '../services/playlist';
+import { fetchSeriesCatalog, fetchSeriesDetail, hasValidSubscription } from '../services/playlist';
 
 const PRIMARY = '#E50914';
 const BG_DARK = '#0a0a0a';
@@ -167,14 +167,40 @@ const resolveSeriesPrimaryPoster = (series) => {
   return primary || getSeriesDefaultPoster(series?.genre);
 };
 
+const hasSeriesDetail = (series) => {
+  const seasons = series?.seasons;
+  return Boolean(seasons && typeof seasons === 'object' && Object.keys(seasons).length > 0);
+};
+
+const getSeriesSeasonCount = (series) => {
+  if (Number.isInteger(series?.seasonCount) && series.seasonCount >= 0) {
+    return series.seasonCount;
+  }
+
+  return hasSeriesDetail(series) ? Object.keys(series.seasons).length : 0;
+};
+
+const getSeriesEpisodeCount = (series) => {
+  if (Number.isInteger(series?.episodeCount) && series.episodeCount >= 0) {
+    return series.episodeCount;
+  }
+
+  if (!hasSeriesDetail(series)) {
+    return 0;
+  }
+
+  return Object.values(series.seasons)
+    .reduce((sum, episodes) => sum + (Array.isArray(episodes) ? episodes.length : 0), 0);
+};
+
 // Series Card - Modern
 const SeriesCard = ({ series, onClick, onPosterStatus }) => {
   const [isHovered, setIsHovered] = useState(false);
   const [posterIndex, setPosterIndex] = useState(0);
   const posterReportedRef = useRef(false);
 
-  const seasonCount = Object.keys(series.seasons).length;
-  const totalEpisodes = Object.values(series.seasons).flat().length;
+  const seasonCount = getSeriesSeasonCount(series);
+  const totalEpisodes = getSeriesEpisodeCount(series);
   const platform = PLATFORMS.find(p => p.id === series.genre) || PLATFORMS[0];
   const posterCandidates = useMemo(() => collectSeriesPosterCandidates(series), [series]);
   const providerPosterUrl = posterCandidates[posterIndex] || '';
@@ -352,7 +378,7 @@ const SeriesRow = ({ title, seriesList, onSeriesClick, onPosterStatus }) => {
 const HeroSection = ({ series, onPlay }) => {
   if (!series) return null;
   
-  const seasonCount = Object.keys(series.seasons).length;
+  const seasonCount = getSeriesSeasonCount(series);
   const platform = PLATFORMS.find(p => p.id === series.genre) || PLATFORMS[0];
   
   // Platform-level hero image
@@ -420,15 +446,31 @@ const HeroSection = ({ series, onPlay }) => {
 };
 
 // Series Detail Modal
-const SeriesDetailModal = ({ series, onClose, onPlayEpisode }) => {
+const SeriesDetailModal = ({ series, isLoading = false, onClose, onPlayEpisode }) => {
   const [selectedSeason, setSelectedSeason] = useState(1);
   const [showSeasonDropdown, setShowSeasonDropdown] = useState(false);
-  
+
+  const seasonMap = hasSeriesDetail(series) ? series.seasons : {};
+  const seasons = Object.keys(seasonMap)
+    .map((season) => Number.parseInt(season, 10))
+    .filter((season) => Number.isFinite(season))
+    .sort((left, right) => left - right);
+  const hasDetailedEpisodes = seasons.length > 0;
+  const episodes = hasDetailedEpisodes
+    ? (seasonMap[selectedSeason] || seasonMap[String(selectedSeason)] || [])
+    : [];
+  const platform = PLATFORMS.find(p => p.id === series?.genre) || PLATFORMS[0];
+
+  useEffect(() => {
+    if (seasons.length > 0) {
+      setSelectedSeason(seasons[0]);
+    } else {
+      setSelectedSeason(1);
+    }
+    setShowSeasonDropdown(false);
+  }, [series?.name, seasons.join(',')]);
+
   if (!series) return null;
-  
-  const seasons = Object.keys(series.seasons).sort((a, b) => a - b);
-  const episodes = series.seasons[selectedSeason] || [];
-  const platform = PLATFORMS.find(p => p.id === series.genre) || PLATFORMS[0];
   
   // Platform-level modal hero image
   const modalBgUrl = resolveSeriesPrimaryPoster(series);
@@ -475,66 +517,80 @@ const SeriesDetailModal = ({ series, onClose, onPlayEpisode }) => {
         
         {/* Modal Content */}
         <div className="p-8">
-          {/* Season Selector */}
-          <div className="mb-6 relative">
-            <button 
-              onClick={() => setShowSeasonDropdown(!showSeasonDropdown)}
-              className="flex items-center gap-3 px-6 py-3 rounded-xl text-white font-bold"
-              style={{ backgroundColor: BG_CARD, border: `2px solid ${BORDER}` }}
-            >
-              {selectedSeason}. Sezon
-              <ChevronDown className={`w-5 h-5 transition-transform ${showSeasonDropdown ? 'rotate-180' : ''}`} />
-            </button>
-            
-            {showSeasonDropdown && (
-              <div 
-                className="absolute top-full mt-2 rounded-xl overflow-hidden z-10"
-                style={{ backgroundColor: BG_CARD, border: `2px solid ${BORDER}` }}
-              >
-                {seasons.map(season => (
-                  <button 
-                    key={season}
-                    className={`w-full px-6 py-3 text-left font-bold transition-colors ${
-                      selectedSeason == season ? 'text-white' : 'text-white/60 hover:text-white'
-                    }`}
-                    style={{ backgroundColor: selectedSeason == season ? 'rgba(229,9,20,0.2)' : 'transparent' }}
-                    onClick={() => { setSelectedSeason(season); setShowSeasonDropdown(false); }}
+          {!hasDetailedEpisodes ? (
+            <div className="py-16 text-center">
+              <div
+                className="w-10 h-10 border-4 border-t-transparent rounded-full animate-spin mx-auto mb-4"
+                style={{ borderColor: PRIMARY }}
+              />
+              <p className="text-white/70 text-base">
+                {isLoading ? 'Bolumler yukleniyor...' : 'Bolum bilgisi bulunamadi.'}
+              </p>
+            </div>
+          ) : (
+            <>
+              {/* Season Selector */}
+              <div className="mb-6 relative">
+                <button 
+                  onClick={() => setShowSeasonDropdown(!showSeasonDropdown)}
+                  className="flex items-center gap-3 px-6 py-3 rounded-xl text-white font-bold"
+                  style={{ backgroundColor: BG_CARD, border: `2px solid ${BORDER}` }}
+                >
+                  {selectedSeason}. Sezon
+                  <ChevronDown className={`w-5 h-5 transition-transform ${showSeasonDropdown ? 'rotate-180' : ''}`} />
+                </button>
+                
+                {showSeasonDropdown && (
+                  <div 
+                    className="absolute top-full mt-2 rounded-xl overflow-hidden z-10"
+                    style={{ backgroundColor: BG_CARD, border: `2px solid ${BORDER}` }}
                   >
-                    {season}. Sezon
-                  </button>
+                    {seasons.map(season => (
+                      <button 
+                        key={season}
+                        className={`w-full px-6 py-3 text-left font-bold transition-colors ${
+                          selectedSeason === season ? 'text-white' : 'text-white/60 hover:text-white'
+                        }`}
+                        style={{ backgroundColor: selectedSeason === season ? 'rgba(229,9,20,0.2)' : 'transparent' }}
+                        onClick={() => { setSelectedSeason(season); setShowSeasonDropdown(false); }}
+                      >
+                        {season}. Sezon
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+              
+              {/* Episodes List */}
+              <div className="space-y-3">
+                {episodes.map((ep) => (
+                  <div 
+                    key={ep.id}
+                    className="flex items-center gap-4 p-4 rounded-2xl cursor-pointer transition-all hover:scale-[1.02]"
+                    style={{ backgroundColor: BG_DARK, border: `1px solid ${BORDER}` }}
+                    onClick={() => onPlayEpisode(ep)}
+                  >
+                    <div 
+                      className="w-16 h-16 rounded-xl flex items-center justify-center text-2xl font-black text-white"
+                      style={{ backgroundColor: BG_SURFACE }}
+                    >
+                      {ep.episode}
+                    </div>
+                    <div className="flex-1">
+                      <h4 className="text-white font-bold mb-1">Bolum {ep.episode}</h4>
+                      <p className="text-sm text-white/50">{ep.fullTitle}</p>
+                    </div>
+                    <button 
+                      className="w-12 h-12 rounded-xl flex items-center justify-center transition-transform hover:scale-110"
+                      style={{ backgroundColor: PRIMARY }}
+                    >
+                      <Play className="w-6 h-6 text-white" fill="currentColor" />
+                    </button>
+                  </div>
                 ))}
               </div>
-            )}
-          </div>
-          
-          {/* Episodes List */}
-          <div className="space-y-3">
-            {episodes.map((ep, index) => (
-              <div 
-                key={ep.id}
-                className="flex items-center gap-4 p-4 rounded-2xl cursor-pointer transition-all hover:scale-[1.02]"
-                style={{ backgroundColor: BG_DARK, border: `1px solid ${BORDER}` }}
-                onClick={() => onPlayEpisode(ep)}
-              >
-                <div 
-                  className="w-16 h-16 rounded-xl flex items-center justify-center text-2xl font-black text-white"
-                  style={{ backgroundColor: BG_SURFACE }}
-                >
-                  {ep.episode}
-                </div>
-                <div className="flex-1">
-                  <h4 className="text-white font-bold mb-1">Bolum {ep.episode}</h4>
-                  <p className="text-sm text-white/50">{ep.fullTitle}</p>
-                </div>
-                <button 
-                  className="w-12 h-12 rounded-xl flex items-center justify-center transition-transform hover:scale-110"
-                  style={{ backgroundColor: PRIMARY }}
-                >
-                  <Play className="w-6 h-6 text-white" fill="currentColor" />
-                </button>
-              </div>
-            ))}
-          </div>
+            </>
+          )}
         </div>
       </div>
     </div>
@@ -575,6 +631,7 @@ function SeriesPage() {
   const [series, setSeries] = useState([]);
   const [heroSeries, setHeroSeries] = useState(null);
   const [selectedSeries, setSelectedSeries] = useState(null);
+  const [selectedSeriesLoading, setSelectedSeriesLoading] = useState(false);
   const [activeCategory, setActiveCategory] = useState('all');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -588,6 +645,7 @@ function SeriesPage() {
   const tokenRef = useRef(token);
   const hasBootstrappedRef = useRef(false);
   const latestRequestIdRef = useRef(0);
+  const detailInflightRef = useRef(new Map());
 
   useEffect(() => {
     userRef.current = user;
@@ -628,13 +686,16 @@ function SeriesPage() {
         return;
       }
 
-      const catalogSeries = await fetchSeriesCatalog(currentUser, currentToken, { forceRefresh });
+      const catalogSeries = await fetchSeriesCatalog(currentUser, currentToken, {
+        forceRefresh,
+        compact: true
+      });
 
       if (requestId !== latestRequestIdRef.current) {
         return;
       }
 
-      const normalizedSeries = catalogSeries.map((item) => ({
+      const normalizedSeries = (Array.isArray(catalogSeries) ? catalogSeries : []).map((item) => ({
         ...item,
         genre: normalizeSeriesGenreId(item.genre)
       }));
@@ -668,6 +729,72 @@ function SeriesPage() {
     }
   }, [resetPosterTracking]);
 
+  const mergeSeriesDetailIntoState = useCallback((detailItem) => {
+    if (!detailItem?.name) {
+      return detailItem;
+    }
+
+    setSeries((previous) => previous.map((item) => (
+      item.name === detailItem.name
+        ? { ...item, ...detailItem }
+        : item
+    )));
+    setHeroSeries((previous) => (
+      previous?.name === detailItem.name
+        ? { ...previous, ...detailItem }
+        : previous
+    ));
+    setSelectedSeries((previous) => (
+      previous?.name === detailItem.name
+        ? { ...previous, ...detailItem }
+        : previous
+    ));
+
+    return detailItem;
+  }, []);
+
+  const ensureSeriesDetailLoaded = useCallback(async (seriesItem, { forceRefresh = false } = {}) => {
+    if (!seriesItem?.name) {
+      return null;
+    }
+
+    if (!forceRefresh && hasSeriesDetail(seriesItem)) {
+      return seriesItem;
+    }
+
+    const currentUser = userRef.current;
+    const currentToken = tokenRef.current;
+    if (!currentUser || !currentToken) {
+      return seriesItem;
+    }
+
+    const inflightKey = String(seriesItem.name || '').trim().toLowerCase();
+    if (!forceRefresh && detailInflightRef.current.has(inflightKey)) {
+      return detailInflightRef.current.get(inflightKey);
+    }
+
+    const request = (async () => {
+      const detailItem = await fetchSeriesDetail(currentUser, currentToken, seriesItem.name, { forceRefresh });
+      if (!detailItem || typeof detailItem !== 'object') {
+        return seriesItem;
+      }
+
+      const normalizedDetail = {
+        ...detailItem,
+        genre: normalizeSeriesGenreId(detailItem.genre)
+      };
+
+      return mergeSeriesDetailIntoState(normalizedDetail);
+    })();
+
+    detailInflightRef.current.set(inflightKey, request);
+    try {
+      return await request;
+    } finally {
+      detailInflightRef.current.delete(inflightKey);
+    }
+  }, [mergeSeriesDetailIntoState]);
+
   const handlePosterStatus = useCallback((seriesName, success) => {
     if (!seriesName || forcedPosterRefreshRef.current) {
       return;
@@ -697,13 +824,16 @@ function SeriesPage() {
     hasBootstrappedRef.current = false;
     forcedPosterRefreshRef.current = false;
     resetPosterTracking();
-    if (!token || !user?.code) {
+    setSelectedSeries(null);
+    setSelectedSeriesLoading(false);
+
+    if (!tokenRef.current || !user?.code) {
       setLoading(false);
       return;
     }
 
     fetchSeries();
-  }, [fetchSeries, resetPosterTracking, token, user?.code, user?.hasM3U, user?.m3uUrl]);
+  }, [fetchSeries, resetPosterTracking, user?.code, user?.hasM3U, user?.m3uUrl]);
 
   // Memoized filtered series - sadece debounced query veya kategori degistiginde calisir
   const filteredSeries = useMemo(() => {
@@ -734,11 +864,15 @@ function SeriesPage() {
     return map;
   }, [series]);
 
-  const handlePlayEpisode = (episode) => {
+  const handlePlayEpisode = useCallback((episode) => {
+    if (!episode?.url) {
+      return;
+    }
+
     let nextEpisode = null;
     const seriesItem = series.find(s => s.name.toLowerCase() === episode.seriesName.toLowerCase());
     
-    if (seriesItem) {
+    if (seriesItem && hasSeriesDetail(seriesItem)) {
       const currentSeason = seriesItem.seasons[episode.season];
       if (currentSeason) {
         const currentIndex = currentSeason.findIndex(ep => ep.episode === episode.episode);
@@ -756,12 +890,61 @@ function SeriesPage() {
     const nextTitle = nextEpisode ? encodeURIComponent(nextEpisode.fullTitle) : '';
     
     navigate(`/player?type=series&url=${encodeURIComponent(episode.url)}&title=${encodeURIComponent(episode.fullTitle)}&series=${encodeURIComponent(episode.seriesName)}&season=${episode.season}&episode=${episode.episode}&nextUrl=${nextUrl}&nextTitle=${nextTitle}`);
-  };
+  }, [navigate, series]);
 
-  const handlePlaySeries = (seriesItem) => {
-    const firstSeason = seriesItem.seasons[1];
-    if (firstSeason && firstSeason.length > 0) handlePlayEpisode(firstSeason[0]);
-  };
+  const handlePlaySeries = useCallback(async (seriesItem) => {
+    if (!seriesItem) {
+      return;
+    }
+
+    let resolvedSeries = seriesItem;
+    if (!hasSeriesDetail(resolvedSeries)) {
+      resolvedSeries = await ensureSeriesDetailLoaded(seriesItem);
+    }
+
+    if (!hasSeriesDetail(resolvedSeries)) {
+      return;
+    }
+
+    const sortedSeasons = Object.keys(resolvedSeries.seasons)
+      .map((seasonKey) => Number.parseInt(seasonKey, 10))
+      .filter((seasonNumber) => Number.isFinite(seasonNumber))
+      .sort((left, right) => left - right);
+    const firstSeasonKey = sortedSeasons[0];
+    const firstSeasonEpisodes = Number.isFinite(firstSeasonKey) ? resolvedSeries.seasons[firstSeasonKey] : [];
+    if (Array.isArray(firstSeasonEpisodes) && firstSeasonEpisodes.length > 0) {
+      handlePlayEpisode(firstSeasonEpisodes[0]);
+      return;
+    }
+
+    if (resolvedSeries.firstEpisode) {
+      handlePlayEpisode(resolvedSeries.firstEpisode);
+    }
+  }, [ensureSeriesDetailLoaded, handlePlayEpisode]);
+
+  const handleSelectSeries = useCallback(async (seriesItem) => {
+    if (!seriesItem) {
+      return;
+    }
+
+    setSelectedSeries(seriesItem);
+    if (hasSeriesDetail(seriesItem)) {
+      setSelectedSeriesLoading(false);
+      return;
+    }
+
+    setSelectedSeriesLoading(true);
+    try {
+      const detailedSeries = await ensureSeriesDetailLoaded(seriesItem);
+      if (detailedSeries) {
+        setSelectedSeries(detailedSeries);
+      }
+    } catch (detailError) {
+      console.error('Series detail fetch error:', detailError);
+    } finally {
+      setSelectedSeriesLoading(false);
+    }
+  }, [ensureSeriesDetailLoaded]);
 
   if (loading) {
     return (
@@ -876,14 +1059,14 @@ function SeriesPage() {
         {/* Series Rows */}
         {activeCategory === 'all' && !searchQuery && (
           <>
-            <SeriesRow title="Gunluk Diziler" seriesList={seriesByCategory['Gunluk Diziler'] || []} onSeriesClick={setSelectedSeries} onPosterStatus={handlePosterStatus} />
-            <SeriesRow title="Exxen Dizileri" seriesList={seriesByCategory['Exxen Dizileri'] || []} onSeriesClick={setSelectedSeries} onPosterStatus={handlePosterStatus} />
-            <SeriesRow title="GAIN Dizileri" seriesList={seriesByCategory['GAIN Dizileri'] || []} onSeriesClick={setSelectedSeries} onPosterStatus={handlePosterStatus} />
-            <SeriesRow title="Netflix Dizileri" seriesList={seriesByCategory['Netflix Dizileri'] || []} onSeriesClick={setSelectedSeries} onPosterStatus={handlePosterStatus} />
-            <SeriesRow title="Disney+ Dizileri" seriesList={seriesByCategory['Disney+ Dizileri'] || []} onSeriesClick={setSelectedSeries} onPosterStatus={handlePosterStatus} />
-            <SeriesRow title="Amazon Prime" seriesList={seriesByCategory['Amazon Prime Dizileri'] || []} onSeriesClick={setSelectedSeries} onPosterStatus={handlePosterStatus} />
-            <SeriesRow title="BluTV (HBO)" seriesList={seriesByCategory['BluTV Dizileri (HBO)'] || []} onSeriesClick={setSelectedSeries} onPosterStatus={handlePosterStatus} />
-            <SeriesRow title="Anime" seriesList={seriesByCategory['Anime'] || []} onSeriesClick={setSelectedSeries} onPosterStatus={handlePosterStatus} />
+            <SeriesRow title="Gunluk Diziler" seriesList={seriesByCategory['Gunluk Diziler'] || []} onSeriesClick={handleSelectSeries} onPosterStatus={handlePosterStatus} />
+            <SeriesRow title="Exxen Dizileri" seriesList={seriesByCategory['Exxen Dizileri'] || []} onSeriesClick={handleSelectSeries} onPosterStatus={handlePosterStatus} />
+            <SeriesRow title="GAIN Dizileri" seriesList={seriesByCategory['GAIN Dizileri'] || []} onSeriesClick={handleSelectSeries} onPosterStatus={handlePosterStatus} />
+            <SeriesRow title="Netflix Dizileri" seriesList={seriesByCategory['Netflix Dizileri'] || []} onSeriesClick={handleSelectSeries} onPosterStatus={handlePosterStatus} />
+            <SeriesRow title="Disney+ Dizileri" seriesList={seriesByCategory['Disney+ Dizileri'] || []} onSeriesClick={handleSelectSeries} onPosterStatus={handlePosterStatus} />
+            <SeriesRow title="Amazon Prime" seriesList={seriesByCategory['Amazon Prime Dizileri'] || []} onSeriesClick={handleSelectSeries} onPosterStatus={handlePosterStatus} />
+            <SeriesRow title="BluTV (HBO)" seriesList={seriesByCategory['BluTV Dizileri (HBO)'] || []} onSeriesClick={handleSelectSeries} onPosterStatus={handlePosterStatus} />
+            <SeriesRow title="Anime" seriesList={seriesByCategory['Anime'] || []} onSeriesClick={handleSelectSeries} onPosterStatus={handlePosterStatus} />
           </>
         )}
         
@@ -901,7 +1084,7 @@ function SeriesPage() {
             ) : (
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
                 {filteredSeries.map((s, index) => (
-                  <SeriesCard key={`${s.name}-${index}`} series={s} onClick={setSelectedSeries} onPosterStatus={handlePosterStatus} />
+                  <SeriesCard key={`${s.name}-${index}`} series={s} onClick={handleSelectSeries} onPosterStatus={handlePosterStatus} />
                 ))}
               </div>
             )}
@@ -913,7 +1096,11 @@ function SeriesPage() {
       {selectedSeries && (
         <SeriesDetailModal
           series={selectedSeries}
-          onClose={() => setSelectedSeries(null)}
+          isLoading={selectedSeriesLoading}
+          onClose={() => {
+            setSelectedSeries(null);
+            setSelectedSeriesLoading(false);
+          }}
           onPlayEpisode={handlePlayEpisode}
         />
       )}

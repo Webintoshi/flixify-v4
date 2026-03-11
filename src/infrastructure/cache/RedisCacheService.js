@@ -20,10 +20,64 @@ class RedisCacheService extends CacheService {
     this._redis = redisClient;
     this._isConnected = false;
     this._keyPrefix = 'iptv:';
+    this._memoryStore = new Map();
   }
 
   _prefixedKey(key) {
     return `${this._keyPrefix}${key}`;
+  }
+
+  _now() {
+    return Date.now();
+  }
+
+  _setMemoryValue(key, value, ttlSeconds = null) {
+    const expiresAt =
+      Number.isFinite(ttlSeconds) && ttlSeconds > 0
+        ? this._now() + (ttlSeconds * 1000)
+        : null;
+
+    this._memoryStore.set(key, {
+      value,
+      expiresAt
+    });
+  }
+
+  _getMemoryValue(key) {
+    const entry = this._memoryStore.get(key);
+    if (!entry) {
+      return null;
+    }
+
+    if (entry.expiresAt && entry.expiresAt <= this._now()) {
+      this._memoryStore.delete(key);
+      return null;
+    }
+
+    return entry.value;
+  }
+
+  _deleteMemoryValue(key) {
+    this._memoryStore.delete(key);
+  }
+
+  _getMemoryTtlSeconds(key) {
+    const entry = this._memoryStore.get(key);
+    if (!entry) {
+      return -2;
+    }
+
+    if (!entry.expiresAt) {
+      return -1;
+    }
+
+    const remainingMs = entry.expiresAt - this._now();
+    if (remainingMs <= 0) {
+      this._memoryStore.delete(key);
+      return -2;
+    }
+
+    return Math.ceil(remainingMs / 1000);
   }
 
   async connect() {
@@ -44,6 +98,7 @@ class RedisCacheService extends CacheService {
 
       // Test connection
       await this._redis.ping();
+      this._isConnected = true;
     } catch (error) {
       logger.error('Failed to connect to Redis', { error: error.message });
       // Don't throw - allow graceful degradation
@@ -52,17 +107,29 @@ class RedisCacheService extends CacheService {
 
   async get(key) {
     try {
-      if (!this._isConnected) return null;
-      
+      const memoryValue = this._getMemoryValue(key);
+
+      if (!this._isConnected) {
+        return memoryValue;
+      }
+
       const value = await this._redis.get(this._prefixedKey(key));
-      return value ? JSON.parse(value) : null;
+      if (!value) {
+        return memoryValue;
+      }
+
+      const parsedValue = JSON.parse(value);
+      this._setMemoryValue(key, parsedValue);
+      return parsedValue;
     } catch (error) {
       logger.warn('Redis get error', { error: error.message, key });
-      return null;
+      return this._getMemoryValue(key);
     }
   }
 
   async set(key, value, ttlSeconds = null) {
+    this._setMemoryValue(key, value, ttlSeconds);
+
     try {
       if (!this._isConnected) return;
       
@@ -80,6 +147,8 @@ class RedisCacheService extends CacheService {
   }
 
   async delete(key) {
+    this._deleteMemoryValue(key);
+
     try {
       if (!this._isConnected) return;
       await this._redis.del(this._prefixedKey(key));
@@ -90,26 +159,44 @@ class RedisCacheService extends CacheService {
 
   async exists(key) {
     try {
-      if (!this._isConnected) return false;
+      if (!this._isConnected) {
+        return this._getMemoryValue(key) !== null;
+      }
       const result = await this._redis.exists(this._prefixedKey(key));
-      return result === 1;
+      if (result === 1) {
+        return true;
+      }
+
+      return this._getMemoryValue(key) !== null;
     } catch (error) {
       logger.warn('Redis exists error', { error: error.message, key });
-      return false;
+      return this._getMemoryValue(key) !== null;
     }
   }
 
   async increment(key) {
     try {
-      if (!this._isConnected) return 0;
+      const currentMemoryValue = Number(this._getMemoryValue(key) || 0);
+      const nextMemoryValue = currentMemoryValue + 1;
+      this._setMemoryValue(key, nextMemoryValue);
+
+      if (!this._isConnected) return nextMemoryValue;
       return await this._redis.incr(this._prefixedKey(key));
     } catch (error) {
       logger.warn('Redis increment error', { error: error.message, key });
-      return 0;
+      const currentMemoryValue = Number(this._getMemoryValue(key) || 0);
+      const nextMemoryValue = currentMemoryValue + 1;
+      this._setMemoryValue(key, nextMemoryValue);
+      return nextMemoryValue;
     }
   }
 
   async expire(key, ttlSeconds) {
+    const value = this._getMemoryValue(key);
+    if (value !== null) {
+      this._setMemoryValue(key, value, ttlSeconds);
+    }
+
     try {
       if (!this._isConnected) return;
       await this._redis.expire(this._prefixedKey(key), ttlSeconds);
@@ -120,28 +207,25 @@ class RedisCacheService extends CacheService {
 
   async ttl(key) {
     try {
-      if (!this._isConnected) return -2;
-      return await this._redis.ttl(this._prefixedKey(key));
+      if (!this._isConnected) return this._getMemoryTtlSeconds(key);
+      const redisTtl = await this._redis.ttl(this._prefixedKey(key));
+      if (redisTtl >= -1) {
+        return redisTtl;
+      }
+      return this._getMemoryTtlSeconds(key);
     } catch (error) {
       logger.warn('Redis ttl error', { error: error.message, key });
-      return -2;
+      return this._getMemoryTtlSeconds(key);
     }
   }
 
   async blacklistToken(token, expiresInSeconds) {
     try {
-      if (!this._isConnected) return;
-      
       // Hash token for consistent key length
       const crypto = require('crypto');
       const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
       const key = `blacklist:${tokenHash}`;
-      
-      await this._redis.setex(
-        this._prefixedKey(key),
-        expiresInSeconds,
-        '1'
-      );
+      await this.set(key, '1', expiresInSeconds);
       
       logger.info('Token blacklisted', { tokenHash: tokenHash.substring(0, 16) + '...' });
     } catch (error) {
@@ -151,14 +235,10 @@ class RedisCacheService extends CacheService {
 
   async isTokenBlacklisted(token) {
     try {
-      if (!this._isConnected) return false;
-      
       const crypto = require('crypto');
       const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
       const key = `blacklist:${tokenHash}`;
-      
-      const exists = await this._redis.exists(this._prefixedKey(key));
-      return exists === 1;
+      return await this.exists(key);
     } catch (error) {
       logger.warn('Redis blacklist check error', { error: error.message });
       return false;
@@ -167,8 +247,6 @@ class RedisCacheService extends CacheService {
 
   async cacheUser(code, userData, ttlSeconds = 300) {
     try {
-      if (!this._isConnected) return;
-      
       const key = `user:${code}`;
       await this.set(key, userData, ttlSeconds);
       

@@ -47,8 +47,8 @@ function buildParsedCacheKey(userCode, tokenKey, cacheKey, scope = 'full') {
   return `${PLAYLIST_PARSED_CACHE_PREFIX}${scope}_${userCode}_${tokenKey}_${cacheKey}`
 }
 
-function buildCatalogCacheKey(userCode, tokenKey, catalogType) {
-  return `${CATALOG_CACHE_PREFIX}${catalogType}_${userCode}_${tokenKey}`
+function buildCatalogCacheKey(userCode, tokenKey, catalogType, variant = 'default') {
+  return `${CATALOG_CACHE_PREFIX}${catalogType}_${userCode}_${tokenKey}_${variant}`
 }
 
 function getFreshCacheEntry(cacheMap, key, ttlMs) {
@@ -181,6 +181,90 @@ function uniqueStringList(values = []) {
   return result
 }
 
+function normalizeSeriesName(value) {
+  return String(value || '').trim().toLowerCase()
+}
+
+function toSeriesSummaryItem(series = {}) {
+  const seasons = series?.seasons && typeof series.seasons === 'object' ? series.seasons : {}
+  const seasonKeys = Object.keys(seasons)
+    .map((seasonKey) => Number.parseInt(seasonKey, 10))
+    .filter((seasonNumber) => Number.isFinite(seasonNumber))
+    .sort((left, right) => left - right)
+
+  let episodeCount = 0
+  let firstEpisode = null
+
+  seasonKeys.forEach((seasonNumber) => {
+    const seasonEpisodes = Array.isArray(seasons[seasonNumber]) ? seasons[seasonNumber] : []
+    episodeCount += seasonEpisodes.length
+
+    if (!firstEpisode && seasonEpisodes.length > 0) {
+      const first = seasonEpisodes[0]
+      firstEpisode = {
+        id: first?.id || '',
+        seriesName: first?.seriesName || series?.name || '',
+        season: first?.season || seasonNumber,
+        episode: first?.episode || 1,
+        fullTitle: first?.fullTitle || '',
+        logo: first?.logo || series?.logo || '',
+        genre: first?.genre || series?.genre || '',
+        url: first?.url || ''
+      }
+    }
+  })
+
+  const logoCandidates = uniqueStringList([series?.logo, ...(Array.isArray(series?.logoCandidates) ? series.logoCandidates : [])]).slice(0, 8)
+
+  return {
+    name: String(series?.name || ''),
+    genre: String(series?.genre || ''),
+    logo: logoCandidates[0] || '',
+    logoCandidates,
+    seasonCount: seasonKeys.length,
+    episodeCount,
+    firstEpisode
+  }
+}
+
+function buildCatalogVariant(catalogType, options = {}) {
+  if (catalogType !== 'series') {
+    return 'default'
+  }
+
+  const compact = Boolean(options.compact)
+  const seriesName = String(options.seriesName || '').trim()
+  if (seriesName) {
+    return `detail:${normalizeSeriesName(seriesName)}`
+  }
+
+  if (compact) {
+    return 'compact'
+  }
+
+  return 'default'
+}
+
+function transformSeriesCatalogPayload(items, options = {}) {
+  const compact = Boolean(options.compact)
+  const seriesName = String(options.seriesName || '').trim()
+
+  if (!Array.isArray(items)) {
+    return compact ? [] : items
+  }
+
+  if (seriesName) {
+    const selected = items.find((series) => normalizeSeriesName(series?.name) === normalizeSeriesName(seriesName))
+    return selected || null
+  }
+
+  if (compact) {
+    return items.map((series) => toSeriesSummaryItem(series))
+  }
+
+  return items
+}
+
 function buildSeriesCatalogFallback(playlistText) {
   const grouped = groupSeriesEpisodes(parseSeriesFromPlaylist(playlistText))
 
@@ -216,19 +300,25 @@ function buildMoviesCatalogFallback(playlistText) {
 }
 
 async function fetchCatalogFallback(user, token, catalogType, options = {}) {
-  const { forceRefresh = false, ttlMs = DEFAULT_TTL_MS, signal } = options
+  const { forceRefresh = false, ttlMs = DEFAULT_TTL_MS, signal, compact = false, seriesName = '' } = options
   const parser =
     catalogType === 'series'
       ? buildSeriesCatalogFallback
       : buildMoviesCatalogFallback
 
-  return fetchParsedPlaylist(user, token, {
+  const parsed = await fetchParsedPlaylist(user, token, {
     cacheKey: `catalog-fallback:${catalogType}:v1`,
     parser,
     forceRefresh,
     ttlMs,
     signal
   })
+
+  if (catalogType !== 'series') {
+    return parsed
+  }
+
+  return transformSeriesCatalogPayload(parsed, { compact, seriesName })
 }
 
 function invalidateMapByPrefix(cacheMap, prefix) {
@@ -459,7 +549,9 @@ async function fetchCatalog(user, token, catalogType, options = {}) {
     signal,
     forceRefresh = false,
     ttlMs = DEFAULT_TTL_MS,
-    retries = 1
+    retries = 1,
+    compact = false,
+    seriesName = ''
   } = options
 
   if (!['series', 'movies'].includes(catalogType)) {
@@ -475,7 +567,8 @@ async function fetchCatalog(user, token, catalogType, options = {}) {
   }
 
   const tokenKey = tokenFingerprint(token)
-  const catalogCacheKey = buildCatalogCacheKey(user.code, tokenKey, catalogType)
+  const catalogVariant = buildCatalogVariant(catalogType, { compact, seriesName })
+  const catalogCacheKey = buildCatalogCacheKey(user.code, tokenKey, catalogType, catalogVariant)
   const cached = !forceRefresh ? getCachedEntry(catalogMemoryCache, catalogCacheKey, ttlMs) : null
   const staleCached = getAnyCachedEntry(catalogMemoryCache, catalogCacheKey)
 
@@ -483,9 +576,19 @@ async function fetchCatalog(user, token, catalogType, options = {}) {
     return cached
   }
 
-  const query = forceRefresh ? '?forceRefresh=true' : ''
-  const endpoint = buildApiUrl(`/catalog/${catalogType}${query}`)
-  const inflightKey = `catalog:${catalogType}:${user.code}:${tokenKey}:${forceRefresh ? 'refresh' : 'cached'}`
+  const queryParams = new URLSearchParams()
+  if (forceRefresh) {
+    queryParams.set('forceRefresh', 'true')
+  }
+  if (catalogType === 'series' && compact) {
+    queryParams.set('compact', 'true')
+  }
+  if (catalogType === 'series' && String(seriesName || '').trim()) {
+    queryParams.set('seriesName', String(seriesName).trim())
+  }
+  const query = queryParams.toString()
+  const endpoint = buildApiUrl(`/catalog/${catalogType}${query ? `?${query}` : ''}`)
+  const inflightKey = `catalog:${catalogType}:${catalogVariant}:${user.code}:${tokenKey}:${forceRefresh ? 'refresh' : 'cached'}`
 
   if (!forceRefresh && inflightCatalogRequests.has(inflightKey)) {
     return inflightCatalogRequests.get(inflightKey)
@@ -508,7 +611,9 @@ async function fetchCatalog(user, token, catalogType, options = {}) {
             const fallbackItems = await fetchCatalogFallback(user, token, catalogType, {
               signal,
               forceRefresh,
-              ttlMs
+              ttlMs,
+              compact,
+              seriesName
             })
             return cacheEntry(catalogMemoryCache, catalogCacheKey, fallbackItems)
           }
@@ -521,8 +626,17 @@ async function fetchCatalog(user, token, catalogType, options = {}) {
         }
 
         const payload = await response.json().catch(() => ({}))
-        const items = Array.isArray(payload?.data?.items) ? payload.data.items : []
-        return cacheEntry(catalogMemoryCache, catalogCacheKey, items)
+        let result
+        if (catalogType === 'series' && String(seriesName || '').trim()) {
+          result = payload?.data?.item || null
+        } else {
+          const items = Array.isArray(payload?.data?.items) ? payload.data.items : []
+          result = catalogType === 'series'
+            ? transformSeriesCatalogPayload(items, { compact })
+            : items
+        }
+
+        return cacheEntry(catalogMemoryCache, catalogCacheKey, result)
       } catch (error) {
         lastError = error
 
@@ -562,6 +676,18 @@ async function fetchCatalog(user, token, catalogType, options = {}) {
 
 export function fetchSeriesCatalog(user, token, options = {}) {
   return fetchCatalog(user, token, 'series', options)
+}
+
+export function fetchSeriesDetail(user, token, seriesName, options = {}) {
+  if (!seriesName) {
+    return Promise.resolve(null)
+  }
+
+  return fetchCatalog(user, token, 'series', {
+    ...options,
+    compact: false,
+    seriesName
+  })
 }
 
 export function fetchMoviesCatalog(user, token, options = {}) {

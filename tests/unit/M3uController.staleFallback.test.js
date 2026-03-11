@@ -130,4 +130,80 @@ describe('M3uController live proxy helpers', () => {
     expect(origins.has('https://cdn.example.com')).toBe(true)
     expect(origins.has('https://keys.example.net')).toBe(true)
   })
+
+  test('builds compact series summary catalog with counts and first episode', () => {
+    const controller = buildController()
+    const fullCatalog = [
+      {
+        name: 'Test Series',
+        genre: 'Netflix Dizileri',
+        logo: 'https://example.com/poster.jpg',
+        logoCandidates: ['https://example.com/poster.jpg', 'https://example.com/poster2.jpg'],
+        seasons: {
+          1: [
+            {
+              id: 'ep-1',
+              seriesName: 'Test Series',
+              season: 1,
+              episode: 1,
+              fullTitle: 'Test Series S01E01',
+              logo: 'https://example.com/poster.jpg',
+              genre: 'Netflix Dizileri',
+              url: 'https://example.com/ep1.m3u8'
+            },
+            {
+              id: 'ep-2',
+              seriesName: 'Test Series',
+              season: 1,
+              episode: 2,
+              fullTitle: 'Test Series S01E02',
+              logo: 'https://example.com/poster.jpg',
+              genre: 'Netflix Dizileri',
+              url: 'https://example.com/ep2.m3u8'
+            }
+          ],
+          2: [
+            {
+              id: 'ep-3',
+              seriesName: 'Test Series',
+              season: 2,
+              episode: 1,
+              fullTitle: 'Test Series S02E01',
+              logo: 'https://example.com/poster.jpg',
+              genre: 'Netflix Dizileri',
+              url: 'https://example.com/ep3.m3u8'
+            }
+          ]
+        }
+      }
+    ]
+
+    const compactCatalog = controller._buildSeriesSummaryCatalog(fullCatalog)
+    expect(compactCatalog).toHaveLength(1)
+    expect(compactCatalog[0]).toMatchObject({
+      name: 'Test Series',
+      seasonCount: 2,
+      episodeCount: 3
+    })
+    expect(compactCatalog[0].firstEpisode).toMatchObject({
+      id: 'ep-1',
+      season: 1,
+      episode: 1,
+      url: 'https://example.com/ep1.m3u8'
+    })
+  })
+
+  test('finds series by name case-insensitively', () => {
+    const controller = buildController()
+    const catalog = [
+      { name: 'One Piece' },
+      { name: 'Dark' }
+    ]
+
+    const found = controller._findSeriesByName(catalog, 'dark')
+    const missing = controller._findSeriesByName(catalog, 'breaking bad')
+
+    expect(found).toEqual({ name: 'Dark' })
+    expect(missing).toBeNull()
+  })
 })
