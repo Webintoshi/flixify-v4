@@ -132,7 +132,7 @@ describe('M3uController live proxy helpers', () => {
 
     expect(controller._liveCatalogCacheTtlSec).toBe(300)
     expect(controller._allowedOriginsCacheTtlSec).toBe(180)
-    expect(controller._liveCatalogCacheVersion).toBe('v3')
+    expect(controller._liveCatalogCacheVersion).toBe('v4')
   })
 
   test('prunes old live segments and adjusts media sequence', () => {

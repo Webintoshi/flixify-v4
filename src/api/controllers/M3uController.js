@@ -47,7 +47,7 @@ class M3uController {
     this._playlistCacheTtlSec = parseInt(process.env.PLAYLIST_CACHE_TTL_SEC, 10) || 900;
     this._catalogCacheTtlSec = parseInt(process.env.CATALOG_CACHE_TTL_SEC, 10) || 900;
     this._liveCatalogCacheTtlSec = parseInt(process.env.LIVE_CATALOG_CACHE_TTL_SEC, 10) || 300;
-    this._liveCatalogCacheVersion = process.env.LIVE_SHARED_CATALOG_CACHE_VERSION || 'v3';
+    this._liveCatalogCacheVersion = process.env.LIVE_SHARED_CATALOG_CACHE_VERSION || 'v4';
     this._ffmpegPath = process.env.FFMPEG_PATH || 'ffmpeg';
     this._ffprobePath = process.env.FFPROBE_PATH || 'ffprobe';
     this._upstreamTimeoutMs = parseInt(process.env.PROXY_TIMEOUT_MS, 10) || 30000;
