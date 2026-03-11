@@ -47,6 +47,7 @@ class M3uController {
     this._playlistCacheTtlSec = parseInt(process.env.PLAYLIST_CACHE_TTL_SEC, 10) || 900;
     this._catalogCacheTtlSec = parseInt(process.env.CATALOG_CACHE_TTL_SEC, 10) || 900;
     this._liveCatalogCacheTtlSec = parseInt(process.env.LIVE_CATALOG_CACHE_TTL_SEC, 10) || 300;
+    this._liveCatalogStaleTtlSec = parseInt(process.env.LIVE_CATALOG_STALE_TTL_SEC, 10) || 86400;
     this._liveCatalogCacheVersion = process.env.LIVE_SHARED_CATALOG_CACHE_VERSION || 'v4';
     this._ffmpegPath = process.env.FFMPEG_PATH || 'ffmpeg';
     this._ffprobePath = process.env.FFPROBE_PATH || 'ffprobe';
@@ -1102,33 +1103,54 @@ class M3uController {
 
     const providerSignature = buildProviderCatalogSignature(m3uUrl);
     const cacheKey = `catalog:live:shared:${providerSignature}:${this._liveCatalogCacheVersion}`;
+    const staleCacheKey = `catalog:live:shared:${providerSignature}:stale:${this._liveCatalogCacheVersion}`;
     const inflightKey = `catalog:live:shared:${providerSignature}:${forceRefresh ? 'refresh' : 'cached'}`;
     let sharedCatalog = !forceRefresh ? await this._cacheService.get(cacheKey) : null;
+    const staleSharedCatalog = await this._cacheService.get(staleCacheKey);
+
+    if (sharedCatalog?.items && Array.isArray(sharedCatalog.items) && Array.isArray(sharedCatalog.countries) && !staleSharedCatalog?.items) {
+      await this._cacheService.set(staleCacheKey, sharedCatalog, this._liveCatalogStaleTtlSec);
+    }
 
     if (!sharedCatalog?.items || !Array.isArray(sharedCatalog.items) || !Array.isArray(sharedCatalog.countries)) {
       if (this._sharedLiveCatalogInflight.has(inflightKey)) {
         sharedCatalog = await this._sharedLiveCatalogInflight.get(inflightKey);
       } else {
         const loaderPromise = (async () => {
-          const { rawPlaylist } = await this._getRawPlaylistForCode(code, {
-            forceRefresh,
-            scope: 'live'
-          });
-          const builtCatalog = buildLiveCatalog(rawPlaylist);
-          const streamTemplate = buildStreamTemplateFromSampleUrl(
-            builtCatalog.items[0]?.sampleUrl || '',
-            m3uUrl
-          );
-          const items = builtCatalog.items;
-          const nextCatalog = {
-            items,
-            countries: builtCatalog.countries,
-            streamTemplate: streamTemplate || null,
-            generatedAt: new Date().toISOString()
-          };
+          try {
+            const { rawPlaylist } = await this._getRawPlaylistForCode(code, {
+              forceRefresh,
+              scope: 'live'
+            });
+            const builtCatalog = buildLiveCatalog(rawPlaylist);
+            const streamTemplate = buildStreamTemplateFromSampleUrl(
+              builtCatalog.items[0]?.sampleUrl || '',
+              m3uUrl
+            );
+            const items = builtCatalog.items;
+            const nextCatalog = {
+              items,
+              countries: builtCatalog.countries,
+              streamTemplate: streamTemplate || null,
+              generatedAt: new Date().toISOString()
+            };
 
-          await this._cacheService.set(cacheKey, nextCatalog, this._liveCatalogCacheTtlSec);
-          return nextCatalog;
+            await this._cacheService.set(cacheKey, nextCatalog, this._liveCatalogCacheTtlSec);
+            await this._cacheService.set(staleCacheKey, nextCatalog, this._liveCatalogStaleTtlSec);
+            return nextCatalog;
+          } catch (error) {
+            if (staleSharedCatalog?.items && Array.isArray(staleSharedCatalog.items) && Array.isArray(staleSharedCatalog.countries)) {
+              logger.warn('Serving stale shared live catalog after provider fetch failure', {
+                code,
+                providerSignature,
+                error: error.message,
+                forceRefresh
+              });
+              return staleSharedCatalog;
+            }
+
+            throw error;
+          }
         })();
 
         this._sharedLiveCatalogInflight.set(inflightKey, loaderPromise);
@@ -2836,6 +2858,7 @@ class M3uController {
       await this._cacheService.delete(`catalog:live:shared:${providerSignature}:v1`);
       await this._cacheService.delete(`catalog:live:shared:${providerSignature}:v2`);
       await this._cacheService.delete(`catalog:live:shared:${providerSignature}:${this._liveCatalogCacheVersion}`);
+      await this._cacheService.delete(`catalog:live:shared:${providerSignature}:stale:${this._liveCatalogCacheVersion}`);
     } catch {
       // Ignore live catalog cache cleanup failures for inactive users.
     }

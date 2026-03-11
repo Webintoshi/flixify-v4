@@ -1,10 +1,10 @@
 const M3uController = require('../../src/api/controllers/M3uController')
 
 describe('M3uController live proxy helpers', () => {
-  const buildController = () => (
+  const buildController = ({ getUserM3U, cacheService } = {}) => (
     new M3uController(
-      { execute: jest.fn() },
-      { get: jest.fn(), set: jest.fn(), delete: jest.fn() },
+      getUserM3U || { execute: jest.fn() },
+      cacheService || { get: jest.fn(), set: jest.fn(), delete: jest.fn() },
       'test-secret'
     )
   )
@@ -123,9 +123,11 @@ describe('M3uController live proxy helpers', () => {
 
   test('uses short shared live catalog and allowed origin cache defaults', () => {
     const previousLiveCatalogTtl = process.env.LIVE_CATALOG_CACHE_TTL_SEC
+    const previousLiveCatalogStaleTtl = process.env.LIVE_CATALOG_STALE_TTL_SEC
     const previousAllowedOriginsTtl = process.env.ALLOWED_ORIGINS_CACHE_TTL_SEC
     const previousCacheVersion = process.env.LIVE_SHARED_CATALOG_CACHE_VERSION
     delete process.env.LIVE_CATALOG_CACHE_TTL_SEC
+    delete process.env.LIVE_CATALOG_STALE_TTL_SEC
     delete process.env.ALLOWED_ORIGINS_CACHE_TTL_SEC
     delete process.env.LIVE_SHARED_CATALOG_CACHE_VERSION
 
@@ -135,6 +137,12 @@ describe('M3uController live proxy helpers', () => {
       delete process.env.LIVE_CATALOG_CACHE_TTL_SEC
     } else {
       process.env.LIVE_CATALOG_CACHE_TTL_SEC = previousLiveCatalogTtl
+    }
+
+    if (previousLiveCatalogStaleTtl === undefined) {
+      delete process.env.LIVE_CATALOG_STALE_TTL_SEC
+    } else {
+      process.env.LIVE_CATALOG_STALE_TTL_SEC = previousLiveCatalogStaleTtl
     }
 
     if (previousAllowedOriginsTtl === undefined) {
@@ -150,8 +158,100 @@ describe('M3uController live proxy helpers', () => {
     }
 
     expect(controller._liveCatalogCacheTtlSec).toBe(300)
+    expect(controller._liveCatalogStaleTtlSec).toBe(86400)
     expect(controller._allowedOriginsCacheTtlSec).toBe(180)
     expect(controller._liveCatalogCacheVersion).toBe('v4')
+  })
+
+  test('serves stale shared live catalog when live playlist refresh fails', async () => {
+    const staleCatalog = {
+      items: [
+        {
+          id: 'live:TR:81',
+          name: 'TR Test Kanal',
+          countryCode: 'TR',
+          group: 'TR:ULUSAL',
+          sampleUrl: 'http://provider.example/live/user/pass/81.m3u8',
+          sourceType: 'hls'
+        }
+      ],
+      countries: [
+        {
+          code: 'TR',
+          name: 'Turkiye',
+          count: 1,
+          categories: [{ id: 'group:TR:ULUSAL', name: 'TR:ULUSAL', count: 1 }]
+        }
+      ],
+      streamTemplate: 'http://provider.example/live/{username}/{password}/{streamId}.m3u8',
+      generatedAt: '2026-03-11T22:00:00.000Z'
+    }
+    const getUserM3U = {
+      execute: jest.fn().mockResolvedValue({
+        url: 'http://provider.example/playlist/user/pass/m3u_plus?output=hls'
+      })
+    }
+    const cacheService = {
+      get: jest.fn()
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(staleCatalog),
+      set: jest.fn(),
+      delete: jest.fn()
+    }
+    const controller = buildController({ getUserM3U, cacheService })
+    controller._getRawPlaylistForCode = jest.fn().mockRejectedValue(new Error('Provider unavailable'))
+
+    const result = await controller._getSharedLiveCatalog('ABC123')
+
+    expect(result.sharedCatalog).toBe(staleCatalog)
+    expect(cacheService.set).not.toHaveBeenCalled()
+  })
+
+  test('seeds stale shared live catalog from a healthy primary cache hit', async () => {
+    const primaryCatalog = {
+      items: [
+        {
+          id: 'live:TR:82',
+          name: 'TR Test Kanal 2',
+          countryCode: 'TR',
+          group: 'TR:ULUSAL',
+          sampleUrl: 'http://provider.example/live/user/pass/82.m3u8',
+          sourceType: 'hls'
+        }
+      ],
+      countries: [
+        {
+          code: 'TR',
+          name: 'Turkiye',
+          count: 1,
+          categories: [{ id: 'group:TR:ULUSAL', name: 'TR:ULUSAL', count: 1 }]
+        }
+      ],
+      streamTemplate: 'http://provider.example/live/{username}/{password}/{streamId}.m3u8',
+      generatedAt: '2026-03-11T22:00:00.000Z'
+    }
+    const getUserM3U = {
+      execute: jest.fn().mockResolvedValue({
+        url: 'http://provider.example/playlist/user/pass/m3u_plus?output=hls'
+      })
+    }
+    const cacheService = {
+      get: jest.fn()
+        .mockResolvedValueOnce(primaryCatalog)
+        .mockResolvedValueOnce(null),
+      set: jest.fn(),
+      delete: jest.fn()
+    }
+    const controller = buildController({ getUserM3U, cacheService })
+    controller._getRawPlaylistForCode = jest.fn()
+
+    const result = await controller._getSharedLiveCatalog('ABC123')
+
+    expect(result.sharedCatalog).toBe(primaryCatalog)
+    expect(controller._getRawPlaylistForCode).not.toHaveBeenCalled()
+    expect(cacheService.set).toHaveBeenCalledTimes(1)
+    expect(cacheService.set.mock.calls[0][0]).toContain(':stale:')
+    expect(cacheService.set.mock.calls[0][1]).toBe(primaryCatalog)
   })
 
   test('prunes old live segments and adjusts media sequence', () => {
