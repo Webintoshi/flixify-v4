@@ -280,6 +280,7 @@ class M3uController {
     res.setHeader('Expires', '0');
     res.setHeader('Surrogate-Control', 'no-store');
     res.setHeader('X-Accel-Buffering', 'no');
+    res.setHeader('Cross-Origin-Resource-Policy', 'cross-origin');
     this._copyHeaderIfPresent(res, upstreamHeaders, 'Content-Type', fallbackContentType);
     this._copyHeaderIfPresent(res, upstreamHeaders, 'Content-Length');
     this._copyHeaderIfPresent(res, upstreamHeaders, 'Content-Range');
@@ -2363,7 +2364,8 @@ class M3uController {
 
       res.set({
         'Content-Type': upstream.headers['content-type'] || 'image/png',
-        'Cache-Control': 'private, max-age=300'
+        'Cache-Control': 'private, max-age=300',
+        'Cross-Origin-Resource-Policy': 'cross-origin'
       });
 
       upstream.data.pipe(res);

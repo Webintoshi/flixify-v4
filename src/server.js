@@ -423,7 +423,10 @@ async function startServer() {
         connectSrc: ["'self'", "https:", "http:", "wss:", "ws:"]
       }
     },
-    crossOriginEmbedderPolicy: false
+    crossOriginEmbedderPolicy: false,
+    crossOriginResourcePolicy: {
+      policy: 'cross-origin'
+    }
   }));
 
   const allowedOrigins = buildAllowedOrigins();
