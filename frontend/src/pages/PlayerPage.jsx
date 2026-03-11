@@ -3,7 +3,7 @@ import { useSearchParams, useNavigate } from 'react-router-dom'
 import { useAuthStore } from '../stores/authStore'
 import { 
   Search,
-  Tv, X, Loader2, Radio, Sparkles, RefreshCw, AlertCircle, Volume2, VolumeX, Maximize
+  Tv, X, Radio, Sparkles, RefreshCw, AlertCircle, Volume2, VolumeX, Maximize
 } from 'lucide-react'
 import mpegts from 'mpegts.js'
 import Hls from 'hls.js'
@@ -16,6 +16,44 @@ const BG_DARK = '#0a0a0a'
 const BG_SURFACE = '#141414'
 const BG_CARD = '#1a1a1a'
 const BORDER = '#2a2a2a'
+const CATEGORY_COLOR_PALETTE = [
+  '#E50914',
+  '#F97316',
+  '#10B981',
+  '#0EA5E9',
+  '#8B5CF6',
+  '#EC4899',
+  '#F59E0B',
+  '#06B6D4',
+  '#84CC16',
+  '#EF4444'
+]
+
+const TR_LIVE_CATEGORY_PRIORITY = [
+  'ULUSAL',
+  'ULUSAL 4K',
+  'HABER',
+  'SPOR',
+  'BEINSPORT',
+  'S-SPORT PLUS',
+  'TABII SPORT',
+  'TIVIBU&SMART SPORT',
+  'SINEMA KANALLARI',
+  'BELGESEL',
+  'COCUK',
+  'YORESEL TV',
+  'DINI KANALLAR',
+  '7/24 SHOW',
+  '7/24 YABANCI DIZI',
+  '7/24 YERLI DIZI',
+  '7/24 YESILCAM',
+  '7/24 AMBIYANS',
+  'EXXEN SPORTS',
+  'RADIO',
+  'RAW'
+]
+const TR_LIVE_ALLOWED_GROUPS = new Set(TR_LIVE_CATEGORY_PRIORITY)
+const trGroupCollator = new Intl.Collator('tr', { sensitivity: 'base', numeric: true })
 
 // Custom hook for debounce
 function useDebounce(value, delay) {
@@ -45,17 +83,43 @@ const COUNTRIES = [
   { id: 'AR', name: 'Arap', flag: 'AR' },
 ]
 
-// Categories
-const CATEGORIES = [
-  { id: 'all', name: 'Tumu', color: '#E50914', icon: '*' },
-  { id: 'news', name: 'Haber', color: '#3b82f6', icon: 'NW' },
-  { id: 'sports', name: 'Spor', color: '#10b981', icon: 'SP' },
-  { id: 'movies', name: 'Film', color: '#8b5cf6', icon: 'MV' },
-  { id: 'entertainment', name: 'Eglence', color: '#f59e0b', icon: 'EN' },
-  { id: 'documentary', name: 'Belgesel', color: '#06b6d4', icon: 'DC' },
-  { id: 'kids', name: 'Cocuk', color: '#ec4899', icon: 'KD' },
-  { id: 'music', name: 'Muzik', color: '#a855f7', icon: 'MU' },
-]
+const normalizeLiveGroupLabel = (value) => String(value || '')
+  .replace(/\s+/g, ' ')
+  .trim()
+
+const normalizeLiveGroupKey = (value) => normalizeLiveGroupLabel(value).toLocaleUpperCase('tr-TR')
+
+const buildLiveCategoryIcon = (value) => {
+  const cleaned = normalizeLiveGroupLabel(value)
+    .replace(/[^0-9A-Za-z/&\s-]/g, ' ')
+    .trim()
+
+  if (!cleaned) {
+    return 'TV'
+  }
+
+  const tokens = cleaned.split(/\s+/).filter(Boolean)
+  if (tokens.length === 1) {
+    const word = tokens[0]
+    if (word.length >= 2) {
+      return word.slice(0, 2).toLocaleUpperCase('tr-TR')
+    }
+
+    return word.toLocaleUpperCase('tr-TR')
+  }
+
+  return `${tokens[0][0] || ''}${tokens[1][0] || ''}`.toLocaleUpperCase('tr-TR')
+}
+
+const getLiveCategoryColor = (index) => CATEGORY_COLOR_PALETTE[index % CATEGORY_COLOR_PALETTE.length]
+
+const filterChannelsBySelectedTrGroups = (channelList = [], countryCode = 'TR') => {
+  if (String(countryCode || '').toUpperCase() !== 'TR') {
+    return channelList
+  }
+
+  return channelList.filter((channel) => TR_LIVE_ALLOWED_GROUPS.has(normalizeLiveGroupKey(channel?.group)))
+}
 
 
 function PlayerPage() {
@@ -105,11 +169,75 @@ function PlayerPage() {
   const [displayedChannels, setDisplayedChannels] = useState([])
   const [hasMore, setHasMore] = useState(true)
   const [page, setPage] = useState(1)
-  const [showFilters, setShowFilters] = useState(false)
   const ITEMS_PER_PAGE = 20
 
   // Debounce search query - 300ms gecikme
   const debouncedSearchQuery = useDebounce(searchQuery, 300)
+
+  const liveCategories = useMemo(() => {
+    const groupMap = new Map()
+
+    channels.forEach((channel) => {
+      const groupLabel = normalizeLiveGroupLabel(channel?.group)
+      const groupKey = normalizeLiveGroupKey(groupLabel)
+      if (!groupKey) {
+        return
+      }
+
+      if (!groupMap.has(groupKey)) {
+        groupMap.set(groupKey, {
+          id: `group:${groupKey}`,
+          key: groupKey,
+          name: groupLabel,
+          count: 0
+        })
+      }
+
+      groupMap.get(groupKey).count += 1
+    })
+
+    const dynamicGroups = Array.from(groupMap.values())
+      .sort((left, right) => {
+        const leftPriority = TR_LIVE_CATEGORY_PRIORITY.indexOf(left.key)
+        const rightPriority = TR_LIVE_CATEGORY_PRIORITY.indexOf(right.key)
+        const safeLeftPriority = leftPriority === -1 ? Number.MAX_SAFE_INTEGER : leftPriority
+        const safeRightPriority = rightPriority === -1 ? Number.MAX_SAFE_INTEGER : rightPriority
+
+        if (safeLeftPriority !== safeRightPriority) {
+          return safeLeftPriority - safeRightPriority
+        }
+
+        return trGroupCollator.compare(left.name, right.name)
+      })
+      .map((item, index) => ({
+        id: item.id,
+        name: item.name,
+        icon: buildLiveCategoryIcon(item.name),
+        color: getLiveCategoryColor(index),
+        count: item.count
+      }))
+
+    return [
+      {
+        id: 'all',
+        name: 'Tumu',
+        icon: '*',
+        color: PRIMARY,
+        count: channels.length
+      },
+      ...dynamicGroups
+    ]
+  }, [channels])
+
+  useEffect(() => {
+    if (selectedCategory === 'all') {
+      return
+    }
+
+    if (!liveCategories.some((category) => category.id === selectedCategory)) {
+      setSelectedCategory('all')
+    }
+  }, [liveCategories, selectedCategory])
 
   // Determine video mode
   useEffect(() => {
@@ -154,17 +282,18 @@ function PlayerPage() {
       setLoading(true)
 
       const normalizedCountry = String(countryCode || 'TR').toUpperCase()
-          const parsed = await fetchParsedPlaylist(user, token, {
-            cacheKey: `live-channels:${normalizedCountry}:v3`,
-            parser: (playlistText) => parseLiveChannelsByCountry(playlistText, normalizedCountry),
-            forceRefresh: false,
-            disableCache: true,
-            scope: 'live'
-          })
+      const parsed = await fetchParsedPlaylist(user, token, {
+        cacheKey: `live-channels:${normalizedCountry}:v3`,
+        parser: (playlistText) => parseLiveChannelsByCountry(playlistText, normalizedCountry),
+        forceRefresh: false,
+        disableCache: true,
+        scope: 'live'
+      })
+      const scopedChannels = filterChannelsBySelectedTrGroups(parsed, normalizedCountry)
 
-      setChannels(parsed)
-      if (parsed.length > 0) {
-        setCurrentChannel(parsed[0])
+      setChannels(scopedChannels)
+      if (scopedChannels.length > 0) {
+        setCurrentChannel(scopedChannels[0])
       } else {
         setCurrentChannel(null)
       }
@@ -193,20 +322,7 @@ function PlayerPage() {
     
     // Kategori filtresi
     if (selectedCategory !== 'all') {
-      filtered = filtered.filter(ch => {
-        const group = ch.group?.toLowerCase() || ''
-        const name = ch.name?.toLowerCase() || ''
-        switch (selectedCategory) {
-          case 'news': return group.includes('haber') || name.includes('haber') || group.includes('news')
-          case 'sports': return group.includes('spor') || name.includes('spor') || group.includes('sport')
-          case 'movies': return group.includes('sinema') || name.includes('sinema') || group.includes('movie')
-          case 'entertainment': return group.includes('eglence') || group.includes('entertainment') || group.includes('ulusal')
-          case 'documentary': return group.includes('belgesel') || group.includes('documentary')
-          case 'kids': return group.includes('cocuk') || group.includes('kids') || name.includes('cizgi')
-          case 'music': return group.includes('muzik') || group.includes('music')
-          default: return true
-        }
-      })
+      filtered = filtered.filter((channel) => `group:${normalizeLiveGroupKey(channel?.group)}` === selectedCategory)
     }
     
     return filtered
@@ -784,7 +900,7 @@ function PlayerPage() {
                 <h1 className="text-2xl font-black text-white tracking-tight">Canli TV</h1>
                 <p className="text-sm text-white/50 flex items-center gap-1">
                   <Sparkles className="w-3 h-3" />
-                  Dunyanin her yerinden kanallar
+                  TR kategori yapisina gore optimize edilmis kanal listesi
                 </p>
               </div>
             </div>
@@ -842,7 +958,7 @@ function PlayerPage() {
       <div className="sticky top-0 z-30 border-b" style={{ backgroundColor: BG_DARK, borderColor: BORDER }}>
         <div className="max-w-7xl mx-auto px-4 py-4">
           <div className="flex items-center gap-2 overflow-x-auto hide-scrollbar">
-            {CATEGORIES.map(cat => (
+            {liveCategories.map(cat => (
               <button
                 key={cat.id}
                 onClick={() => setSelectedCategory(cat.id)}
@@ -856,6 +972,7 @@ function PlayerPage() {
               >
                 <span>{cat.icon}</span>
                 <span>{cat.name}</span>
+                <span className="text-[11px] px-2 py-0.5 rounded-full bg-black/25">{cat.count}</span>
               </button>
             ))}
           </div>
