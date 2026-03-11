@@ -12,16 +12,21 @@ const BG_DARK = '#0a0a0a'
 const BG_SURFACE = '#141414'
 const BG_CARD = '#1a1a1a'
 
-// Basitleştirilmiş Kategoriler - Sadece en çok kullanılanlar
-const CATEGORIES = [
-  { id: 'all', name: 'Tümü', emoji: '📺' },
-  { id: 'ulusal', name: 'Ulusal', emoji: '📡' },
-  { id: 'haber', name: 'Haber', emoji: '📰' },
-  { id: 'spor', name: 'Spor', emoji: '⚽' },
-  { id: 'sinema', name: 'Sinema', emoji: '🎬' },
-  { id: 'cocuk', name: 'Çocuk', emoji: '🧸' },
-  { id: 'belgesel', name: 'Belgesel', emoji: '🌍' },
-]
+const normalizeLiveGroupLabel = (value) => {
+  const normalized = String(value || '').replace(/\s+/g, ' ').trim()
+  return normalized || 'Diger'
+}
+
+const normalizeLiveGroupKey = (value) => normalizeLiveGroupLabel(value).toLocaleUpperCase('tr-TR')
+
+const buildLiveCategoryIcon = (value) => {
+  const cleaned = normalizeLiveGroupLabel(value).replace(/[^0-9A-Za-z/&\s-]/g, ' ')
+  const tokens = cleaned.split(/\s+/).filter(Boolean)
+
+  if (tokens.length === 0) return 'TV'
+  if (tokens.length === 1) return tokens[0].slice(0, 2).toLocaleUpperCase('tr-TR')
+  return `${tokens[0][0] || ''}${tokens[1][0] || ''}`.toLocaleUpperCase('tr-TR')
+}
 
 // Debounce hook
 function useDebounce(value, delay) {
@@ -100,34 +105,63 @@ export default function PlayerPage() {
 
     loadChannels()
   }, [user, token])
+  const liveCategories = useMemo(() => {
+    const groupMap = new Map()
+
+    channels.forEach((channel) => {
+      const groupLabel = normalizeLiveGroupLabel(channel?.group)
+      const groupKey = normalizeLiveGroupKey(groupLabel)
+      const id = `group:${groupKey}`
+
+      if (!groupMap.has(id)) {
+        groupMap.set(id, {
+          id,
+          name: groupLabel,
+          icon: buildLiveCategoryIcon(groupLabel),
+          count: 0
+        })
+      }
+
+      groupMap.get(id).count += 1
+    })
+
+    const dynamicGroups = Array.from(groupMap.values()).sort((left, right) => (
+      left.name.localeCompare(right.name, 'tr', { sensitivity: 'base', numeric: true })
+    ))
+
+    return [
+      {
+        id: 'all',
+        name: 'Tumu',
+        icon: 'TV',
+        count: channels.length
+      },
+      ...dynamicGroups
+    ]
+  }, [channels])
+
+  useEffect(() => {
+    if (selectedCategory === 'all') return
+    if (!liveCategories.some((category) => category.id === selectedCategory)) {
+      setSelectedCategory('all')
+    }
+  }, [liveCategories, selectedCategory])
 
   // Filtreleme
   const filteredChannels = useMemo(() => {
     let filtered = channels
-    
-    // Kategori filtresi
+
     if (selectedCategory !== 'all') {
-      filtered = filtered.filter(ch => {
-        const group = ch.group?.toLowerCase() || ''
-        const name = ch.name?.toLowerCase() || ''
-        switch(selectedCategory) {
-          case 'ulusal': return group.includes('ulusal') || group.includes('ulusal')
-          case 'haber': return group.includes('haber') || name.includes('haber')
-          case 'spor': return group.includes('spor') || group.includes('sport') || name.includes('spor')
-          case 'sinema': return group.includes('sinema') || group.includes('movie') || name.includes('sinema')
-          case 'cocuk': return group.includes('cocuk') || group.includes('kids') || group.includes('cizgi')
-          case 'belgesel': return group.includes('belgesel') || group.includes('documentary')
-          default: return true
-        }
-      })
+      filtered = filtered.filter((channel) => (
+        `group:${normalizeLiveGroupKey(channel?.group)}` === selectedCategory
+      ))
     }
-    
-    // Arama filtresi
+
     if (debouncedSearch.trim()) {
       const query = debouncedSearch.toLowerCase()
-      filtered = filtered.filter(ch => ch.name?.toLowerCase().includes(query))
+      filtered = filtered.filter((channel) => channel.name?.toLowerCase().includes(query))
     }
-    
+
     return filtered
   }, [channels, selectedCategory, debouncedSearch])
 
@@ -309,7 +343,7 @@ export default function PlayerPage() {
       <div className="px-6 py-4 overflow-x-auto" style={{ backgroundColor: BG_DARK }}>
         <div className="max-w-7xl mx-auto">
           <div className="flex gap-3 min-w-max">
-            {CATEGORIES.map((cat) => (
+            {liveCategories.map((cat) => (
               <button
                 key={cat.id}
                 onClick={() => setSelectedCategory(cat.id)}
@@ -321,8 +355,9 @@ export default function PlayerPage() {
                   transform: selectedCategory === cat.id ? 'scale(1.05)' : 'scale(1)',
                 }}
               >
-                <span className="text-2xl">{cat.emoji}</span>
+                <span className="text-sm font-black leading-none">{cat.icon}</span>
                 <span>{cat.name}</span>
+                <span className="text-xs px-2 py-0.5 rounded-full bg-black/25">{cat.count}</span>
               </button>
             ))}
           </div>
