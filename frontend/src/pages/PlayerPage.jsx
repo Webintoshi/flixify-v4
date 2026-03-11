@@ -23,6 +23,9 @@ const BG_SURFACE = '#141414'
 const BG_CARD = '#1a1a1a'
 const LIVE_CATALOG_TTL_MS = 5 * 60 * 1000
 const LIVE_PAGE_STATE_PREFIX = 'iptv_live_page_state_v2_'
+const LIVE_STARTUP_TIMEOUT_MS = 12000
+const LIVE_AUTOPLAY_RETRY_DELAY_MS = 100
+const LIVE_DEFAULT_MAX_AUTO_HEIGHT = 1080
 
 const normalizeLiveGroupLabel = (value) => {
   const normalized = String(value || '').replace(/\s+/g, ' ').trim()
@@ -57,6 +60,162 @@ function getLiveEdgeTime(video) {
   }
 
   return null
+}
+
+function getDecodedVideoFrameCount(video) {
+  if (!video) return 0
+
+  try {
+    if (typeof video.getVideoPlaybackQuality === 'function') {
+      return Number(video.getVideoPlaybackQuality()?.totalVideoFrames || 0)
+    }
+
+    if (Number.isFinite(video.webkitDecodedFrameCount)) {
+      return Number(video.webkitDecodedFrameCount)
+    }
+
+    if (Number.isFinite(video.mozParsedFrames)) {
+      return Number(video.mozParsedFrames)
+    }
+  } catch {
+    return 0
+  }
+
+  return 0
+}
+
+function resolveHlsLevelHeight(level = {}) {
+  const directHeight = Number.parseInt(level?.height, 10)
+  if (Number.isFinite(directHeight) && directHeight > 0) {
+    return directHeight
+  }
+
+  const directWidth = Number.parseInt(level?.width, 10)
+  if (Number.isFinite(directWidth) && directWidth >= 3840) return 2160
+  if (Number.isFinite(directWidth) && directWidth >= 2560) return 1440
+  if (Number.isFinite(directWidth) && directWidth >= 1920) return 1080
+  if (Number.isFinite(directWidth) && directWidth >= 1280) return 720
+  return 0
+}
+
+function resolveHlsLevelCodecSet(level = {}) {
+  const explicitCodecs = String(level?.attrs?.CODECS || level?.codecSet || '').trim()
+  if (explicitCodecs) {
+    return explicitCodecs
+  }
+
+  return [level?.videoCodec, level?.audioCodec]
+    .map((value) => String(value || '').trim())
+    .filter(Boolean)
+    .join(',')
+}
+
+function isCodecSetVideoHeavy(codecSet = '') {
+  return /(avc1|avc3|hev1|hvc1|vp09|av01|dvh1|dvhe|mp4v)/i.test(codecSet)
+}
+
+function isCodecSetHighEfficiency(codecSet = '') {
+  return /(hev1|hvc1|av01|dvh1|dvhe)/i.test(codecSet)
+}
+
+function supportsMseCodecSet(codecSet = '') {
+  const normalizedCodecSet = String(codecSet || '').replace(/\s+/g, '')
+  if (!normalizedCodecSet || typeof window === 'undefined') {
+    return null
+  }
+
+  const MediaSourceCtor = window.ManagedMediaSource || window.MediaSource
+  if (typeof MediaSourceCtor?.isTypeSupported !== 'function') {
+    return null
+  }
+
+  const mimeType = isCodecSetVideoHeavy(normalizedCodecSet)
+    ? `video/mp4; codecs="${normalizedCodecSet}"`
+    : `audio/mp4; codecs="${normalizedCodecSet}"`
+
+  try {
+    return MediaSourceCtor.isTypeSupported(mimeType)
+  } catch {
+    return false
+  }
+}
+
+function buildPlayableHlsLevelCandidates(levels = [], browserCapabilities = {}) {
+  return (Array.isArray(levels) ? levels : [])
+    .map((level, index) => {
+      const codecSet = resolveHlsLevelCodecSet(level)
+      const codecSupport = supportsMseCodecSet(codecSet)
+      const highEfficiencyCodec = isCodecSetHighEfficiency(codecSet)
+      const safeHighEfficiency = browserCapabilities.isSafari || browserCapabilities.isIOS || codecSupport === true
+      const playable = codecSupport !== false && (!highEfficiencyCodec || safeHighEfficiency)
+
+      return {
+        index,
+        height: resolveHlsLevelHeight(level),
+        bitrate: Number(level?.bitrate || level?.maxBitrate || 0),
+        playable
+      }
+    })
+    .filter((candidate) => candidate.playable)
+}
+
+function findSafeHlsAutoLevelIndex(levels = [], browserCapabilities = {}) {
+  const candidates = buildPlayableHlsLevelCandidates(levels, browserCapabilities)
+  if (candidates.length === 0) {
+    return -1
+  }
+
+  const maxAutoHeight = browserCapabilities.isSafari || browserCapabilities.isIOS
+    ? Number.POSITIVE_INFINITY
+    : LIVE_DEFAULT_MAX_AUTO_HEIGHT
+
+  const scopedCandidates = candidates.filter((candidate) => (
+    candidate.height === 0 || candidate.height <= maxAutoHeight
+  ))
+
+  const rankedCandidates = (scopedCandidates.length > 0 ? scopedCandidates : candidates)
+    .slice()
+    .sort((left, right) => {
+      if (right.height !== left.height) {
+        return right.height - left.height
+      }
+
+      return right.bitrate - left.bitrate
+    })
+
+  return rankedCandidates[0]?.index ?? -1
+}
+
+function findLowerHlsLevelIndex(levels = [], currentIndex = -1, browserCapabilities = {}) {
+  const candidates = buildPlayableHlsLevelCandidates(levels, browserCapabilities)
+  if (candidates.length === 0) {
+    return -1
+  }
+
+  const currentLevel = Array.isArray(levels) && currentIndex >= 0 ? levels[currentIndex] : null
+  const currentHeight = resolveHlsLevelHeight(currentLevel)
+
+  const lowerCandidates = candidates.filter((candidate) => {
+    if (currentHeight > 0 && candidate.height > 0) {
+      return candidate.height < currentHeight
+    }
+
+    return currentIndex < 0 || candidate.index < currentIndex
+  })
+
+  if (lowerCandidates.length === 0) {
+    return -1
+  }
+
+  lowerCandidates.sort((left, right) => {
+    if (right.height !== left.height) {
+      return right.height - left.height
+    }
+
+    return right.bitrate - left.bitrate
+  })
+
+  return lowerCandidates[0]?.index ?? -1
 }
 
 function useDebounce(value, delay) {
@@ -148,6 +307,8 @@ export default function PlayerPage() {
   const searchInputRef = useRef(null)
   const nativePlaybackCleanupRef = useRef(() => {})
   const playbackRecoveryTimeoutRef = useRef(null)
+  const playbackStartupTimeoutRef = useRef(null)
+  const playbackStartedRef = useRef(false)
   const playbackModeRef = useRef('idle')
   
   const { user, token } = useAuthStore()
@@ -582,12 +743,26 @@ export default function PlayerPage() {
     [currentChannel, resolveChannelLogoSource]
   )
 
+  const clearPlaybackStartupTimeout = useCallback(() => {
+    if (playbackStartupTimeoutRef.current) {
+      clearTimeout(playbackStartupTimeoutRef.current)
+      playbackStartupTimeoutRef.current = null
+    }
+  }, [])
+
   const clearPlaybackRecoveryTimeout = useCallback(() => {
     if (playbackRecoveryTimeoutRef.current) {
       clearTimeout(playbackRecoveryTimeoutRef.current)
       playbackRecoveryTimeoutRef.current = null
     }
   }, [])
+
+  const markPlaybackReady = useCallback(() => {
+    playbackStartedRef.current = true
+    clearPlaybackStartupTimeout()
+    setLoading(false)
+    setError(null)
+  }, [clearPlaybackStartupTimeout])
 
   const nudgeVideoToLiveEdge = useCallback(() => {
     const video = videoRef.current
@@ -610,15 +785,81 @@ export default function PlayerPage() {
     }
   }, [])
 
-  const resumeLivePlayback = useCallback(() => {
+  const attemptVideoPlayback = useCallback(async ({ allowMutedFallback = true } = {}) => {
     const video = videoRef.current
-    if (!video) return
+    if (!video || typeof video.play !== 'function') {
+      return false
+    }
 
-    const playPromise = video.play?.()
-    if (playPromise?.catch) {
-      playPromise.catch(() => {})
+    const playOnce = async () => {
+      const playResult = video.play()
+      if (playResult?.then) {
+        await playResult
+      }
+      return true
+    }
+
+    try {
+      await playOnce()
+      return true
+    } catch (error) {
+      const errorSignature = `${error?.name || ''} ${error?.message || ''}`.toLowerCase()
+      const autoplayBlocked = (
+        errorSignature.includes('notallowederror')
+        || errorSignature.includes('not allowed')
+        || errorSignature.includes('user didn')
+        || errorSignature.includes('interact')
+      )
+
+      if (allowMutedFallback && autoplayBlocked && !video.muted) {
+        video.muted = true
+        setIsMuted(true)
+        await new Promise((resolve) => setTimeout(resolve, LIVE_AUTOPLAY_RETRY_DELAY_MS))
+
+        try {
+          await playOnce()
+          return true
+        } catch {
+          return false
+        }
+      }
+
+      return false
     }
   }, [])
+
+  const resumeLivePlayback = useCallback(() => {
+    void attemptVideoPlayback()
+  }, [attemptVideoPlayback])
+
+  const downgradeHlsPlayback = useCallback((hlsInstance) => {
+    if (!hlsInstance) {
+      return false
+    }
+
+    const candidateIndices = [
+      hlsInstance.currentLevel,
+      hlsInstance.nextLevel,
+      hlsInstance.loadLevel,
+      hlsInstance.autoLevelCapping
+    ].filter((value) => Number.isInteger(value) && value >= 0)
+
+    const currentIndex = candidateIndices.length > 0
+      ? Math.max(...candidateIndices)
+      : Array.isArray(hlsInstance.levels) ? hlsInstance.levels.length - 1 : -1
+
+    const nextLevelIndex = findLowerHlsLevelIndex(hlsInstance.levels || [], currentIndex, browserCapabilities)
+    if (nextLevelIndex < 0) {
+      return false
+    }
+
+    hlsInstance.autoLevelCapping = nextLevelIndex
+    hlsInstance.currentLevel = nextLevelIndex
+    hlsInstance.nextLevel = nextLevelIndex
+    hlsInstance.loadLevel = nextLevelIndex
+
+    return true
+  }, [browserCapabilities])
 
   const recoverPlayback = useCallback(() => {
     if (isVodMode) return
@@ -665,9 +906,48 @@ export default function PlayerPage() {
     }, delayMs)
   }, [clearPlaybackRecoveryTimeout, isVodMode, recoverPlayback])
 
+  const scheduleStartupWatchdog = useCallback((hlsInstance = null) => {
+    clearPlaybackStartupTimeout()
+    playbackStartupTimeoutRef.current = setTimeout(() => {
+      playbackStartupTimeoutRef.current = null
+
+      if (playbackStartedRef.current) {
+        return
+      }
+
+      const video = videoRef.current
+      if (!video) {
+        return
+      }
+
+      if (getDecodedVideoFrameCount(video) > 0 || (!video.paused && video.readyState >= 2)) {
+        markPlaybackReady()
+        return
+      }
+
+      if (hlsInstance && downgradeHlsPlayback(hlsInstance)) {
+        schedulePlaybackRecovery(80)
+        scheduleStartupWatchdog(hlsInstance)
+        return
+      }
+
+      void attemptVideoPlayback({ allowMutedFallback: !video.muted })
+        .then((didStart) => {
+          if (didStart) {
+            scheduleStartupWatchdog(hlsInstance)
+            return
+          }
+
+          setLoading(false)
+          setError('Yayin baslatilamadi. Kanal codec olarak bu tarayici ile uyumsuz olabilir.')
+        })
+    }, LIVE_STARTUP_TIMEOUT_MS)
+  }, [attemptVideoPlayback, clearPlaybackStartupTimeout, downgradeHlsPlayback, markPlaybackReady, schedulePlaybackRecovery])
+
   useEffect(() => () => {
+    clearPlaybackStartupTimeout()
     clearPlaybackRecoveryTimeout()
-  }, [clearPlaybackRecoveryTimeout])
+  }, [clearPlaybackRecoveryTimeout, clearPlaybackStartupTimeout])
 
   useEffect(() => {
     if (isVodMode) return
@@ -698,12 +978,8 @@ export default function PlayerPage() {
       cleanupEntries.forEach((cleanup) => cleanup())
       cleanupEntries.length = 0
       nativePlaybackCleanupRef.current = () => {}
+      clearPlaybackStartupTimeout()
       clearPlaybackRecoveryTimeout()
-    }
-
-    const markPlaybackReady = () => {
-      setLoading(false)
-      setError(null)
     }
 
     const handleResizeRecovery = () => {
@@ -716,6 +992,8 @@ export default function PlayerPage() {
     }
 
     nativePlaybackCleanupRef.current?.()
+    playbackStartedRef.current = false
+    clearPlaybackStartupTimeout()
     clearPlaybackRecoveryTimeout()
     setError(null)
     setLoading(true)
@@ -736,9 +1014,11 @@ export default function PlayerPage() {
     video.setAttribute('playsinline', 'true')
     video.setAttribute('webkit-playsinline', 'true')
     video.preload = 'auto'
+    video.muted = isMuted
+    video.volume = volume
 
     bindEvent(video, 'playing', markPlaybackReady)
-    bindEvent(video, 'canplay', markPlaybackReady)
+    bindEvent(video, 'loadeddata', markPlaybackReady)
     bindEvent(video, 'waiting', () => schedulePlaybackRecovery(140))
     bindEvent(video, 'stalled', () => schedulePlaybackRecovery(140))
     bindEvent(video, 'suspend', () => schedulePlaybackRecovery(180))
@@ -768,10 +1048,10 @@ export default function PlayerPage() {
       playbackModeRef.current = 'native-hls'
       bindEvent(video, 'loadedmetadata', () => {
         nudgeVideoToLiveEdge()
-        markPlaybackReady()
         resumeLivePlayback()
       }, { once: true })
       bindEvent(video, 'error', () => {
+        clearPlaybackStartupTimeout()
         setLoading(false)
         setError('Yayin yuklenemedi')
       }, { once: true })
@@ -779,6 +1059,7 @@ export default function PlayerPage() {
       video.src = url
       video.load()
       resumeLivePlayback()
+      scheduleStartupWatchdog()
     /* legacy branch removed
       })
         if (data.fatal) setError('Yayın yüklenemedi')
@@ -786,7 +1067,7 @@ export default function PlayerPage() {
       playbackModeRef.current = 'hls'
       const hls = new Hls({
         backBufferLength: 90,
-        capLevelToPlayerSize: false,
+        capLevelToPlayerSize: true,
         enableWorker: true,
         fragLoadingMaxRetry: 6,
         levelLoadingMaxRetry: 6,
@@ -798,15 +1079,21 @@ export default function PlayerPage() {
         maxBufferLength: 60,
         maxLiveSyncPlaybackRate: 1.2,
         maxMaxBufferLength: 120,
+        startLevel: 0,
         startFragPrefetch: true
       })
       hlsPlayerRef.current = hls
       hls.loadSource(url)
       hls.attachMedia(video)
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        const safeAutoLevelIndex = findSafeHlsAutoLevelIndex(hls.levels || [], browserCapabilities)
+        if (safeAutoLevelIndex >= 0) {
+          hls.autoLevelCapping = safeAutoLevelIndex
+        }
+
         nudgeVideoToLiveEdge()
-        markPlaybackReady()
         resumeLivePlayback()
+        scheduleStartupWatchdog(hls)
       })
       hls.on(Hls.Events.ERROR, (_, data) => {
         if (!data?.fatal) {
@@ -824,6 +1111,12 @@ export default function PlayerPage() {
         }
 
         if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+          if (downgradeHlsPlayback(hls)) {
+            schedulePlaybackRecovery(60)
+            scheduleStartupWatchdog(hls)
+            return
+          }
+
           schedulePlaybackRecovery(80)
           try {
             hls.recoverMediaError()
@@ -833,6 +1126,13 @@ export default function PlayerPage() {
           return
         }
 
+        if (downgradeHlsPlayback(hls)) {
+          schedulePlaybackRecovery(80)
+          scheduleStartupWatchdog(hls)
+          return
+        }
+
+        clearPlaybackStartupTimeout()
         setLoading(false)
         setError('Yayin yuklenemedi')
       })
@@ -840,10 +1140,10 @@ export default function PlayerPage() {
       playbackModeRef.current = 'native-hls'
       bindEvent(video, 'loadedmetadata', () => {
         nudgeVideoToLiveEdge()
-        markPlaybackReady()
         resumeLivePlayback()
       }, { once: true })
       bindEvent(video, 'error', () => {
+        clearPlaybackStartupTimeout()
         setLoading(false)
         setError('Yayin yuklenemedi')
       }, { once: true })
@@ -851,6 +1151,7 @@ export default function PlayerPage() {
       video.src = url
       video.load()
       resumeLivePlayback()
+      scheduleStartupWatchdog()
     } else if (isMpegTsSource && supportsMpegTs) {
       playbackModeRef.current = 'mpegts'
       const player = mpegts.createPlayer({
@@ -861,13 +1162,18 @@ export default function PlayerPage() {
       playerRef.current = player
       player.attachMediaElement(video)
       player.on(mpegts.Events.ERROR, () => {
+        clearPlaybackStartupTimeout()
         setLoading(false)
         setError('Yayin yuklenemedi')
       })
       player.load()
       player.play()
-        .then(() => markPlaybackReady())
+        .then(() => {
+          void attemptVideoPlayback({ allowMutedFallback: !video.muted })
+          scheduleStartupWatchdog()
+        })
         .catch(() => {
+          clearPlaybackStartupTimeout()
           setLoading(false)
           setError('Yayin yuklenemedi')
         })
@@ -888,12 +1194,20 @@ export default function PlayerPage() {
     browserCapabilities.isIOS,
     browserCapabilities.isInternetExplorer,
     browserCapabilities.isSafari,
+    browserCapabilities,
+    clearPlaybackStartupTimeout,
     clearPlaybackRecoveryTimeout,
     currentChannel,
+    downgradeHlsPlayback,
     isVodMode,
+    isMuted,
+    markPlaybackReady,
     nudgeVideoToLiveEdge,
+    attemptVideoPlayback,
     resumeLivePlayback,
-    schedulePlaybackRecovery
+    schedulePlaybackRecovery,
+    scheduleStartupWatchdog,
+    volume
   ])
 
   const handleMouseMove = useCallback(() => {
