@@ -674,6 +674,114 @@ async function fetchCatalog(user, token, catalogType, options = {}) {
   }
 }
 
+export async function fetchLiveCatalog(user, token, options = {}) {
+  const {
+    signal,
+    country = 'TR',
+    forceRefresh = false,
+    ttlMs = DEFAULT_TTL_MS,
+    retries = 1
+  } = options
+
+  if (!user?.code) {
+    throw new Error('Kullanici kodu bulunamadi')
+  }
+
+  if (!token) {
+    throw new Error('Oturum bulunamadi')
+  }
+
+  const normalizedCountry = String(country || 'TR').trim().toUpperCase() || 'TR'
+  const tokenKey = tokenFingerprint(token)
+  const catalogVariant = `country:${normalizedCountry}`
+  const catalogCacheKey = buildCatalogCacheKey(user.code, tokenKey, 'live', catalogVariant)
+  const cached = !forceRefresh ? getCachedEntry(catalogMemoryCache, catalogCacheKey, ttlMs) : null
+  const staleCached = getAnyCachedEntry(catalogMemoryCache, catalogCacheKey)
+
+  if (cached) {
+    return cached
+  }
+
+  const queryParams = new URLSearchParams({ country: normalizedCountry })
+  if (forceRefresh) {
+    queryParams.set('forceRefresh', 'true')
+  }
+
+  const endpoint = buildApiUrl(`/catalog/live?${queryParams.toString()}`)
+  const inflightKey = `catalog:live:${user.code}:${tokenKey}:${catalogVariant}:${forceRefresh ? 'refresh' : 'cached'}`
+
+  if (!forceRefresh && inflightCatalogRequests.has(inflightKey)) {
+    return inflightCatalogRequests.get(inflightKey)
+  }
+
+  const requestPromise = (async () => {
+    let lastError = null
+
+    for (let attempt = 0; attempt <= retries; attempt += 1) {
+      try {
+        const response = await fetch(endpoint, {
+          signal,
+          headers: {
+            Authorization: `Bearer ${token}`
+          }
+        })
+
+        if (!response.ok) {
+          const payload = await response.json().catch(() => ({}))
+          const message = payload?.message || `Canli katalog yuklenemedi (HTTP ${response.status})`
+          const error = new Error(message)
+          error.status = response.status
+          throw error
+        }
+
+        const payload = await response.json().catch(() => ({}))
+        const result = {
+          country: String(payload?.data?.country || normalizedCountry).trim().toUpperCase() || normalizedCountry,
+          categories: Array.isArray(payload?.data?.categories) ? payload.data.categories : [],
+          countries: Array.isArray(payload?.data?.countries) ? payload.data.countries : [],
+          items: Array.isArray(payload?.data?.items) ? payload.data.items : [],
+          total: Number(payload?.data?.total || 0),
+          generatedAt: payload?.data?.generatedAt || null
+        }
+
+        return cacheEntry(catalogMemoryCache, catalogCacheKey, result)
+      } catch (error) {
+        lastError = error
+
+        const isAbort = signal?.aborted
+        const isTransient =
+          error?.status >= 500 ||
+          /Failed to fetch/i.test(error?.message || '')
+
+        if (isAbort) {
+          throw error
+        }
+
+        if (attempt < retries && isTransient) {
+          await delay(600)
+          continue
+        }
+
+        if (staleCached && isTransient) {
+          return staleCached
+        }
+
+        throw error
+      }
+    }
+
+    throw lastError || new Error('Canli katalog yuklenemedi')
+  })()
+
+  inflightCatalogRequests.set(inflightKey, requestPromise)
+
+  try {
+    return await requestPromise
+  } finally {
+    inflightCatalogRequests.delete(inflightKey)
+  }
+}
+
 export function fetchSeriesCatalog(user, token, options = {}) {
   return fetchCatalog(user, token, 'series', options)
 }

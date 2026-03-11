@@ -23,6 +23,12 @@ const { asyncHandler } = require('../middleware/errorHandler');
 const { normalizeProviderPlaylistUrl, buildProviderPlaylistFetchCandidates } = require('../../utils/providerPlaylistUrl');
 const { normalizeCodecName, isBrowserSupportedAudioCodec, buildPlaybackDecision } = require('../../utils/playbackDecision');
 const { buildSeriesCatalog, buildMoviesCatalog } = require('../../utils/catalogBuilder');
+const { DEFAULT_LIVE_COUNTRY_CODE, buildLiveCatalog, normalizeLiveCountryCode } = require('../../utils/liveCatalogBuilder');
+const {
+  buildProviderCatalogSignature,
+  buildStreamTemplateFromSampleUrl,
+  buildXtreamLiveStreamUrl
+} = require('../../utils/xtreamPlaylistUrl');
 
 class M3uController {
   constructor(getUserM3U, cacheService, jwtSecret) {
@@ -34,9 +40,11 @@ class M3uController {
     this._vodSessions = new Map();
     this._rawPlaylistInflight = new Map();
     this._catalogInflight = new Map();
+    this._sharedLiveCatalogInflight = new Map();
     this._vodSessionTtlMs = parseInt(process.env.VOD_SESSION_TTL_MS, 10) || 60 * 60 * 1000;
     this._playlistCacheTtlSec = parseInt(process.env.PLAYLIST_CACHE_TTL_SEC, 10) || 900;
     this._catalogCacheTtlSec = parseInt(process.env.CATALOG_CACHE_TTL_SEC, 10) || 900;
+    this._liveCatalogCacheTtlSec = parseInt(process.env.LIVE_CATALOG_CACHE_TTL_SEC, 10) || 900;
     this._ffmpegPath = process.env.FFMPEG_PATH || 'ffmpeg';
     this._ffprobePath = process.env.FFPROBE_PATH || 'ffprobe';
     this._upstreamTimeoutMs = parseInt(process.env.PROXY_TIMEOUT_MS, 10) || 30000;
@@ -993,6 +1001,64 @@ class M3uController {
     }
   }
 
+  async _getSharedLiveCatalog(code, options = {}) {
+    const { forceRefresh = false } = options;
+    const { url } = await this._getUserM3U.execute({ code });
+    const m3uUrl = this._normalizeProviderPlaylistUrl(url);
+
+    if (!m3uUrl) {
+      const error = new Error('No M3U URL assigned');
+      error.statusCode = 404;
+      throw error;
+    }
+
+    const providerSignature = buildProviderCatalogSignature(m3uUrl);
+    const cacheKey = `catalog:live:shared:${providerSignature}:v1`;
+    const inflightKey = `catalog:live:shared:${providerSignature}:${forceRefresh ? 'refresh' : 'cached'}`;
+    let sharedCatalog = !forceRefresh ? await this._cacheService.get(cacheKey) : null;
+
+    if (!sharedCatalog?.items || !Array.isArray(sharedCatalog.items) || !Array.isArray(sharedCatalog.countries)) {
+      if (this._sharedLiveCatalogInflight.has(inflightKey)) {
+        sharedCatalog = await this._sharedLiveCatalogInflight.get(inflightKey);
+      } else {
+        const loaderPromise = (async () => {
+          const { rawPlaylist } = await this._getRawPlaylistForCode(code, {
+            forceRefresh,
+            scope: 'live'
+          });
+          const builtCatalog = buildLiveCatalog(rawPlaylist);
+          const streamTemplate = buildStreamTemplateFromSampleUrl(
+            builtCatalog.items[0]?.sampleUrl || '',
+            m3uUrl
+          );
+          const items = builtCatalog.items.map(({ sampleUrl: _sampleUrl, ...item }) => item);
+          const nextCatalog = {
+            items,
+            countries: builtCatalog.countries,
+            streamTemplate: streamTemplate || null,
+            generatedAt: new Date().toISOString()
+          };
+
+          await this._cacheService.set(cacheKey, nextCatalog, this._liveCatalogCacheTtlSec);
+          return nextCatalog;
+        })();
+
+        this._sharedLiveCatalogInflight.set(inflightKey, loaderPromise);
+        try {
+          sharedCatalog = await loaderPromise;
+        } finally {
+          this._sharedLiveCatalogInflight.delete(inflightKey);
+        }
+      }
+    }
+
+    return {
+      m3uUrl,
+      providerSignature,
+      sharedCatalog
+    };
+  }
+
   _parseBooleanFlag(value) {
     const normalized = String(value || '').trim().toLowerCase();
     return normalized === '1' || normalized === 'true' || normalized === 'yes';
@@ -1710,6 +1776,84 @@ class M3uController {
     }
   });
 
+  catalogLive = asyncHandler(async (req, res) => {
+    const code = req.user.code;
+    const accessToken = req.user.token;
+    const baseApiUrl = this._getBaseApiUrl(req);
+    const forceRefresh = String(req.query.forceRefresh || '').toLowerCase() === 'true' || req.query.forceRefresh === '1';
+    const requestedCountry = normalizeLiveCountryCode(req.query.country || DEFAULT_LIVE_COUNTRY_CODE);
+    const requestedCategory = String(req.query.category || '').trim();
+
+    try {
+      const { m3uUrl, sharedCatalog } = await this._getSharedLiveCatalog(code, { forceRefresh });
+      const countries = Array.isArray(sharedCatalog.countries) ? sharedCatalog.countries : [];
+      const selectedCountryMeta = countries.find((country) => country.code === requestedCountry)
+        || countries.find((country) => country.defaultSelected)
+        || countries[0]
+        || {
+          code: requestedCountry,
+          categories: []
+        };
+      const selectedCountry = selectedCountryMeta.code || requestedCountry;
+
+      let items = Array.isArray(sharedCatalog.items)
+        ? sharedCatalog.items.filter((item) => item.countryCode === selectedCountry)
+        : [];
+
+      if (requestedCategory && requestedCategory.toLowerCase() !== 'all') {
+        items = items.filter((item) => item.group === requestedCategory);
+      }
+
+      const responseItems = items
+        .map((item) => {
+          const targetUrl = buildXtreamLiveStreamUrl(m3uUrl, item.streamId, {
+            template: sharedCatalog.streamTemplate
+          });
+
+          if (!targetUrl) {
+            return null;
+          }
+
+          return {
+            id: item.id,
+            name: item.name,
+            logo: item.logo
+              ? this._buildLogoProxyUrl(baseApiUrl, code, accessToken, item.logo)
+              : '',
+            group: item.group,
+            country: item.countryCode,
+            url: this._buildStreamProxyUrl(baseApiUrl, code, accessToken, targetUrl),
+            sourceType: item.sourceType
+          };
+        })
+        .filter(Boolean);
+
+      res.json({
+        status: 'success',
+        data: {
+          country: selectedCountry,
+          category: requestedCategory && requestedCategory.toLowerCase() !== 'all' ? requestedCategory : 'all',
+          countries,
+          categories: Array.isArray(selectedCountryMeta.categories) ? selectedCountryMeta.categories : [],
+          items: responseItems,
+          total: responseItems.length,
+          generatedAt: sharedCatalog.generatedAt || new Date().toISOString()
+        }
+      });
+    } catch (error) {
+      const statusCode = error.statusCode || 502;
+      logger.error('Live catalog build failed', {
+        code,
+        error: error.message,
+        statusCode
+      });
+      res.status(statusCode).json({
+        error: 'Live catalog failed',
+        message: error.message
+      });
+    }
+  });
+
   proxyStream = asyncHandler(async (req, res) => {
     const { code } = req.params;
     const targetUrl = req.query.url;
@@ -2168,6 +2312,14 @@ class M3uController {
     await this._cacheService.delete(`catalog:movies:${code}:v1`);
     this._userProviderOrigins.delete(code);
     this._userAllowedOrigins.delete(code);
+
+    try {
+      const { url } = await this._getUserM3U.execute({ code });
+      const providerSignature = buildProviderCatalogSignature(url);
+      await this._cacheService.delete(`catalog:live:shared:${providerSignature}:v1`);
+    } catch {
+      // Ignore live catalog cache cleanup failures for inactive users.
+    }
 
     logger.info('M3U cache cleared', { code });
     res.json({ status: 'success', message: 'Cache cleared' });

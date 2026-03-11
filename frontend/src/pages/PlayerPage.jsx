@@ -4,8 +4,7 @@ import { useAuthStore } from '../stores/authStore'
 import { Search, Tv, Play, Volume2, VolumeX, Maximize, AlertCircle, RefreshCw } from 'lucide-react'
 import mpegts from 'mpegts.js'
 import Hls from 'hls.js'
-import { fetchParsedPlaylist, hasAssignedPlaylist, hasValidSubscription } from '../services/playlist'
-import { parseLiveChannels, parseLiveChannelsByCountry } from '../utils/playlistParser'
+import { fetchLiveCatalog, hasAssignedPlaylist, hasValidSubscription } from '../services/playlist'
 
 const PRIMARY = '#E50914'
 const BG_DARK = '#0a0a0a'
@@ -38,6 +37,14 @@ function useDebounce(value, delay) {
   return debouncedValue
 }
 
+function buildChannelIdentity(channel = {}) {
+  return [
+    String(channel?.id || '').trim(),
+    String(channel?.name || '').trim(),
+    String(channel?.group || '').trim()
+  ].join('|')
+}
+
 export default function PlayerPage() {
   const navigate = useNavigate()
   const videoRef = useRef(null)
@@ -55,6 +62,7 @@ export default function PlayerPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [searchQuery, setSearchQuery] = useState('')
+  const [selectedCountry, setSelectedCountry] = useState('TR')
   const [selectedCategory, setSelectedCategory] = useState('all')
   const [showControls, setShowControls] = useState(true)
   const [volume, setVolume] = useState(1)
@@ -64,6 +72,8 @@ export default function PlayerPage() {
   const [page, setPage] = useState(1)
   const [hasMore, setHasMore] = useState(false)
   const [brokenLogoKeys, setBrokenLogoKeys] = useState(() => new Set())
+  const [liveCountries, setLiveCountries] = useState([])
+  const [liveCategories, setLiveCategories] = useState([])
   
   const ITEMS_PER_PAGE = 40
   const debouncedSearch = useDebounce(searchQuery, 200)
@@ -77,82 +87,97 @@ export default function PlayerPage() {
     }
   }, [user, navigate])
 
+  useEffect(() => {
+    setSelectedCategory('all')
+  }, [selectedCountry])
+
   // Kanallari cek
   useEffect(() => {
     if (!hasAssignedPlaylist(user) || !token) return
 
-    const loadChannels = async () => {
+    let cancelled = false
+
+    const applyChannels = (nextChannels = []) => {
+      setChannels(nextChannels)
+
+      if (nextChannels.length === 0) {
+        setCurrentChannel(null)
+        setError('Canli kanal bulunamadi. Statik canli TV katalogu kontrol edilmeli.')
+        return
+      }
+
+      setCurrentChannel((previous) => {
+        if (!previous) {
+          return nextChannels[0]
+        }
+
+        const previousKey = buildChannelIdentity(previous)
+        return nextChannels.find((channel) => buildChannelIdentity(channel) === previousKey) || nextChannels[0]
+      })
+    }
+
+    const loadChannels = async ({ forceRefresh = false } = {}) => {
       try {
         setLoading(true)
         setError(null)
         setBrokenLogoKeys(new Set())
 
-        const parsed = await fetchParsedPlaylist(user, token, {
-          cacheKey: 'live-channels-tr-v1',
-          parser: (text) => {
-            const trChannels = parseLiveChannelsByCountry(text, 'TR')
-            if (trChannels.length > 0) {
-              return trChannels
-            }
-            return parseLiveChannels(text)
-          },
-          forceRefresh: true,
-          disableCache: true,
-          scope: 'live'
+        const payload = await fetchLiveCatalog(user, token, {
+          country: selectedCountry,
+          forceRefresh
         })
 
-        const nextChannels = Array.isArray(parsed) ? parsed : []
-        setChannels(nextChannels)
-
-        if (nextChannels.length > 0) {
-          setCurrentChannel(nextChannels[0])
-        } else {
-          setCurrentChannel(null)
-          setError('Canli kanal bulunamadi. M3U listesi veya grup filtreleri kontrol edilmeli.')
+        if (cancelled) {
+          return
         }
+
+        const nextChannels = Array.isArray(payload?.items) ? payload.items : []
+        const nextCountries = Array.isArray(payload?.countries) ? payload.countries : []
+        const resolvedCountry = String(payload?.country || selectedCountry).trim().toUpperCase() || selectedCountry
+        const activeCountry = nextCountries.find((country) => country.code === resolvedCountry) || null
+        const nextCategories = [
+          {
+            id: 'all',
+            name: 'Tumu',
+            icon: 'TV',
+            count: nextChannels.length
+          },
+          ...((Array.isArray(activeCountry?.categories) ? activeCountry.categories : []).map((category) => ({
+            id: category?.id || `group:${normalizeLiveGroupKey(category?.name)}`,
+            name: normalizeLiveGroupLabel(category?.name),
+            icon: buildLiveCategoryIcon(category?.name),
+            count: Number(category?.count || 0)
+          })))
+        ]
+
+        setLiveCountries(nextCountries)
+        setLiveCategories(nextCategories)
+
+        if (resolvedCountry !== selectedCountry) {
+          setSelectedCountry(resolvedCountry)
+        }
+
+        applyChannels(nextChannels)
       } catch (err) {
-        setError('Kanallar yuklenemedi')
+        if (!cancelled) {
+          setChannels([])
+          setCurrentChannel(null)
+          setLiveCategories([])
+          setError('Canli TV katalogu yuklenemedi')
+        }
       } finally {
-        setLoading(false)
+        if (!cancelled) {
+          setLoading(false)
+        }
       }
     }
 
-    loadChannels()
-  }, [user, token])
-  const liveCategories = useMemo(() => {
-    const groupMap = new Map()
+    void loadChannels({ forceRefresh: true })
 
-    channels.forEach((channel) => {
-      const groupLabel = normalizeLiveGroupLabel(channel?.group)
-      const groupKey = normalizeLiveGroupKey(groupLabel)
-      const id = `group:${groupKey}`
-
-      if (!groupMap.has(id)) {
-        groupMap.set(id, {
-          id,
-          name: groupLabel,
-          icon: buildLiveCategoryIcon(groupLabel),
-          count: 0
-        })
-      }
-
-      groupMap.get(id).count += 1
-    })
-
-    const dynamicGroups = Array.from(groupMap.values()).sort((left, right) => (
-      left.name.localeCompare(right.name, 'tr', { sensitivity: 'base', numeric: true })
-    ))
-
-    return [
-      {
-        id: 'all',
-        name: 'Tumu',
-        icon: 'TV',
-        count: channels.length
-      },
-      ...dynamicGroups
-    ]
-  }, [channels])
+    return () => {
+      cancelled = true
+    }
+  }, [selectedCountry, user, token])
 
   useEffect(() => {
     if (selectedCategory === 'all') return
@@ -184,6 +209,18 @@ export default function PlayerPage() {
     setDisplayedChannels(filteredChannels.slice(0, ITEMS_PER_PAGE))
     setHasMore(filteredChannels.length > ITEMS_PER_PAGE)
   }, [filteredChannels])
+
+  useEffect(() => {
+    if (filteredChannels.length === 0) {
+      setCurrentChannel(null)
+      return
+    }
+
+    const currentKey = buildChannelIdentity(currentChannel)
+    if (!currentKey || !filteredChannels.some((channel) => buildChannelIdentity(channel) === currentKey)) {
+      setCurrentChannel(filteredChannels[0])
+    }
+  }, [filteredChannels, currentChannel])
 
   const loadMoreChannels = useCallback(() => {
     if (!hasMore) return
@@ -365,7 +402,9 @@ export default function PlayerPage() {
     const handleKeyDown = (e) => {
       if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
         e.preventDefault()
-        const currentIndex = filteredChannels.findIndex(ch => ch.name === currentChannel?.name)
+        const currentIndex = filteredChannels.findIndex((channel) => (
+          buildChannelIdentity(channel) === buildChannelIdentity(currentChannel)
+        ))
         if (e.key === 'ArrowUp' && currentIndex > 0) {
           setCurrentChannel(filteredChannels[currentIndex - 1])
         } else if (e.key === 'ArrowDown' && currentIndex < filteredChannels.length - 1) {
@@ -428,27 +467,51 @@ export default function PlayerPage() {
         </div>
       </header>
 
-      {/* ========== KATEGORİLER - Büyük TV Dostu Butonlar ========== */}
-      <div className="px-6 py-4 overflow-x-auto" style={{ backgroundColor: BG_DARK }}>
-        <div className="max-w-7xl mx-auto">
-          <div className="flex gap-3 min-w-max">
-            {liveCategories.map((cat) => (
-              <button
-                key={cat.id}
-                onClick={() => setSelectedCategory(cat.id)}
-                className="flex items-center gap-2 px-6 py-3 rounded-2xl font-bold text-lg transition-all whitespace-nowrap"
-                style={{
-                  backgroundColor: selectedCategory === cat.id ? PRIMARY : BG_CARD,
-                  color: 'white',
-                  border: `2px solid ${selectedCategory === cat.id ? PRIMARY : 'rgba(255,255,255,0.1)'}`,
-                  transform: selectedCategory === cat.id ? 'scale(1.05)' : 'scale(1)',
-                }}
-              >
-                <span className="text-sm font-black leading-none">{cat.icon}</span>
-                <span>{cat.name}</span>
-                <span className="text-xs px-2 py-0.5 rounded-full bg-black/25">{cat.count}</span>
-              </button>
-            ))}
+      {/* ========== ULKELER VE KATEGORILER ========== */}
+      <div className="px-6 py-4" style={{ backgroundColor: BG_DARK }}>
+        <div className="max-w-7xl mx-auto space-y-4">
+          <div className="overflow-x-auto">
+            <div className="flex gap-3 min-w-max">
+              {liveCountries.map((country) => (
+                <button
+                  key={country.code}
+                  onClick={() => setSelectedCountry(country.code)}
+                  className="flex items-center gap-3 px-5 py-3 rounded-2xl font-bold text-base transition-all whitespace-nowrap"
+                  style={{
+                    backgroundColor: selectedCountry === country.code ? PRIMARY : BG_CARD,
+                    color: 'white',
+                    border: `2px solid ${selectedCountry === country.code ? PRIMARY : 'rgba(255,255,255,0.1)'}`,
+                    opacity: country.count > 0 ? 1 : 0.55,
+                    transform: selectedCountry === country.code ? 'scale(1.03)' : 'scale(1)',
+                  }}
+                >
+                  <span>{country.name}</span>
+                  <span className="text-xs px-2 py-0.5 rounded-full bg-black/25">{country.count}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="overflow-x-auto">
+            <div className="flex gap-3 min-w-max">
+              {liveCategories.map((cat) => (
+                <button
+                  key={cat.id}
+                  onClick={() => setSelectedCategory(cat.id)}
+                  className="flex items-center gap-2 px-6 py-3 rounded-2xl font-bold text-lg transition-all whitespace-nowrap"
+                  style={{
+                    backgroundColor: selectedCategory === cat.id ? PRIMARY : BG_CARD,
+                    color: 'white',
+                    border: `2px solid ${selectedCategory === cat.id ? PRIMARY : 'rgba(255,255,255,0.1)'}`,
+                    transform: selectedCategory === cat.id ? 'scale(1.05)' : 'scale(1)',
+                  }}
+                >
+                  <span className="text-sm font-black leading-none">{cat.icon}</span>
+                  <span>{cat.name}</span>
+                  <span className="text-xs px-2 py-0.5 rounded-full bg-black/25">{cat.count}</span>
+                </button>
+              ))}
+            </div>
           </div>
         </div>
       </div>
@@ -577,7 +640,7 @@ export default function PlayerPage() {
               style={{ maxHeight: 'calc(100vh - 340px)' }}
             >
               {displayedChannels.map((channel, index) => {
-                const isActive = currentChannel?.name === channel.name
+                const isActive = buildChannelIdentity(currentChannel) === buildChannelIdentity(channel)
                 const isLastVisible = index === displayedChannels.length - 1
                 const showLogo = isChannelLogoVisible(channel)
                 return (

@@ -390,6 +390,15 @@ function createRoutes({
     m3uController.catalogMovies
   );
 
+  // GET /api/v1/catalog/live - Pre-parsed live TV catalog (auth + subscription required)
+  router.get(
+    '/catalog/live',
+    rateLimiters.playlist,
+    authMiddleware,
+    subscriptionCheckMiddleware,
+    m3uController.catalogLive
+  );
+
   // GET /api/v1/m3u/health - M3U proxy health check
   router.get(
     '/m3u/health',
