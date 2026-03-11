@@ -98,4 +98,32 @@ describe('buildLiveCatalog', () => {
       category.name === 'TR:ULUSAL 4K' && category.count === 1
     ))).toBe(true)
   })
+
+  test('marks risky 4K live channels for remux compatibility', () => {
+    const playlist = [
+      '#EXTM3U',
+      '#EXTINF:-1 tvg-name="TR TRT 1 4K" group-title="TR:ULUSAL 4K",TR TRT 1 4K',
+      'https://provider.example/live/user/pass/5001.m3u8'
+    ].join('\n')
+
+    const catalog = buildLiveCatalog(playlist)
+
+    expect(catalog.items).toHaveLength(1)
+    expect(catalog.items[0].compatibilityHint).toBe('prefer-remux')
+  })
+
+  test('marks direct hls channels with alternates as remux fallback candidates', () => {
+    const playlist = [
+      '#EXTM3U',
+      '#EXTINF:-1 tvg-name="TR Test Kanal HD" group-title="TR:ULUSAL",TR Test Kanal HD',
+      'https://provider.example/live/user/pass/6001.ts',
+      '#EXTINF:-1 tvg-name="TR Test Kanal FHD" group-title="TR:ULUSAL",TR Test Kanal FHD',
+      'https://provider.example/live/user/pass/6001.m3u8'
+    ].join('\n')
+
+    const catalog = buildLiveCatalog(playlist)
+
+    expect(catalog.items).toHaveLength(1)
+    expect(catalog.items[0].compatibilityHint).toBe('fallback-remux')
+  })
 })

@@ -93,6 +93,29 @@ function getQualityScore(name = '') {
   return 8
 }
 
+function isHighRiskLiveName(value = '') {
+  return /\b(4k|uhd|hevc|h\.?265|h265|raw)\b/i.test(String(value || ''))
+}
+
+function buildCompatibilityHint(item = {}) {
+  const sourceType = String(item?.sourceType || '').trim().toLowerCase()
+
+  if (
+    sourceType === 'mpegts'
+    || sourceType === 'unknown'
+    || isHighRiskLiveName(item?.name)
+    || isHighRiskLiveName(item?.group)
+  ) {
+    return 'prefer-remux'
+  }
+
+  if (Array.isArray(item?.backupUrls) && item.backupUrls.length > 0) {
+    return 'fallback-remux'
+  }
+
+  return 'safe-direct'
+}
+
 function normalizeSampleUrlKey(value = '') {
   const normalizedValue = String(value || '').trim()
   if (!normalizedValue) {
@@ -225,7 +248,11 @@ function collapseLiveVariants(items = []) {
 
       return {
         ...primaryItem,
-        backupUrls
+        backupUrls,
+        compatibilityHint: buildCompatibilityHint({
+          ...primaryItem,
+          backupUrls
+        })
       }
     })
     .filter(Boolean)

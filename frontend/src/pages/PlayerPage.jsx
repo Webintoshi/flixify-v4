@@ -8,7 +8,6 @@ import { fetchLiveCatalog, getCachedLiveCatalogSnapshot, hasAssignedPlaylist, ha
 import { DEFAULT_LIVE_COUNTRY_CODE, LIVE_TV_COUNTRIES, getLiveCategoryDisplayLabel } from '../config/liveTvTaxonomy'
 import { resolveChannelFallbackLogo } from '../config/channelLogoFallbacks'
 import VodPlayer from '../components/player/VodPlayer'
-import { useStreamSourceProbe } from '../hooks/useVodSourceProbe'
 import {
   bindFullscreenChangeListeners,
   canPlayNativeHls,
@@ -24,7 +23,8 @@ const BG_SURFACE = '#141414'
 const BG_CARD = '#1a1a1a'
 const LIVE_CATALOG_TTL_MS = 5 * 60 * 1000
 const LIVE_PAGE_STATE_PREFIX = 'iptv_live_page_state_v2_'
-const LIVE_STARTUP_TIMEOUT_MS = 12000
+const LIVE_DIRECT_STARTUP_TIMEOUT_MS = 9000
+const LIVE_REMUX_STARTUP_TIMEOUT_MS = 15000
 const LIVE_AUTOPLAY_RETRY_DELAY_MS = 100
 const LIVE_DEFAULT_MAX_AUTO_HEIGHT = 1080
 
@@ -273,40 +273,11 @@ function buildLiveRemuxManifestUrl(streamUrl) {
       return null
     }
 
-    parsed.pathname = `/api/v1/vod/${match[1]}/manifest.m3u8`
+    parsed.pathname = `/api/v1/live/${match[1]}/manifest.m3u8`
     return parsed.toString()
   } catch {
     return null
   }
-}
-
-function normalizeProbeCodecName(value = '') {
-  return String(value || '').trim().toLowerCase()
-}
-
-function isBrowserSafeVideoCodec(videoCodec = '', browserCapabilities = {}) {
-  const normalizedCodec = normalizeProbeCodecName(videoCodec)
-  if (!normalizedCodec) {
-    return true
-  }
-
-  if (['h264', 'avc1', 'avc', 'mpeg4', 'mp4v'].includes(normalizedCodec)) {
-    return true
-  }
-
-  if (['hevc', 'h265', 'hvc1', 'hev1'].includes(normalizedCodec)) {
-    return Boolean(browserCapabilities.isSafari || browserCapabilities.isIOS)
-  }
-
-  if (['vp9', 'vp09'].includes(normalizedCodec)) {
-    return Boolean(browserCapabilities.isChromium || browserCapabilities.isFirefox)
-  }
-
-  if (['av1', 'av01'].includes(normalizedCodec)) {
-    return Boolean(browserCapabilities.isChromium || browserCapabilities.isFirefox)
-  }
-
-  return false
 }
 
 function isHighRiskLiveChannel(channel = {}) {
@@ -319,24 +290,32 @@ function isHighRiskLiveChannel(channel = {}) {
   )
 }
 
-function shouldPreferLiveRemux({ probe, browserCapabilities = {}, channel = null } = {}) {
-  if (probe?.playbackStrategy === 'remux-hls' && probe?.remuxReason !== 'source-not-seekable') {
-    return true
+function normalizeLiveCompatibilityHint(value = '') {
+  const normalized = String(value || '').trim().toLowerCase()
+  if (['safe-direct', 'prefer-remux', 'fallback-remux'].includes(normalized)) {
+    return normalized
   }
 
-  if (probe?.audioBrowserSupported === false) {
-    return true
+  return 'safe-direct'
+}
+
+function resolveLiveCompatibilityHint(channel = {}) {
+  const hintedValue = normalizeLiveCompatibilityHint(channel?.compatibilityHint)
+  if (hintedValue !== 'safe-direct') {
+    return hintedValue
   }
 
-  if (!isBrowserSafeVideoCodec(probe?.videoCodec, browserCapabilities)) {
-    return true
+  return isHighRiskLiveChannel(channel) ? 'prefer-remux' : 'safe-direct'
+}
+
+function getLivePlaybackModeLabel(useRemuxFallback, sourceType = '') {
+  if (useRemuxFallback) {
+    return 'Live Remux'
   }
 
-  if (isHighRiskLiveChannel(channel) && !(browserCapabilities.isSafari || browserCapabilities.isIOS)) {
-    return true
-  }
-
-  return false
+  return String(sourceType || '').trim().toLowerCase() === 'mpegts'
+    ? 'Direct MPEG-TS'
+    : 'Direct HLS'
 }
 
 function buildLivePageStateKey(userCode) {
@@ -408,6 +387,7 @@ export default function PlayerPage() {
   const nativePlaybackCleanupRef = useRef(() => {})
   const playbackRecoveryTimeoutRef = useRef(null)
   const playbackStartupTimeoutRef = useRef(null)
+  const playbackStartupDeadlineRef = useRef(0)
   const playbackStartedRef = useRef(false)
   const playbackModeRef = useRef('idle')
   const liveFallbackReasonRef = useRef('')
@@ -481,17 +461,21 @@ export default function PlayerPage() {
   
   const debouncedSearch = useDebounce(searchQuery, 300)
   const liveStreamUrl = isVodMode ? '' : String(currentChannel?.url || '').trim()
-  const liveRemuxManifestUrl = useMemo(() => buildLiveRemuxManifestUrl(liveStreamUrl), [liveStreamUrl])
-  const {
-    data: liveSourceProbe,
-    error: liveSourceProbeError
-  } = useStreamSourceProbe(liveStreamUrl, Boolean(liveStreamUrl) && !isVodMode)
+  const liveCompatibilityHint = isVodMode ? 'safe-direct' : resolveLiveCompatibilityHint(currentChannel)
+  const liveRemuxManifestUrl = useMemo(() => {
+    const explicitRemuxUrl = String(currentChannel?.remuxUrl || '').trim()
+    return explicitRemuxUrl || buildLiveRemuxManifestUrl(liveStreamUrl)
+  }, [currentChannel?.remuxUrl, liveStreamUrl])
   const livePlaybackUrl = liveUseRemuxFallback ? (liveRemuxManifestUrl || liveStreamUrl) : liveStreamUrl
   const livePlaybackSourceType = liveUseRemuxFallback
     ? 'hls'
     : inferLiveContainerFromStreamUrl(liveStreamUrl) === 'mpegts'
       ? 'mpegts'
       : String(currentChannel?.sourceType || '').trim().toLowerCase()
+  const livePlaybackModeLabel = useMemo(
+    () => getLivePlaybackModeLabel(liveUseRemuxFallback, livePlaybackSourceType),
+    [livePlaybackSourceType, liveUseRemuxFallback]
+  )
 
   useEffect(() => {
     userRef.current = user
@@ -860,9 +844,11 @@ export default function PlayerPage() {
 
   useEffect(() => {
     liveFallbackReasonRef.current = ''
-    setLiveUseRemuxFallback(false)
+    playbackStartedRef.current = false
+    playbackStartupDeadlineRef.current = 0
+    setLiveUseRemuxFallback(liveCompatibilityHint === 'prefer-remux' && Boolean(liveRemuxManifestUrl))
     setPlaybackNonce(0)
-  }, [liveStreamUrl])
+  }, [liveCompatibilityHint, liveRemuxManifestUrl, liveStreamUrl])
 
   const clearPlaybackStartupTimeout = useCallback(() => {
     if (playbackStartupTimeoutRef.current) {
@@ -880,6 +866,7 @@ export default function PlayerPage() {
 
   const markPlaybackReady = useCallback(() => {
     playbackStartedRef.current = true
+    playbackStartupDeadlineRef.current = 0
     clearPlaybackStartupTimeout()
     setLoading(false)
     setError(null)
@@ -892,6 +879,7 @@ export default function PlayerPage() {
 
     liveFallbackReasonRef.current = reason
     playbackStartedRef.current = false
+    playbackStartupDeadlineRef.current = 0
     clearPlaybackStartupTimeout()
     clearPlaybackRecoveryTimeout()
     setError(null)
@@ -903,64 +891,6 @@ export default function PlayerPage() {
     clearPlaybackStartupTimeout,
     isVodMode,
     liveRemuxManifestUrl,
-    liveStreamUrl,
-    liveUseRemuxFallback
-  ])
-
-  useEffect(() => {
-    if (
-      isVodMode
-      || !liveStreamUrl
-      || !liveRemuxManifestUrl
-      || liveUseRemuxFallback
-      || playbackStartedRef.current
-    ) {
-      return
-    }
-
-    if (!shouldPreferLiveRemux({
-      probe: liveSourceProbe,
-      browserCapabilities,
-      channel: currentChannel
-    })) {
-      return
-    }
-
-    activateLiveRemuxFallback(liveSourceProbe?.remuxReason || 'probe-remux-recommended')
-  }, [
-    activateLiveRemuxFallback,
-    browserCapabilities,
-    currentChannel,
-    isVodMode,
-    liveRemuxManifestUrl,
-    liveSourceProbe,
-    liveStreamUrl,
-    liveUseRemuxFallback
-  ])
-
-  useEffect(() => {
-    if (
-      isVodMode
-      || !liveStreamUrl
-      || !liveRemuxManifestUrl
-      || liveUseRemuxFallback
-      || !liveSourceProbeError
-      || playbackStartedRef.current
-    ) {
-      return
-    }
-
-    if (!isHighRiskLiveChannel(currentChannel)) {
-      return
-    }
-
-    activateLiveRemuxFallback('probe-request-failed')
-  }, [
-    activateLiveRemuxFallback,
-    currentChannel,
-    isVodMode,
-    liveRemuxManifestUrl,
-    liveSourceProbeError,
     liveStreamUrl,
     liveUseRemuxFallback
   ])
@@ -1107,8 +1037,27 @@ export default function PlayerPage() {
     }, delayMs)
   }, [clearPlaybackRecoveryTimeout, isVodMode, recoverPlayback])
 
-  const scheduleStartupWatchdog = useCallback((hlsInstance = null) => {
+  const scheduleStartupWatchdog = useCallback(({ hlsInstance = null, strategy = 'direct', resetDeadline = false } = {}) => {
+    const strategyTimeoutMs = strategy === 'remux'
+      ? LIVE_REMUX_STARTUP_TIMEOUT_MS
+      : LIVE_DIRECT_STARTUP_TIMEOUT_MS
+
     clearPlaybackStartupTimeout()
+    if (resetDeadline || !playbackStartupDeadlineRef.current) {
+      playbackStartupDeadlineRef.current = Date.now() + strategyTimeoutMs
+    }
+
+    const remainingMs = playbackStartupDeadlineRef.current - Date.now()
+    if (remainingMs <= 0) {
+      if (strategy !== 'remux' && activateLiveRemuxFallback('startup-timeout')) {
+        return
+      }
+
+      setLoading(false)
+      setError('Yayin baslatilamadi. Kanal codec olarak bu tarayici ile uyumsuz olabilir.')
+      return
+    }
+
     playbackStartupTimeoutRef.current = setTimeout(() => {
       playbackStartupTimeoutRef.current = null
 
@@ -1128,25 +1077,25 @@ export default function PlayerPage() {
 
       if (hlsInstance && downgradeHlsPlayback(hlsInstance)) {
         schedulePlaybackRecovery(80)
-        scheduleStartupWatchdog(hlsInstance)
+        scheduleStartupWatchdog({ hlsInstance, strategy })
         return
       }
 
       void attemptVideoPlayback({ allowMutedFallback: !video.muted })
         .then((didStart) => {
-          if (didStart) {
-            scheduleStartupWatchdog(hlsInstance)
+          if (didStart && Date.now() < playbackStartupDeadlineRef.current) {
+            scheduleStartupWatchdog({ hlsInstance, strategy })
             return
           }
 
-          if (activateLiveRemuxFallback('startup-timeout')) {
+          if (strategy !== 'remux' && activateLiveRemuxFallback('startup-timeout')) {
             return
           }
 
           setLoading(false)
           setError('Yayin baslatilamadi. Kanal codec olarak bu tarayici ile uyumsuz olabilir.')
         })
-    }, LIVE_STARTUP_TIMEOUT_MS)
+    }, Math.max(1200, Math.min(3500, remainingMs)))
   }, [
     activateLiveRemuxFallback,
     attemptVideoPlayback,
@@ -1159,6 +1108,7 @@ export default function PlayerPage() {
   useEffect(() => () => {
     clearPlaybackStartupTimeout()
     clearPlaybackRecoveryTimeout()
+    playbackStartupDeadlineRef.current = 0
   }, [clearPlaybackRecoveryTimeout, clearPlaybackStartupTimeout])
 
   useEffect(() => {
@@ -1206,6 +1156,7 @@ export default function PlayerPage() {
 
     nativePlaybackCleanupRef.current?.()
     playbackStartedRef.current = false
+    playbackStartupDeadlineRef.current = 0
     clearPlaybackStartupTimeout()
     clearPlaybackRecoveryTimeout()
     setError(null)
@@ -1275,7 +1226,10 @@ export default function PlayerPage() {
       video.src = url
       video.load()
       resumeLivePlayback()
-      scheduleStartupWatchdog()
+      scheduleStartupWatchdog({
+        strategy: liveUseRemuxFallback ? 'remux' : 'direct',
+        resetDeadline: true
+      })
     /* legacy branch removed
       })
         if (data.fatal) setError('Yayın yüklenemedi')
@@ -1309,7 +1263,11 @@ export default function PlayerPage() {
 
         nudgeVideoToLiveEdge()
         resumeLivePlayback()
-        scheduleStartupWatchdog(hls)
+        scheduleStartupWatchdog({
+          hlsInstance: hls,
+          strategy: liveUseRemuxFallback ? 'remux' : 'direct',
+          resetDeadline: true
+        })
       })
       hls.on(Hls.Events.ERROR, (_, data) => {
         if (!data?.fatal) {
@@ -1329,7 +1287,10 @@ export default function PlayerPage() {
         if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
           if (downgradeHlsPlayback(hls)) {
             schedulePlaybackRecovery(60)
-            scheduleStartupWatchdog(hls)
+            scheduleStartupWatchdog({
+              hlsInstance: hls,
+              strategy: liveUseRemuxFallback ? 'remux' : 'direct'
+            })
             return
           }
 
@@ -1346,7 +1307,10 @@ export default function PlayerPage() {
 
         if (downgradeHlsPlayback(hls)) {
           schedulePlaybackRecovery(80)
-          scheduleStartupWatchdog(hls)
+          scheduleStartupWatchdog({
+            hlsInstance: hls,
+            strategy: liveUseRemuxFallback ? 'remux' : 'direct'
+          })
           return
         }
 
@@ -1376,7 +1340,10 @@ export default function PlayerPage() {
       video.src = url
       video.load()
       resumeLivePlayback()
-      scheduleStartupWatchdog()
+      scheduleStartupWatchdog({
+        strategy: liveUseRemuxFallback ? 'remux' : 'direct',
+        resetDeadline: true
+      })
     } else if (isMpegTsSource && supportsMpegTs) {
       playbackModeRef.current = 'mpegts'
       const player = mpegts.createPlayer({
@@ -1398,7 +1365,10 @@ export default function PlayerPage() {
       player.play()
         .then(() => {
           void attemptVideoPlayback({ allowMutedFallback: !video.muted })
-          scheduleStartupWatchdog()
+          scheduleStartupWatchdog({
+            strategy: liveUseRemuxFallback ? 'remux' : 'direct',
+            resetDeadline: true
+          })
         })
         .catch(() => {
           clearPlaybackStartupTimeout()
@@ -1419,6 +1389,7 @@ export default function PlayerPage() {
     
     return () => {
       teardownPlaybackBridges()
+      playbackStartupDeadlineRef.current = 0
       hlsPlayerRef.current?.destroy()
       hlsPlayerRef.current = null
       playerRef.current?.destroy()
@@ -1439,6 +1410,7 @@ export default function PlayerPage() {
     markPlaybackReady,
     nudgeVideoToLiveEdge,
     attemptVideoPlayback,
+    liveUseRemuxFallback,
     livePlaybackSourceType,
     livePlaybackUrl,
     playbackNonce,
@@ -1489,6 +1461,7 @@ export default function PlayerPage() {
 
   const handleRetryPlayback = useCallback(() => {
     playbackStartedRef.current = false
+    playbackStartupDeadlineRef.current = 0
     clearPlaybackStartupTimeout()
     clearPlaybackRecoveryTimeout()
     setError(null)
@@ -1674,7 +1647,12 @@ export default function PlayerPage() {
                 >
                   <div className="mb-2">
                     <h2 className="text-lg font-bold text-white">{currentChannel?.name}</h2>
-                    <p className="text-xs text-white/60">{currentChannel?.group}</p>
+                    <div className="mt-1 flex items-center gap-2">
+                      <p className="text-xs text-white/60">{currentChannel?.group}</p>
+                      <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold tracking-wide bg-white/10 text-white/75">
+                        {livePlaybackModeLabel}
+                      </span>
+                    </div>
                   </div>
                   
                   <div className="flex items-center gap-3">
@@ -1727,7 +1705,12 @@ export default function PlayerPage() {
                   </div>
                   <div>
                     <h3 className="text-sm font-semibold text-white">{currentChannel?.name}</h3>
-                    <p className="text-xs text-white/50">{currentChannel?.group}</p>
+                    <div className="mt-1 flex items-center gap-2">
+                      <p className="text-xs text-white/50">{currentChannel?.group}</p>
+                      <span className="px-2 py-0.5 rounded-full bg-white/5 text-[10px] font-medium text-white/60">
+                        {livePlaybackModeLabel}
+                      </span>
+                    </div>
                   </div>
                 </div>
                 

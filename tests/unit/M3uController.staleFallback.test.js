@@ -45,6 +45,25 @@ describe('M3uController live proxy helpers', () => {
     ])
   })
 
+  test('builds live remux manifest url with deduplicated fallback targets', () => {
+    const controller = buildController()
+    const url = controller._buildLiveRemuxManifestUrl(
+      'https://flixify.pro/api/v1',
+      'ABC123',
+      'jwt-token',
+      'http://example.com:80/live/84.m3u8',
+      [
+        'http://example.com/live/84.m3u8',
+        'http://backup.example.com/live/84.ts'
+      ]
+    )
+
+    const parsed = new URL(url)
+    expect(parsed.pathname).toBe('/api/v1/live/ABC123/manifest.m3u8')
+    expect(parsed.searchParams.get('url')).toBe('http://example.com:80/live/84.m3u8')
+    expect(parsed.searchParams.getAll('alt')).toEqual(['http://backup.example.com/live/84.ts'])
+  })
+
   test('deduplicates alternate upstream targets that differ only by default port', () => {
     const controller = buildController()
     const url = controller._buildStreamProxyUrl(
@@ -62,6 +81,21 @@ describe('M3uController live proxy helpers', () => {
     const parsed = new URL(url)
     expect(parsed.searchParams.get('url')).toBe('http://example.com:80/live/84.m3u8')
     expect(parsed.searchParams.getAll('alt')).toEqual(['http://example.com:80/live/84.ts'])
+  })
+
+  test('unwraps nested stream proxy urls into direct live remux candidates', () => {
+    const controller = buildController()
+    const targetUrls = controller._resolveLiveRemuxTargetUrls(
+      'https://api-v4.flixify.pro/api/v1/stream/ABC123?token=jwt-token&url=http%3A%2F%2Fprovider.example%3A80%2Flive%2F81.m3u8&alt=http%3A%2F%2Fprovider.example%2Flive%2F81.m3u8',
+      [
+        'https://api-v4.flixify.pro/api/v1/stream/ABC123?token=jwt-token&url=http%3A%2F%2Fbackup.example%2Flive%2F81.ts'
+      ]
+    )
+
+    expect(targetUrls).toEqual([
+      'http://provider.example:80/live/81.m3u8',
+      'http://backup.example/live/81.ts'
+    ])
   })
 
   test('builds stream proxy url without upstream hint when no index is provided', () => {

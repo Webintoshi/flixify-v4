@@ -519,7 +519,8 @@ function normalizeLiveCatalogPayloadUrls(payload = {}) {
     ? payload.items.map((item) => ({
       ...item,
       logo: normalizeProxyResourceUrl(item?.logo),
-      url: normalizeProxyResourceUrl(item?.url)
+      url: normalizeProxyResourceUrl(item?.url),
+      remuxUrl: normalizeProxyResourceUrl(item?.remuxUrl)
     }))
     : []
 

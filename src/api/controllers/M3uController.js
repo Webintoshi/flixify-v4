@@ -39,11 +39,16 @@ class M3uController {
     this._userProviderOrigins = new Map();
     this._userAllowedOrigins = new Map();
     this._vodSessions = new Map();
+    this._liveSessions = new Map();
     this._rawPlaylistInflight = new Map();
     this._catalogInflight = new Map();
     this._sharedLiveCatalogInflight = new Map();
     this._allowedOriginsCacheTtlSec = parseInt(process.env.ALLOWED_ORIGINS_CACHE_TTL_SEC, 10) || 180;
     this._vodSessionTtlMs = parseInt(process.env.VOD_SESSION_TTL_MS, 10) || 60 * 60 * 1000;
+    this._liveSessionTtlMs = parseInt(process.env.LIVE_SESSION_TTL_MS, 10) || 15 * 60 * 1000;
+    this._liveManifestReadyTimeoutMs = parseInt(process.env.LIVE_MANIFEST_READY_TIMEOUT_MS, 10) || 15000;
+    this._liveManifestProbeTimeoutMs = parseInt(process.env.LIVE_MANIFEST_PROBE_TIMEOUT_MS, 10) || 7000;
+    this._liveProbeTimeoutMs = parseInt(process.env.LIVE_PROBE_TIMEOUT_MS, 10) || 6000;
     this._playlistCacheTtlSec = parseInt(process.env.PLAYLIST_CACHE_TTL_SEC, 10) || 900;
     this._catalogCacheTtlSec = parseInt(process.env.CATALOG_CACHE_TTL_SEC, 10) || 900;
     this._liveCatalogCacheTtlSec = parseInt(process.env.LIVE_CATALOG_CACHE_TTL_SEC, 10) || 300;
@@ -157,6 +162,10 @@ class M3uController {
     return path.join(os.tmpdir(), 'flixify-v4-vod');
   }
 
+  _getLiveBaseDir() {
+    return path.join(os.tmpdir(), 'flixify-v4-live');
+  }
+
   _getVodSessionId(code, targetUrl) {
     return crypto
       .createHash('sha1')
@@ -167,6 +176,18 @@ class M3uController {
 
   _getVodSessionDir(sessionId) {
     return path.join(this._getVodBaseDir(), sessionId);
+  }
+
+  _getLiveSessionId(code, targetUrls = []) {
+    return crypto
+      .createHash('sha1')
+      .update(`${code}:${targetUrls.join('|')}`)
+      .digest('hex')
+      .slice(0, 24);
+  }
+
+  _getLiveSessionDir(sessionId) {
+    return path.join(this._getLiveBaseDir(), sessionId);
   }
 
   _normalizeProviderPlaylistUrl(value) {
@@ -791,6 +812,74 @@ class M3uController {
       transcodeAudio: true,
       audioBrowserSupported: hasAudio ? isBrowserSupportedAudioCodec(audioCodec) : true
     };
+  }
+
+  _getLiveTranscodeProfile() {
+    return {
+      transcodeVideo: true,
+      transcodeAudio: true
+    };
+  }
+
+  _isHighRiskLiveName(value = '') {
+    return /\b(4k|uhd|hevc|h\.?265|h265|raw)\b/i.test(String(value || ''));
+  }
+
+  _buildLiveCompatibilityHint(liveItem = {}) {
+    const sourceType = String(liveItem?.sourceType || '').trim().toLowerCase();
+    const name = String(liveItem?.name || '').trim();
+    const group = String(liveItem?.group || '').trim();
+
+    if (
+      sourceType === 'mpegts'
+      || sourceType === 'unknown'
+      || this._isHighRiskLiveName(name)
+      || this._isHighRiskLiveName(group)
+    ) {
+      return 'prefer-remux';
+    }
+
+    if (Array.isArray(liveItem?.backupUrls) && liveItem.backupUrls.length > 0) {
+      return 'fallback-remux';
+    }
+
+    return 'safe-direct';
+  }
+
+  _extractNestedProxyTargetUrls(targetUrl) {
+    const normalizedTargetUrl = String(targetUrl || '').trim();
+    if (!normalizedTargetUrl) {
+      return [];
+    }
+
+    try {
+      const parsed = new URL(normalizedTargetUrl);
+      const isInternalStreamRoute = /\/api\/v1\/stream\/[^/]+$/i.test(parsed.pathname || '');
+      if (!isInternalStreamRoute) {
+        return [normalizedTargetUrl];
+      }
+
+      const primaryTargetUrl = String(parsed.searchParams.get('url') || '').trim();
+      const alternateTargetUrls = parsed.searchParams.getAll('alt')
+        .map((value) => String(value || '').trim())
+        .filter(Boolean);
+
+      return this._dedupeTargetUrlList([primaryTargetUrl, ...alternateTargetUrls]);
+    } catch {
+      return [normalizedTargetUrl];
+    }
+  }
+
+  _resolveLiveRemuxTargetUrls(targetUrl, rawAlternateTargetUrls = []) {
+    const nestedTargets = this._extractNestedProxyTargetUrls(targetUrl);
+    const primaryTargetUrl = nestedTargets[0] || String(targetUrl || '').trim();
+    const extractedAlternateTargets = nestedTargets.slice(1);
+    const requestedAlternateTargets = this._getRequestedAlternateTargetUrls(rawAlternateTargetUrls)
+      .flatMap((value) => this._extractNestedProxyTargetUrls(value));
+
+    return this._dedupeTargetUrlList(
+      [primaryTargetUrl, ...extractedAlternateTargets, ...requestedAlternateTargets]
+    );
   }
 
   _validateStreamResponse(response) {
@@ -1456,6 +1545,21 @@ class M3uController {
     return `${baseApiUrl}/vod/${encodeURIComponent(code)}/manifest.m3u8?token=${encodeURIComponent(token)}&url=${encodeURIComponent(targetUrl)}`;
   }
 
+  _buildLiveRemuxManifestUrl(baseApiUrl, code, token, targetUrl, alternateTargetUrls = []) {
+    const queryParams = new URLSearchParams({
+      token: String(token || ''),
+      url: String(targetUrl || '')
+    });
+
+    this._dedupeTargetUrlList(alternateTargetUrls, [targetUrl])
+      .slice(0, 4)
+      .forEach((alternateTargetUrl) => {
+        queryParams.append('alt', alternateTargetUrl);
+      });
+
+    return `${baseApiUrl}/live/${encodeURIComponent(code)}/manifest.m3u8?${queryParams.toString()}`;
+  }
+
   _buildLogoProxyUrl(baseApiUrl, code, token, targetUrl) {
     return `${baseApiUrl}/m3u/logo/${encodeURIComponent(code)}?token=${encodeURIComponent(token)}&url=${encodeURIComponent(targetUrl)}`;
   }
@@ -1559,6 +1663,48 @@ class M3uController {
     return 'application/octet-stream';
   }
 
+  _getLiveAssetContentType(fileName) {
+    if (fileName.endsWith('.m3u8')) {
+      return 'application/vnd.apple.mpegurl';
+    }
+
+    if (fileName.endsWith('.ts')) {
+      return 'video/mp2t';
+    }
+
+    return 'application/octet-stream';
+  }
+
+  _isVodManifestReady(content = '') {
+    return String(content || '').includes('#EXTM3U')
+      && (String(content || '').includes('.m4s') || String(content || '').includes('init.mp4'));
+  }
+
+  _isLiveManifestReady(content = '') {
+    const normalizedContent = String(content || '');
+    return normalizedContent.includes('#EXTM3U')
+      && /(^|\n)(?!#).+\.ts(\?|$)/im.test(normalizedContent);
+  }
+
+  _rewriteLiveManifest(content, context) {
+    return content
+      .split(/\r?\n/)
+      .map((line) => {
+        const trimmed = line.trim();
+        if (!trimmed) {
+          return line;
+        }
+
+        if (trimmed.startsWith('#')) {
+          return line;
+        }
+
+        const assetName = path.basename(trimmed);
+        return `${context.baseApiUrl}/live/${encodeURIComponent(context.code)}/${encodeURIComponent(context.sessionId)}/${encodeURIComponent(assetName)}?token=${encodeURIComponent(context.token)}`;
+      })
+      .join('\n');
+  }
+
   _getLatestVodSessionForCode(code) {
     const candidates = Array.from(this._vodSessions.values())
       .filter((session) => session.code === code)
@@ -1567,7 +1713,7 @@ class M3uController {
     return candidates[0] || null;
   }
 
-  async _sendVodAssetFromSession(res, session, assetName) {
+  async _sendVodAssetFromSession(req, res, session, assetName) {
     session.lastAccessAt = Date.now();
 
     const sanitizedName = path.basename(assetName);
@@ -1584,10 +1730,62 @@ class M3uController {
       }
     }
 
-    res.set({
-      'Content-Type': this._getVodAssetContentType(sanitizedName),
-      'Cache-Control': 'private, no-store'
-    });
+    this._setProxyMediaHeaders(res, null, req, this._getVodAssetContentType(sanitizedName));
+
+    fs.createReadStream(assetPath).pipe(res);
+    return undefined;
+  }
+
+  async _cleanupLiveSession(sessionId) {
+    const session = this._liveSessions.get(sessionId);
+    if (session?.process && !session.process.killed) {
+      session.process.kill('SIGTERM');
+    }
+
+    this._liveSessions.delete(sessionId);
+
+    try {
+      await fsp.rm(this._getLiveSessionDir(sessionId), {
+        recursive: true,
+        force: true
+      });
+    } catch (error) {
+      logger.warn('Failed to remove live remux session directory', {
+        sessionId,
+        error: error.message
+      });
+    }
+  }
+
+  async _cleanupExpiredLiveSessions() {
+    const now = Date.now();
+    const expiredSessionIds = Array.from(this._liveSessions.values())
+      .filter((session) => now - session.lastAccessAt > this._liveSessionTtlMs)
+      .map((session) => session.id);
+
+    for (const sessionId of expiredSessionIds) {
+      await this._cleanupLiveSession(sessionId);
+    }
+  }
+
+  async _sendLiveAssetFromSession(req, res, session, assetName) {
+    session.lastAccessAt = Date.now();
+
+    const sanitizedName = path.basename(assetName);
+    const assetPath = path.join(session.dir, sanitizedName);
+    const fileExists = await fsp.access(assetPath).then(() => true).catch(() => false);
+
+    if (!fileExists) {
+      const maybeReady = await this._waitForFile(assetPath, null, 6000);
+      if (!maybeReady) {
+        return res.status(404).json({
+          error: 'Live asset not ready',
+          message: 'Playback asset is still being generated'
+        });
+      }
+    }
+
+    this._setProxyMediaHeaders(res, null, req, this._getLiveAssetContentType(sanitizedName));
 
     fs.createReadStream(assetPath).pipe(res);
     return undefined;
@@ -1731,6 +1929,284 @@ class M3uController {
     });
 
     this._vodSessions.set(sessionId, session);
+    return session;
+  }
+
+  async _validateLiveRemuxCandidate(req, code, targetUrl, logContext = {}) {
+    const normalizedTargetUrl = String(targetUrl || '').trim();
+    if (!normalizedTargetUrl) {
+      const error = new Error('Live remux target URL is missing');
+      error.statusCode = 400;
+      throw error;
+    }
+
+    const containerType = this._getContainerType(normalizedTargetUrl);
+    if (containerType === 'hls') {
+      const playlistResponse = await this._requestViaProviderProxy({
+        method: 'get',
+        url: normalizedTargetUrl,
+        responseType: 'text',
+        timeout: this._liveManifestProbeTimeoutMs,
+        headers: this._buildUpstreamStreamHeaders(req, 'application/vnd.apple.mpegurl,*/*', normalizedTargetUrl),
+        validateStatus: () => true
+      }, this._validatePlaylistResponse.bind(this), {
+        logContext
+      });
+
+      const resolvedPlaylistUrl = this._resolveUpstreamResponseUrl(normalizedTargetUrl, playlistResponse);
+      await this._rememberHlsAllowedOrigins(code, playlistResponse.data, resolvedPlaylistUrl);
+      return resolvedPlaylistUrl;
+    }
+
+    let upstream = await this._requestViaProviderProxy({
+      method: 'head',
+      url: normalizedTargetUrl,
+      timeout: this._liveManifestProbeTimeoutMs,
+      headers: this._buildUpstreamStreamHeaders(req, '*/*', normalizedTargetUrl),
+      validateStatus: () => true
+    }, null, {
+      logContext
+    });
+
+    if ([405, 501].includes(upstream.status)) {
+      upstream = await this._requestViaProviderProxy({
+        method: 'get',
+        url: normalizedTargetUrl,
+        responseType: 'stream',
+        timeout: this._liveManifestProbeTimeoutMs,
+        headers: {
+          ...this._buildUpstreamStreamHeaders(req, '*/*', normalizedTargetUrl),
+          Range: 'bytes=0-1'
+        },
+        validateStatus: () => true
+      }, this._validateStreamResponse.bind(this), {
+        logContext
+      });
+    }
+
+    try {
+      this._validateStreamResponse(upstream);
+      return this._resolveUpstreamResponseUrl(normalizedTargetUrl, upstream);
+    } finally {
+      this._destroyResponseStream(upstream);
+    }
+  }
+
+  async _selectLiveRemuxSourceTarget(req, code, targetCandidates = [], logContext = {}) {
+    const dedupedCandidates = this._dedupeTargetUrlList(targetCandidates).slice(0, 5);
+    let lastError = null;
+
+    for (const candidateUrl of dedupedCandidates) {
+      try {
+        await this._assertAllowedProxyTarget(code, candidateUrl);
+        return await this._validateLiveRemuxCandidate(req, code, candidateUrl, {
+          ...logContext,
+          targetOrigin: this._getTargetOrigin(candidateUrl)
+        });
+      } catch (error) {
+        lastError = error;
+        logger.warn('Live remux candidate probe failed', {
+          ...logContext,
+          candidateUrl,
+          targetOrigin: this._getTargetOrigin(candidateUrl),
+          error: error.message,
+          statusCode: error.statusCode || error.response?.status || null
+        });
+      }
+    }
+
+    throw lastError || new Error('No live remux source target is reachable');
+  }
+
+  async _createLiveSession(req, code, targetCandidates = [], options = {}) {
+    const normalizedTargetCandidates = this._dedupeTargetUrlList(targetCandidates).slice(0, 5);
+    if (normalizedTargetCandidates.length === 0) {
+      const error = new Error('Live remux target URL is missing');
+      error.statusCode = 400;
+      throw error;
+    }
+
+    const sessionId = this._getLiveSessionId(code, normalizedTargetCandidates);
+    const sessionDir = this._getLiveSessionDir(sessionId);
+    const manifestPath = path.join(sessionDir, 'index.m3u8');
+    const forceRebuild = Boolean(options.forceRebuild);
+    const rebuildReason = String(options.rebuildReason || '').trim() || null;
+    const baseLogContext = {
+      route: '/api/v1/live/:code/manifest.m3u8',
+      correlationId: req?.correlationId || req?.headers?.['x-request-id'] || 'unknown',
+      userCode: this._maskUserCode(code),
+      sessionId,
+      releaseId: this._getReleaseId(req)
+    };
+
+    await this._cleanupExpiredLiveSessions();
+
+    const existingSession = this._liveSessions.get(sessionId);
+    if (existingSession && !forceRebuild) {
+      existingSession.lastAccessAt = Date.now();
+      const isProcessActive = Boolean(
+        existingSession.process &&
+        existingSession.process.exitCode === null &&
+        !existingSession.process.killed
+      );
+      const liveManifestLooksHealthy = await this._waitForFile(
+        existingSession.manifestPath,
+        (content) => this._isLiveManifestReady(content),
+        500
+      );
+      const existingSessionAgeMs = Date.now() - Number(existingSession.createdAt || 0);
+
+      if (isProcessActive && !existingSession.lastError && liveManifestLooksHealthy) {
+        return existingSession;
+      }
+
+      if (
+        isProcessActive &&
+        !existingSession.lastError &&
+        existingSessionAgeMs < this._liveManifestReadyTimeoutMs
+      ) {
+        return existingSession;
+      }
+
+      await this._cleanupLiveSession(sessionId);
+    } else if (existingSession && forceRebuild) {
+      await this._cleanupLiveSession(sessionId);
+    }
+
+    const ffmpegAvailable = await this._isCommandAvailable(this._ffmpegPath);
+    if (!ffmpegAvailable) {
+      const error = new Error('FFmpeg is not installed on the server');
+      error.statusCode = 503;
+      throw error;
+    }
+
+    await fsp.rm(sessionDir, { recursive: true, force: true });
+    await fsp.mkdir(sessionDir, { recursive: true });
+
+    const selectedTargetUrl = await this._selectLiveRemuxSourceTarget(
+      req,
+      code,
+      normalizedTargetCandidates,
+      {
+        ...baseLogContext,
+        rebuildReason
+      }
+    );
+    const proxyUrl = this._getPreferredProviderProxyUrl();
+    const profile = this._getLiveTranscodeProfile();
+
+    const args = ['-hide_banner', '-loglevel', 'error'];
+    if (proxyUrl) {
+      args.push('-http_proxy', proxyUrl);
+    }
+
+    args.push(
+      '-user_agent', this._providerUserAgent,
+      '-fflags', '+genpts',
+      '-reconnect', '1',
+      '-reconnect_streamed', '1',
+      '-reconnect_at_eof', '1',
+      '-reconnect_delay_max', '2',
+      '-i', selectedTargetUrl,
+      '-map', '0:v:0?',
+      '-map', '0:a:0?',
+      '-sn',
+      '-dn',
+      '-map_metadata', '-1'
+    );
+
+    const providerHeaders = this._buildProviderSourceHeaders(selectedTargetUrl);
+    if (providerHeaders.length > 0) {
+      args.splice(args.indexOf('-i'), 0, '-headers', `${providerHeaders.join('\r\n')}\r\n`);
+    }
+
+    if (profile.transcodeVideo) {
+      args.push(
+        '-c:v', 'libx264',
+        '-preset', 'veryfast',
+        '-tune', 'zerolatency',
+        '-crf', '23',
+        '-pix_fmt', 'yuv420p',
+        '-profile:v', 'main',
+        '-level', '4.1',
+        '-g', '48',
+        '-keyint_min', '48',
+        '-sc_threshold', '0'
+      );
+    } else {
+      args.push('-c:v', 'copy');
+    }
+
+    args.push(
+      '-c:a', 'aac',
+      '-b:a', '128k',
+      '-ac', '2',
+      '-max_muxing_queue_size', '2048',
+      '-muxdelay', '0',
+      '-muxpreload', '0',
+      '-f', 'hls',
+      '-hls_time', String(Number.parseInt(process.env.LIVE_REMUX_HLS_TIME || '3', 10) || 3),
+      '-hls_list_size', String(Number.parseInt(process.env.LIVE_REMUX_HLS_LIST_SIZE || '8', 10) || 8),
+      '-hls_allow_cache', '0',
+      '-hls_delete_threshold', '1',
+      '-hls_flags', 'delete_segments+independent_segments+omit_endlist+temp_file+program_date_time',
+      '-start_number', '0',
+      '-hls_segment_filename', path.join(sessionDir, 'segment_%05d.ts'),
+      manifestPath
+    );
+
+    const ffmpegProcess = spawn(this._ffmpegPath, args, {
+      cwd: sessionDir,
+      env: process.env,
+      stdio: ['ignore', 'ignore', 'pipe']
+    });
+
+    const session = {
+      id: sessionId,
+      code,
+      dir: sessionDir,
+      manifestPath,
+      process: ffmpegProcess,
+      targetCandidates: normalizedTargetCandidates,
+      selectedTargetUrl,
+      createdAt: Date.now(),
+      lastAccessAt: Date.now(),
+      lastError: null
+    };
+
+    ffmpegProcess.stderr.on('data', (chunk) => {
+      const message = chunk.toString().trim();
+      if (message) {
+        session.lastError = message;
+      }
+    });
+
+    ffmpegProcess.on('close', (exitCode) => {
+      session.process = null;
+      if (exitCode === 0) {
+        session.lastError = null;
+        return;
+      }
+
+      session.lastError = session.lastError || `ffmpeg exited with code ${exitCode}`;
+      logger.error('Live remux session ended unexpectedly', {
+        ...baseLogContext,
+        selectedTargetUrl,
+        targetOrigin: this._getTargetOrigin(selectedTargetUrl),
+        exitCode,
+        rebuildReason,
+        error: session.lastError
+      });
+    });
+
+    this._liveSessions.set(sessionId, session);
+    logger.info('Live remux session started', {
+      ...baseLogContext,
+      selectedTargetUrl,
+      targetOrigin: this._getTargetOrigin(selectedTargetUrl),
+      rebuildReason
+    });
+
     return session;
   }
 
@@ -2154,7 +2630,15 @@ class M3uController {
               null,
               alternateTargetUrls
             ),
-            sourceType: item.sourceType
+            remuxUrl: this._buildLiveRemuxManifestUrl(
+              baseApiUrl,
+              code,
+              accessToken,
+              targetUrl,
+              alternateTargetUrls
+            ),
+            sourceType: item.sourceType,
+            compatibilityHint: this._buildLiveCompatibilityHint(item)
           };
         })
         .filter(Boolean);
@@ -2486,78 +2970,117 @@ class M3uController {
   probeStream = asyncHandler(async (req, res) => {
     const { code } = req.params;
     const targetUrl = req.query.url;
+    const targetCandidates = this._resolveLiveRemuxTargetUrls(targetUrl, req.query.alt);
+    const normalizedPrimaryTargetUrl = targetCandidates[0] || String(targetUrl || '').trim();
+    const isLiveLikeProbe = ['hls', 'ts', 'unknown'].includes(this._getContainerType(normalizedPrimaryTargetUrl));
 
     try {
       const accessToken = this._resolveAccessToken(req);
       this._verifyAccessToken(accessToken, code);
-      await this._assertAllowedProxyTarget(code, targetUrl);
 
-      let upstream = await this._requestViaProviderProxy({
-        method: 'head',
-        url: targetUrl,
-        headers: this._buildUpstreamStreamHeaders(req, '*/*', targetUrl),
-        validateStatus: () => true
-      });
+      let resolvedTargetUrl = null;
+      let baseProbe = null;
 
-      if ([405, 501].includes(upstream.status)) {
-        upstream = await this._requestViaProviderProxy({
-          method: 'get',
-          url: targetUrl,
-          responseType: 'stream',
-          timeout: this._streamProxyTimeoutMs,
-          headers: {
-            ...this._buildUpstreamStreamHeaders(req, '*/*', targetUrl),
-            Range: 'bytes=0-1'
-          },
-          validateStatus: () => true
-        });
-      }
-
-      if (upstream.status >= 400) {
-        const error = new Error(`Provider returned HTTP ${upstream.status}`);
-        error.statusCode = upstream.status;
-        throw error;
-      }
-
-      const baseProbe = this._buildProbePayload(targetUrl, upstream);
-      this._destroyResponseStream(upstream);
-
-      // Some providers omit Accept-Ranges on HEAD but still support byte-range GET.
-      if (!baseProbe.acceptRanges && baseProbe.containerType !== 'hls') {
+      for (const candidateUrl of targetCandidates) {
         try {
-          const rangeProbeResponse = await this._requestViaProviderProxy({
-            method: 'get',
-            url: targetUrl,
-            responseType: 'stream',
-            timeout: this._streamProxyTimeoutMs,
-            headers: {
-              ...this._buildUpstreamStreamHeaders(req, '*/*', targetUrl),
-              Range: 'bytes=0-1'
-            },
+          await this._assertAllowedProxyTarget(code, candidateUrl);
+
+          let upstream = await this._requestViaProviderProxy({
+            method: 'head',
+            url: candidateUrl,
+            timeout: isLiveLikeProbe ? this._liveProbeTimeoutMs : this._upstreamTimeoutMs,
+            headers: this._buildUpstreamStreamHeaders(req, '*/*', candidateUrl),
             validateStatus: () => true
           });
 
-          const hasContentRange = String(rangeProbeResponse.headers['content-range'] || '')
-            .toLowerCase()
-            .startsWith('bytes');
-
-          if (rangeProbeResponse.status === 206 || hasContentRange) {
-            baseProbe.acceptRanges = true;
-            baseProbe.seekableGuess = true;
+          if ([405, 501].includes(upstream.status)) {
+            upstream = await this._requestViaProviderProxy({
+              method: 'get',
+              url: candidateUrl,
+              responseType: 'stream',
+              timeout: isLiveLikeProbe ? this._liveProbeTimeoutMs : this._streamProxyTimeoutMs,
+              headers: {
+                ...this._buildUpstreamStreamHeaders(req, '*/*', candidateUrl),
+                Range: 'bytes=0-1'
+              },
+              validateStatus: () => true
+            });
           }
 
-          this._destroyResponseStream(rangeProbeResponse);
-        } catch (rangeProbeError) {
-          logger.warn('Range probe fallback failed', {
+          if (upstream.status >= 400) {
+            const error = new Error(`Provider returned HTTP ${upstream.status}`);
+            error.statusCode = upstream.status;
+            throw error;
+          }
+
+          resolvedTargetUrl = this._resolveUpstreamResponseUrl(candidateUrl, upstream);
+          baseProbe = this._buildProbePayload(resolvedTargetUrl, upstream);
+          this._destroyResponseStream(upstream);
+
+          // Some providers omit Accept-Ranges on HEAD but still support byte-range GET.
+          if (!baseProbe.acceptRanges && baseProbe.containerType !== 'hls') {
+            try {
+              const rangeProbeResponse = await this._requestViaProviderProxy({
+                method: 'get',
+                url: resolvedTargetUrl,
+                responseType: 'stream',
+                timeout: isLiveLikeProbe ? this._liveProbeTimeoutMs : this._streamProxyTimeoutMs,
+                headers: {
+                  ...this._buildUpstreamStreamHeaders(req, '*/*', resolvedTargetUrl),
+                  Range: 'bytes=0-1'
+                },
+                validateStatus: () => true
+              });
+
+              const hasContentRange = String(rangeProbeResponse.headers['content-range'] || '')
+                .toLowerCase()
+                .startsWith('bytes');
+
+              if (rangeProbeResponse.status === 206 || hasContentRange) {
+                baseProbe.acceptRanges = true;
+                baseProbe.seekableGuess = true;
+              }
+
+              this._destroyResponseStream(rangeProbeResponse);
+            } catch (rangeProbeError) {
+              logger.warn('Range probe fallback failed', {
+                code,
+                targetUrl: resolvedTargetUrl,
+                error: rangeProbeError.message
+              });
+            }
+          }
+
+          if (baseProbe.containerType === 'hls') {
+            baseProbe.remuxReason = this._isHighRiskLiveName(resolvedTargetUrl) ? 'codec-risk' : null;
+          }
+          break;
+        } catch (candidateError) {
+          logger.warn('Probe target candidate failed', {
             code,
-            targetUrl,
-            error: rangeProbeError.message
+            targetUrl: candidateUrl,
+            error: candidateError.message,
+            statusCode: candidateError.statusCode || candidateError.response?.status || null
           });
         }
       }
 
-      const mediaAnalysis = await this._probeSourceWithFfprobe(targetUrl);
-      const probe = this._buildPlaybackProbePayload(targetUrl, baseProbe, mediaAnalysis);
+      if (!baseProbe || !resolvedTargetUrl) {
+        const error = new Error('Provider probe target is unreachable');
+        error.statusCode = 502;
+        throw error;
+      }
+
+      const mediaAnalysis = isLiveLikeProbe ? null : await this._probeSourceWithFfprobe(resolvedTargetUrl);
+      const probe = this._buildPlaybackProbePayload(resolvedTargetUrl, baseProbe, mediaAnalysis);
+      if (isLiveLikeProbe && this._isHighRiskLiveName(normalizedPrimaryTargetUrl)) {
+        probe.playbackStrategy = 'remux-hls';
+        probe.remuxRecommended = true;
+        probe.remuxFallback = true;
+        probe.remuxReason = probe.remuxReason || 'compatibility-risk';
+        probe.codecRisk = true;
+        probe.directPlayLikely = false;
+      }
 
       res.json({
         status: 'success',
@@ -2603,6 +3126,96 @@ class M3uController {
     }
   });
 
+  proxyLiveManifest = asyncHandler(async (req, res) => {
+    const { code } = req.params;
+    const accessToken = this._resolveAccessToken(req);
+    const targetUrls = this._resolveLiveRemuxTargetUrls(req.query.url, req.query.alt);
+
+    try {
+      this._verifyAccessToken(accessToken, code);
+
+      let session = await this._createLiveSession(req, code, targetUrls);
+      let manifestContent = await this._waitForFile(
+        session.manifestPath,
+        (content) => this._isLiveManifestReady(content),
+        this._liveManifestReadyTimeoutMs
+      );
+
+      if (!manifestContent) {
+        session = await this._createLiveSession(req, code, targetUrls, {
+          forceRebuild: true,
+          rebuildReason: 'manifest-timeout'
+        });
+        manifestContent = await this._waitForFile(
+          session.manifestPath,
+          (content) => this._isLiveManifestReady(content),
+          this._liveManifestReadyTimeoutMs
+        );
+      }
+
+      if (!manifestContent) {
+        const error = new Error(session.lastError || 'Live remux playlist is not ready yet');
+        error.statusCode = 504;
+        throw error;
+      }
+
+      session.lastAccessAt = Date.now();
+      this._setProxyMediaHeaders(res, null, req, 'application/vnd.apple.mpegurl');
+      res.send(this._rewriteLiveManifest(manifestContent, {
+        baseApiUrl: this._getBaseApiUrl(req),
+        code,
+        sessionId: session.id,
+        token: accessToken
+      }));
+    } catch (error) {
+      const statusCode = error.statusCode || 502;
+      logger.error('Live manifest proxy error', {
+        code,
+        targetUrls,
+        error: error.message,
+        statusCode
+      });
+
+      res.status(statusCode).json({
+        error: 'Live manifest fetch failed',
+        message: error.message
+      });
+    }
+  });
+
+  proxyLiveAsset = asyncHandler(async (req, res) => {
+    const { code, sessionId, assetName } = req.params;
+
+    try {
+      const accessToken = this._resolveAccessToken(req);
+      this._verifyAccessToken(accessToken, code);
+
+      const session = this._liveSessions.get(sessionId);
+      if (!session || session.code !== code) {
+        return res.status(404).json({
+          error: 'Live session not found',
+          message: 'Playback session expired'
+        });
+      }
+
+      return this._sendLiveAssetFromSession(req, res, session, assetName);
+    } catch (error) {
+      const statusCode = error.statusCode || 502;
+      logger.error('Live asset proxy error', {
+        code,
+        sessionId,
+        assetName,
+        error: error.message,
+        statusCode
+      });
+
+      res.status(statusCode).json({
+        error: 'Live asset fetch failed',
+        message: error.message
+      });
+    }
+  });
+
   proxyVodManifest = asyncHandler(async (req, res) => {
     const { code } = req.params;
     const targetUrl = req.query.url;
@@ -2615,7 +3228,7 @@ class M3uController {
       const session = await this._createVodSession(code, targetUrl);
       const manifestContent = await this._waitForFile(
         session.manifestPath,
-        (content) => content.includes('#EXTM3U') && (content.includes('.m4s') || content.includes('init.mp4')),
+        (content) => this._isVodManifestReady(content),
         25000
       );
 
@@ -2666,7 +3279,7 @@ class M3uController {
         });
       }
 
-      return this._sendVodAssetFromSession(res, session, assetName);
+      return this._sendVodAssetFromSession(req, res, session, assetName);
     } catch (error) {
       logger.error('VOD asset proxy error', {
         code,
@@ -2697,7 +3310,7 @@ class M3uController {
         });
       }
 
-      return this._sendVodAssetFromSession(res, session, assetName);
+      return this._sendVodAssetFromSession(req, res, session, assetName);
     } catch (error) {
       logger.error('VOD latest asset proxy error', {
         code,

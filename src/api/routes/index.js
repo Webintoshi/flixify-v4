@@ -528,6 +528,18 @@ function createRoutes({
   );
 
   router.get(
+    '/live/:code/manifest.m3u8',
+    rateLimiters.media,
+    m3uController.proxyLiveManifest
+  );
+
+  router.get(
+    '/live/:code/:sessionId/:assetName',
+    rateLimiters.media,
+    m3uController.proxyLiveAsset
+  );
+
+  router.get(
     '/vod/:code/manifest.m3u8',
     rateLimiters.media,
     m3uController.proxyVodManifest
