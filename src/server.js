@@ -72,6 +72,13 @@ function buildAllowedOrigins() {
   };
 }
 
+function buildCorsAllowedHeaders() {
+  return (process.env.CORS_ALLOWED_HEADERS || '')
+    .split(',')
+    .map((header) => header.trim())
+    .filter(Boolean);
+}
+
 function isAllowedOrigin(origin, allowedOrigins) {
   if (!origin) {
     return true;
@@ -438,6 +445,7 @@ async function startServer() {
   }));
 
   const allowedOrigins = buildAllowedOrigins();
+  const configuredCorsAllowedHeaders = buildCorsAllowedHeaders();
 
   app.use(cors({
     origin(origin, callback) {
@@ -449,7 +457,10 @@ async function startServer() {
     },
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Request-ID']
+    allowedHeaders: configuredCorsAllowedHeaders.length > 0 ? configuredCorsAllowedHeaders : undefined,
+    exposedHeaders: ['X-Request-ID', 'X-Api-Version', 'X-Release-Id'],
+    maxAge: Number.parseInt(process.env.CORS_PREFLIGHT_MAX_AGE_SEC || '86400', 10),
+    optionsSuccessStatus: 204
   }));
 
   // HTTP Parameter Pollution protection

@@ -193,14 +193,10 @@ async function fetchPlaylistSource(source, token, signal, options = {}) {
   const isDirectSource = source?.mode === 'direct'
   const headers = isDirectSource
     ? {
-      Accept: 'application/vnd.apple.mpegurl, application/x-mpegurl, text/plain, */*',
-      'Cache-Control': disableCache ? 'no-cache, no-store, max-age=0' : 'no-cache',
-      Pragma: 'no-cache'
+      Accept: 'application/vnd.apple.mpegurl, application/x-mpegurl, text/plain, */*'
     }
     : {
-      Authorization: `Bearer ${token}`,
-      'Cache-Control': disableCache ? 'no-cache, no-store, max-age=0' : 'no-cache',
-      Pragma: 'no-cache'
+      Authorization: `Bearer ${token}`
     }
 
   const response = isDirectSource
@@ -1173,9 +1169,7 @@ export async function fetchLiveCatalog(user, token, options = {}) {
           signal,
           cache: disableCache ? 'no-store' : 'default',
           headers: {
-            Authorization: `Bearer ${token}`,
-            'Cache-Control': disableCache ? 'no-cache, no-store, max-age=0' : 'no-cache',
-            Pragma: 'no-cache'
+            Authorization: `Bearer ${token}`
           }
         })
 

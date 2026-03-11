@@ -107,4 +107,19 @@ describe('server discovery and health endpoints', () => {
       version: 'test-version'
     });
   });
+
+  test('CORS preflight reflects requested cache headers for frontend API calls', async () => {
+    const response = await request(server)
+      .options('/api/v1/catalog/live?country=TR')
+      .set('Origin', 'https://flixify.pro')
+      .set('Access-Control-Request-Method', 'GET')
+      .set('Access-Control-Request-Headers', 'authorization,cache-control,pragma');
+
+    expect(response.status).toBe(204);
+    expect(response.headers['access-control-allow-origin']).toBe('https://flixify.pro');
+    expect(response.headers['access-control-allow-headers']).toContain('authorization');
+    expect(response.headers['access-control-allow-headers']).toContain('cache-control');
+    expect(response.headers['access-control-allow-headers']).toContain('pragma');
+    expect(response.headers['access-control-max-age']).toBe('86400');
+  });
 });
