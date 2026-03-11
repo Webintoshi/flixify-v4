@@ -8,6 +8,7 @@ import { fetchLiveCatalog, getCachedLiveCatalogSnapshot, hasAssignedPlaylist, ha
 import { DEFAULT_LIVE_COUNTRY_CODE, LIVE_TV_COUNTRIES, getLiveCategoryDisplayLabel } from '../config/liveTvTaxonomy'
 import { resolveChannelFallbackLogo } from '../config/channelLogoFallbacks'
 import VodPlayer from '../components/player/VodPlayer'
+import { useStreamSourceProbe } from '../hooks/useVodSourceProbe'
 import {
   bindFullscreenChangeListeners,
   canPlayNativeHls,
@@ -239,6 +240,105 @@ function canUseLocalStorage() {
   return typeof window !== 'undefined' && typeof window.localStorage !== 'undefined'
 }
 
+function inferLiveContainerFromStreamUrl(streamUrl) {
+  if (!streamUrl || typeof window === 'undefined') {
+    return 'unknown'
+  }
+
+  try {
+    const parsed = new URL(streamUrl, window.location.origin)
+    const nestedUrl = parsed.searchParams.get('url') || parsed.pathname
+    const lowered = String(nestedUrl || '').toLowerCase()
+
+    if (lowered.includes('.m3u8')) return 'hls'
+    if (lowered.includes('.ts')) return 'mpegts'
+    if (lowered.includes('.mp4') || lowered.includes('.m4v')) return 'mp4'
+    if (lowered.includes('.mkv')) return 'mkv'
+  } catch {
+    return 'unknown'
+  }
+
+  return 'unknown'
+}
+
+function buildLiveRemuxManifestUrl(streamUrl) {
+  if (!streamUrl || typeof window === 'undefined') {
+    return null
+  }
+
+  try {
+    const parsed = new URL(streamUrl, window.location.origin)
+    const match = parsed.pathname.match(/\/api\/v1\/stream\/([^/]+)/)
+    if (!match) {
+      return null
+    }
+
+    parsed.pathname = `/api/v1/vod/${match[1]}/manifest.m3u8`
+    return parsed.toString()
+  } catch {
+    return null
+  }
+}
+
+function normalizeProbeCodecName(value = '') {
+  return String(value || '').trim().toLowerCase()
+}
+
+function isBrowserSafeVideoCodec(videoCodec = '', browserCapabilities = {}) {
+  const normalizedCodec = normalizeProbeCodecName(videoCodec)
+  if (!normalizedCodec) {
+    return true
+  }
+
+  if (['h264', 'avc1', 'avc', 'mpeg4', 'mp4v'].includes(normalizedCodec)) {
+    return true
+  }
+
+  if (['hevc', 'h265', 'hvc1', 'hev1'].includes(normalizedCodec)) {
+    return Boolean(browserCapabilities.isSafari || browserCapabilities.isIOS)
+  }
+
+  if (['vp9', 'vp09'].includes(normalizedCodec)) {
+    return Boolean(browserCapabilities.isChromium || browserCapabilities.isFirefox)
+  }
+
+  if (['av1', 'av01'].includes(normalizedCodec)) {
+    return Boolean(browserCapabilities.isChromium || browserCapabilities.isFirefox)
+  }
+
+  return false
+}
+
+function isHighRiskLiveChannel(channel = {}) {
+  const sourceType = String(channel?.sourceType || '').trim().toLowerCase()
+  const channelName = String(channel?.name || '').trim().toLowerCase()
+
+  return (
+    sourceType === 'mpegts'
+    || /\b(4k|uhd|hevc|h\.?265|h265|raw)\b/i.test(channelName)
+  )
+}
+
+function shouldPreferLiveRemux({ probe, browserCapabilities = {}, channel = null } = {}) {
+  if (probe?.playbackStrategy === 'remux-hls' && probe?.remuxReason !== 'source-not-seekable') {
+    return true
+  }
+
+  if (probe?.audioBrowserSupported === false) {
+    return true
+  }
+
+  if (!isBrowserSafeVideoCodec(probe?.videoCodec, browserCapabilities)) {
+    return true
+  }
+
+  if (isHighRiskLiveChannel(channel) && !(browserCapabilities.isSafari || browserCapabilities.isIOS)) {
+    return true
+  }
+
+  return false
+}
+
 function buildLivePageStateKey(userCode) {
   const normalizedCode = String(userCode || '').trim()
   return normalizedCode ? `${LIVE_PAGE_STATE_PREFIX}${normalizedCode}` : ''
@@ -310,6 +410,7 @@ export default function PlayerPage() {
   const playbackStartupTimeoutRef = useRef(null)
   const playbackStartedRef = useRef(false)
   const playbackModeRef = useRef('idle')
+  const liveFallbackReasonRef = useRef('')
   
   const { user, token } = useAuthStore()
   const mediaType = String(searchParams.get('type') || '').trim().toLowerCase()
@@ -364,6 +465,8 @@ export default function PlayerPage() {
   })
   
   const [channelPage, setChannelPage] = useState(0)
+  const [playbackNonce, setPlaybackNonce] = useState(0)
+  const [liveUseRemuxFallback, setLiveUseRemuxFallback] = useState(false)
   const CHANNELS_PER_PAGE = 10
   const userRef = useRef(user)
   const tokenRef = useRef(token)
@@ -377,6 +480,18 @@ export default function PlayerPage() {
   })
   
   const debouncedSearch = useDebounce(searchQuery, 300)
+  const liveStreamUrl = isVodMode ? '' : String(currentChannel?.url || '').trim()
+  const liveRemuxManifestUrl = useMemo(() => buildLiveRemuxManifestUrl(liveStreamUrl), [liveStreamUrl])
+  const {
+    data: liveSourceProbe,
+    error: liveSourceProbeError
+  } = useStreamSourceProbe(liveStreamUrl, Boolean(liveStreamUrl) && !isVodMode)
+  const livePlaybackUrl = liveUseRemuxFallback ? (liveRemuxManifestUrl || liveStreamUrl) : liveStreamUrl
+  const livePlaybackSourceType = liveUseRemuxFallback
+    ? 'hls'
+    : inferLiveContainerFromStreamUrl(liveStreamUrl) === 'mpegts'
+      ? 'mpegts'
+      : String(currentChannel?.sourceType || '').trim().toLowerCase()
 
   useEffect(() => {
     userRef.current = user
@@ -743,6 +858,12 @@ export default function PlayerPage() {
     [currentChannel, resolveChannelLogoSource]
   )
 
+  useEffect(() => {
+    liveFallbackReasonRef.current = ''
+    setLiveUseRemuxFallback(false)
+    setPlaybackNonce(0)
+  }, [liveStreamUrl])
+
   const clearPlaybackStartupTimeout = useCallback(() => {
     if (playbackStartupTimeoutRef.current) {
       clearTimeout(playbackStartupTimeoutRef.current)
@@ -763,6 +884,86 @@ export default function PlayerPage() {
     setLoading(false)
     setError(null)
   }, [clearPlaybackStartupTimeout])
+
+  const activateLiveRemuxFallback = useCallback((reason = 'playback-fallback') => {
+    if (isVodMode || liveUseRemuxFallback || !liveRemuxManifestUrl || !liveStreamUrl) {
+      return false
+    }
+
+    liveFallbackReasonRef.current = reason
+    playbackStartedRef.current = false
+    clearPlaybackStartupTimeout()
+    clearPlaybackRecoveryTimeout()
+    setError(null)
+    setLoading(true)
+    setLiveUseRemuxFallback(true)
+    return true
+  }, [
+    clearPlaybackRecoveryTimeout,
+    clearPlaybackStartupTimeout,
+    isVodMode,
+    liveRemuxManifestUrl,
+    liveStreamUrl,
+    liveUseRemuxFallback
+  ])
+
+  useEffect(() => {
+    if (
+      isVodMode
+      || !liveStreamUrl
+      || !liveRemuxManifestUrl
+      || liveUseRemuxFallback
+      || playbackStartedRef.current
+    ) {
+      return
+    }
+
+    if (!shouldPreferLiveRemux({
+      probe: liveSourceProbe,
+      browserCapabilities,
+      channel: currentChannel
+    })) {
+      return
+    }
+
+    activateLiveRemuxFallback(liveSourceProbe?.remuxReason || 'probe-remux-recommended')
+  }, [
+    activateLiveRemuxFallback,
+    browserCapabilities,
+    currentChannel,
+    isVodMode,
+    liveRemuxManifestUrl,
+    liveSourceProbe,
+    liveStreamUrl,
+    liveUseRemuxFallback
+  ])
+
+  useEffect(() => {
+    if (
+      isVodMode
+      || !liveStreamUrl
+      || !liveRemuxManifestUrl
+      || liveUseRemuxFallback
+      || !liveSourceProbeError
+      || playbackStartedRef.current
+    ) {
+      return
+    }
+
+    if (!isHighRiskLiveChannel(currentChannel)) {
+      return
+    }
+
+    activateLiveRemuxFallback('probe-request-failed')
+  }, [
+    activateLiveRemuxFallback,
+    currentChannel,
+    isVodMode,
+    liveRemuxManifestUrl,
+    liveSourceProbeError,
+    liveStreamUrl,
+    liveUseRemuxFallback
+  ])
 
   const nudgeVideoToLiveEdge = useCallback(() => {
     const video = videoRef.current
@@ -938,11 +1139,22 @@ export default function PlayerPage() {
             return
           }
 
+          if (activateLiveRemuxFallback('startup-timeout')) {
+            return
+          }
+
           setLoading(false)
           setError('Yayin baslatilamadi. Kanal codec olarak bu tarayici ile uyumsuz olabilir.')
         })
     }, LIVE_STARTUP_TIMEOUT_MS)
-  }, [attemptVideoPlayback, clearPlaybackStartupTimeout, downgradeHlsPlayback, markPlaybackReady, schedulePlaybackRecovery])
+  }, [
+    activateLiveRemuxFallback,
+    attemptVideoPlayback,
+    clearPlaybackStartupTimeout,
+    downgradeHlsPlayback,
+    markPlaybackReady,
+    schedulePlaybackRecovery
+  ])
 
   useEffect(() => () => {
     clearPlaybackStartupTimeout()
@@ -955,8 +1167,9 @@ export default function PlayerPage() {
     
     const video = videoRef.current
     const container = document.getElementById('video-container')
-    const url = currentChannel.url
-    const sourceType = String(currentChannel?.sourceType || '').trim().toLowerCase()
+    const url = livePlaybackUrl
+    const sourceType = String(livePlaybackSourceType || currentChannel?.sourceType || '').trim().toLowerCase()
+    if (!url) return
     const isHlsSource = sourceType === 'hls' || /\.m3u8(?:$|[?#])/i.test(url)
     const isMpegTsSource = sourceType === 'mpegts' || /(?:\.ts(?:$|[?#]))|(?:[?&]output=mpegts\b)/i.test(url)
     const preferNativeHls = isHlsSource && canPlayNativeHls(video) && (browserCapabilities.isSafari || browserCapabilities.isIOS)
@@ -1052,6 +1265,9 @@ export default function PlayerPage() {
       }, { once: true })
       bindEvent(video, 'error', () => {
         clearPlaybackStartupTimeout()
+        if (activateLiveRemuxFallback('native-hls-error')) {
+          return
+        }
         setLoading(false)
         setError('Yayin yuklenemedi')
       }, { once: true })
@@ -1121,7 +1337,9 @@ export default function PlayerPage() {
           try {
             hls.recoverMediaError()
           } catch {
-            // noop
+            if (activateLiveRemuxFallback('hls-media-error')) {
+              return
+            }
           }
           return
         }
@@ -1129,6 +1347,10 @@ export default function PlayerPage() {
         if (downgradeHlsPlayback(hls)) {
           schedulePlaybackRecovery(80)
           scheduleStartupWatchdog(hls)
+          return
+        }
+
+        if (activateLiveRemuxFallback('hls-fatal-error')) {
           return
         }
 
@@ -1144,6 +1366,9 @@ export default function PlayerPage() {
       }, { once: true })
       bindEvent(video, 'error', () => {
         clearPlaybackStartupTimeout()
+        if (activateLiveRemuxFallback('native-hls-error')) {
+          return
+        }
         setLoading(false)
         setError('Yayin yuklenemedi')
       }, { once: true })
@@ -1163,6 +1388,9 @@ export default function PlayerPage() {
       player.attachMediaElement(video)
       player.on(mpegts.Events.ERROR, () => {
         clearPlaybackStartupTimeout()
+        if (activateLiveRemuxFallback('mpegts-error')) {
+          return
+        }
         setLoading(false)
         setError('Yayin yuklenemedi')
       })
@@ -1174,11 +1402,17 @@ export default function PlayerPage() {
         })
         .catch(() => {
           clearPlaybackStartupTimeout()
+          if (activateLiveRemuxFallback('mpegts-playback-error')) {
+            return
+          }
           setLoading(false)
           setError('Yayin yuklenemedi')
         })
     } else {
       playbackModeRef.current = 'unsupported'
+      if (activateLiveRemuxFallback('unsupported-format')) {
+        return teardownPlaybackBridges
+      }
       setLoading(false)
       setError('Tarayici bu yayin formatini desteklemiyor')
     }
@@ -1195,6 +1429,7 @@ export default function PlayerPage() {
     browserCapabilities.isInternetExplorer,
     browserCapabilities.isSafari,
     browserCapabilities,
+    activateLiveRemuxFallback,
     clearPlaybackStartupTimeout,
     clearPlaybackRecoveryTimeout,
     currentChannel,
@@ -1204,6 +1439,9 @@ export default function PlayerPage() {
     markPlaybackReady,
     nudgeVideoToLiveEdge,
     attemptVideoPlayback,
+    livePlaybackSourceType,
+    livePlaybackUrl,
+    playbackNonce,
     resumeLivePlayback,
     schedulePlaybackRecovery,
     scheduleStartupWatchdog,
@@ -1248,6 +1486,15 @@ export default function PlayerPage() {
         schedulePlaybackRecovery(180)
       })
   }
+
+  const handleRetryPlayback = useCallback(() => {
+    playbackStartedRef.current = false
+    clearPlaybackStartupTimeout()
+    clearPlaybackRecoveryTimeout()
+    setError(null)
+    setLoading(true)
+    setPlaybackNonce((currentValue) => currentValue + 1)
+  }, [clearPlaybackRecoveryTimeout, clearPlaybackStartupTimeout])
 
   useEffect(() => {
     const handleKeyDown = (e) => {
@@ -1403,7 +1650,7 @@ export default function PlayerPage() {
                       <AlertCircle className="w-10 h-10 mx-auto mb-2" style={{ color: PRIMARY }} />
                       <p className="text-white text-sm mb-2">{error}</p>
                       <button 
-                        onClick={() => window.location.reload()}
+                        onClick={handleRetryPlayback}
                         className="flex items-center gap-1.5 px-4 py-2 rounded-lg mx-auto text-xs font-medium"
                         style={{ backgroundColor: PRIMARY, color: 'white' }}
                       >

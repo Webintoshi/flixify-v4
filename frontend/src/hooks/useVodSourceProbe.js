@@ -18,7 +18,7 @@ function buildProbeUrl(streamUrl) {
   }
 }
 
-export function useVodSourceProbe(streamUrl, enabled = true) {
+export function useStreamSourceProbe(streamUrl, enabled = true) {
   const probeUrl = useMemo(() => buildProbeUrl(streamUrl), [streamUrl])
   const [state, setState] = useState({
     loading: !!enabled,
@@ -80,4 +80,8 @@ export function useVodSourceProbe(streamUrl, enabled = true) {
     probeUrl,
     ...state
   }
+}
+
+export function useVodSourceProbe(streamUrl, enabled = true) {
+  return useStreamSourceProbe(streamUrl, enabled)
 }
