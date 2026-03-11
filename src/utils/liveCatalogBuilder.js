@@ -154,14 +154,58 @@ function collapseLiveVariants(items = []) {
     const score = getSourceTypeScore(item?.sourceType) + getQualityScore(item?.name);
     const existing = grouped.get(key);
 
-    if (!existing || score > existing.score) {
-      grouped.set(key, { index, score, item });
+    if (!existing) {
+      grouped.set(key, {
+        firstIndex: index,
+        candidates: [{ index, score, item }]
+      });
+      return;
     }
+
+    existing.candidates.push({ index, score, item });
   });
 
   return Array.from(grouped.values())
-    .sort((left, right) => left.index - right.index)
-    .map((entry) => entry.item);
+    .sort((left, right) => left.firstIndex - right.firstIndex)
+    .map((entry) => {
+      const rankedCandidates = entry.candidates
+        .slice()
+        .sort((left, right) => {
+          if (right.score !== left.score) {
+            return right.score - left.score;
+          }
+
+          return left.index - right.index;
+        });
+
+      const primaryItem = rankedCandidates[0]?.item || null;
+      if (!primaryItem) {
+        return null;
+      }
+
+      const seenUrls = new Set();
+      const backupUrls = [];
+      const primaryUrl = String(primaryItem.sampleUrl || '').trim();
+      if (primaryUrl) {
+        seenUrls.add(primaryUrl);
+      }
+
+      rankedCandidates.slice(1).forEach(({ item }) => {
+        const candidateUrl = String(item?.sampleUrl || '').trim();
+        if (!candidateUrl || seenUrls.has(candidateUrl)) {
+          return;
+        }
+
+        seenUrls.add(candidateUrl);
+        backupUrls.push(candidateUrl);
+      });
+
+      return {
+        ...primaryItem,
+        backupUrls
+      };
+    })
+    .filter(Boolean);
 }
 
 function buildLiveCountryTree(items = []) {

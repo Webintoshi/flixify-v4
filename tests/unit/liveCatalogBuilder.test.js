@@ -17,6 +17,22 @@ describe('buildLiveCatalog', () => {
     expect(catalog.items[0].streamId).toBe('1002')
   })
 
+  test('keeps alternate live stream urls as fallback candidates', () => {
+    const playlist = [
+      '#EXTM3U',
+      '#EXTINF:-1 tvg-name="TR Test Kanal HD" group-title="TR:ULUSAL",TR Test Kanal HD',
+      'https://provider.example/live/user/pass/1001.ts',
+      '#EXTINF:-1 tvg-name="TR Test Kanal FHD" group-title="TR:ULUSAL",TR Test Kanal FHD',
+      'https://provider.example/live/user/pass/1001.m3u8'
+    ].join('\n')
+
+    const catalog = buildLiveCatalog(playlist)
+
+    expect(catalog.items).toHaveLength(1)
+    expect(catalog.items[0].sampleUrl).toBe('https://provider.example/live/user/pass/1001.m3u8')
+    expect(catalog.items[0].backupUrls).toEqual(['https://provider.example/live/user/pass/1001.ts'])
+  })
+
   test('maps Turkish live aliases into canonical categories', () => {
     const playlist = [
       '#EXTM3U',

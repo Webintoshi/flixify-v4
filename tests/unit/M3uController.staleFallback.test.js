@@ -23,6 +23,28 @@ describe('M3uController live proxy helpers', () => {
     expect(url).toContain('up=1')
   })
 
+  test('builds stream proxy url with alternate upstream targets', () => {
+    const controller = buildController()
+    const url = controller._buildStreamProxyUrl(
+      'https://flixify.pro/api/v1',
+      'ABC123',
+      'jwt-token',
+      'http://example.com/live/84.m3u8',
+      null,
+      [
+        'http://example.com/live/84.ts',
+        'http://backup.example.com/live/84.m3u8'
+      ]
+    )
+
+    const parsed = new URL(url)
+    expect(parsed.searchParams.get('url')).toBe('http://example.com/live/84.m3u8')
+    expect(parsed.searchParams.getAll('alt')).toEqual([
+      'http://example.com/live/84.ts',
+      'http://backup.example.com/live/84.m3u8'
+    ])
+  })
+
   test('builds stream proxy url without upstream hint when no index is provided', () => {
     const controller = buildController()
     const url = controller._buildStreamProxyUrl(
@@ -218,6 +240,42 @@ describe('M3uController live proxy helpers', () => {
     const proxiedTarget = decodeURIComponent(parsed.searchParams.get('url'))
 
     expect(proxiedTarget).toBe('http://45.142.3.97/hls/segment-001.ts')
+  })
+
+  test('rehydrates alternate stream proxy targets for the current request host', () => {
+    const controller = buildController()
+    const rehydrated = controller._rehydrateProxyUrlForRequest(
+      'https://legacy.example/api/v1/stream/ABC123?token=old-token&url=http%3A%2F%2Fprovider.example%2Flive%2F81.m3u8&alt=http%3A%2F%2Fprovider.example%2Flive%2F81.ts',
+      'https://api-v4.flixify.pro/api/v1',
+      'ABC123',
+      'new-token'
+    )
+
+    const parsed = new URL(rehydrated)
+    expect(parsed.origin).toBe('https://api-v4.flixify.pro')
+    expect(parsed.searchParams.get('token')).toBe('new-token')
+    expect(parsed.searchParams.get('url')).toBe('http://provider.example/live/81.m3u8')
+    expect(parsed.searchParams.getAll('alt')).toEqual(['http://provider.example/live/81.ts'])
+  })
+
+  test('prefers direct live sample urls and keeps templated fallback targets', () => {
+    const controller = buildController()
+    const primary = controller._buildLiveItemTargetUrl('http://provider.example/playlist/user/pass/m3u_plus?output=hls', {
+      streamId: '81',
+      sampleUrl: 'http://provider.example/live/user/pass/81.ts'
+    }, 'http://provider.example/live/{username}/{password}/{streamId}.m3u8')
+    const alternates = controller._buildLiveItemAlternateTargetUrls(
+      'http://provider.example/playlist/user/pass/m3u_plus?output=hls',
+      {
+        streamId: '81',
+        backupUrls: ['http://provider.example/live/user/pass/81.m3u8']
+      },
+      'http://provider.example/live/{username}/{password}/{streamId}.m3u8',
+      primary
+    )
+
+    expect(primary).toBe('http://provider.example/live/user/pass/81.ts')
+    expect(alternates).toEqual(['http://provider.example/live/user/pass/81.m3u8'])
   })
 
   test('builds upstream stream headers with provider referer and origin', () => {
