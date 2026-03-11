@@ -33,6 +33,24 @@ describe('buildLiveCatalog', () => {
     expect(catalog.items[0].backupUrls).toEqual(['https://provider.example/live/user/pass/1001.ts'])
   })
 
+  test('deduplicates fallback candidates that differ only by default port', () => {
+    const playlist = [
+      '#EXTM3U',
+      '#EXTINF:-1 tvg-name="TR Test Kanal FHD" group-title="TR:ULUSAL",TR Test Kanal FHD',
+      'http://provider.example:80/live/user/pass/1001.m3u8',
+      '#EXTINF:-1 tvg-name="TR Test Kanal HD" group-title="TR:ULUSAL",TR Test Kanal HD',
+      'http://provider.example/live/user/pass/1001.m3u8',
+      '#EXTINF:-1 tvg-name="TR Test Kanal SD" group-title="TR:ULUSAL",TR Test Kanal SD',
+      'http://provider.example:80/live/user/pass/1001.ts'
+    ].join('\n')
+
+    const catalog = buildLiveCatalog(playlist)
+
+    expect(catalog.items).toHaveLength(1)
+    expect(catalog.items[0].sampleUrl).toBe('http://provider.example:80/live/user/pass/1001.m3u8')
+    expect(catalog.items[0].backupUrls).toEqual(['http://provider.example:80/live/user/pass/1001.ts'])
+  })
+
   test('maps Turkish live aliases into canonical categories', () => {
     const playlist = [
       '#EXTM3U',

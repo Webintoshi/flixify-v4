@@ -45,6 +45,25 @@ describe('M3uController live proxy helpers', () => {
     ])
   })
 
+  test('deduplicates alternate upstream targets that differ only by default port', () => {
+    const controller = buildController()
+    const url = controller._buildStreamProxyUrl(
+      'https://flixify.pro/api/v1',
+      'ABC123',
+      'jwt-token',
+      'http://example.com:80/live/84.m3u8',
+      null,
+      [
+        'http://example.com/live/84.m3u8',
+        'http://example.com:80/live/84.ts'
+      ]
+    )
+
+    const parsed = new URL(url)
+    expect(parsed.searchParams.get('url')).toBe('http://example.com:80/live/84.m3u8')
+    expect(parsed.searchParams.getAll('alt')).toEqual(['http://example.com:80/live/84.ts'])
+  })
+
   test('builds stream proxy url without upstream hint when no index is provided', () => {
     const controller = buildController()
     const url = controller._buildStreamProxyUrl(

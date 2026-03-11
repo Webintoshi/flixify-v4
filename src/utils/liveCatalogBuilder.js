@@ -145,6 +145,23 @@ function getQualityScore(name = '') {
   return 8;
 }
 
+function normalizeSampleUrlKey(value = '') {
+  const normalizedValue = String(value || '').trim();
+  if (!normalizedValue) {
+    return '';
+  }
+
+  try {
+    const parsed = new URL(normalizedValue);
+    if ((parsed.protocol === 'http:' && parsed.port === '80') || (parsed.protocol === 'https:' && parsed.port === '443')) {
+      parsed.port = '';
+    }
+    return parsed.toString();
+  } catch {
+    return normalizedValue;
+  }
+}
+
 function collapseLiveVariants(items = []) {
   const grouped = new Map();
 
@@ -187,16 +204,17 @@ function collapseLiveVariants(items = []) {
       const backupUrls = [];
       const primaryUrl = String(primaryItem.sampleUrl || '').trim();
       if (primaryUrl) {
-        seenUrls.add(primaryUrl);
+        seenUrls.add(normalizeSampleUrlKey(primaryUrl));
       }
 
       rankedCandidates.slice(1).forEach(({ item }) => {
         const candidateUrl = String(item?.sampleUrl || '').trim();
-        if (!candidateUrl || seenUrls.has(candidateUrl)) {
+        const candidateKey = normalizeSampleUrlKey(candidateUrl);
+        if (!candidateUrl || !candidateKey || seenUrls.has(candidateKey)) {
           return;
         }
 
-        seenUrls.add(candidateUrl);
+        seenUrls.add(candidateKey);
         backupUrls.push(candidateUrl);
       });
 

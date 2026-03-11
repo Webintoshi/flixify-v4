@@ -1338,7 +1338,7 @@ class M3uController {
   _dedupeTargetUrlList(values = [], excludedValues = []) {
     const excluded = new Set(
       excludedValues
-        .map((value) => String(value || '').trim())
+        .map((value) => this._normalizeTargetUrlKey(value))
         .filter(Boolean)
     );
     const seen = new Set();
@@ -1346,15 +1346,33 @@ class M3uController {
 
     values.forEach((value) => {
       const normalizedValue = String(value || '').trim();
-      if (!normalizedValue || excluded.has(normalizedValue) || seen.has(normalizedValue)) {
+      const dedupeKey = this._normalizeTargetUrlKey(normalizedValue);
+      if (!normalizedValue || !dedupeKey || excluded.has(dedupeKey) || seen.has(dedupeKey)) {
         return;
       }
 
-      seen.add(normalizedValue);
+      seen.add(dedupeKey);
       deduped.push(normalizedValue);
     });
 
     return deduped;
+  }
+
+  _normalizeTargetUrlKey(value) {
+    const normalizedValue = String(value || '').trim();
+    if (!normalizedValue) {
+      return '';
+    }
+
+    try {
+      const parsed = new URL(normalizedValue);
+      if ((parsed.protocol === 'http:' && parsed.port === '80') || (parsed.protocol === 'https:' && parsed.port === '443')) {
+        parsed.port = '';
+      }
+      return parsed.toString();
+    } catch {
+      return normalizedValue;
+    }
   }
 
   _getRequestedAlternateTargetUrls(rawValue) {
