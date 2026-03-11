@@ -537,13 +537,14 @@ export default function PlayerPage() {
             
             {/* ========== LEFT - Player ========== */}
             <div className="flex-1 flex flex-col min-w-0">
-              {/* Video Container */}
+              {/* Video Container - Smaller */}
               <div 
                 id="video-container"
-                className="relative flex-1 rounded-xl overflow-hidden"
+                className="relative rounded-xl overflow-hidden flex-shrink-0"
                 style={{ 
                   backgroundColor: '#000',
-                  minHeight: '400px'
+                  aspectRatio: '16/9',
+                  maxHeight: '65vh'
                 }}
                 onMouseMove={handleMouseMove}
                 onClick={() => setShowControls(true)}
