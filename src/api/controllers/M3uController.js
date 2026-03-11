@@ -218,7 +218,23 @@ class M3uController {
     }
   }
 
-  _buildUpstreamStreamHeaders(req, fallbackAccept = '*/*') {
+  _buildProviderRequestHeaderMap(targetUrl) {
+    if (!targetUrl) {
+      return {};
+    }
+
+    try {
+      const origin = new URL(targetUrl).origin;
+      return {
+        Referer: `${origin}/`,
+        Origin: origin
+      };
+    } catch {
+      return {};
+    }
+  }
+
+  _buildUpstreamStreamHeaders(req, fallbackAccept = '*/*', targetUrl = null) {
     const incomingUserAgent = String(req.headers['user-agent'] || '').trim();
     const userAgent = incomingUserAgent && !/mozilla\//i.test(incomingUserAgent)
       ? incomingUserAgent
@@ -235,6 +251,14 @@ class M3uController {
 
     if (req.headers['if-range']) {
       headers['If-Range'] = req.headers['if-range'];
+    }
+
+    const providerSourceHeaders = this._buildProviderRequestHeaderMap(targetUrl);
+    if (providerSourceHeaders.Referer) {
+      headers.Referer = providerSourceHeaders.Referer;
+    }
+    if (providerSourceHeaders.Origin) {
+      headers.Origin = providerSourceHeaders.Origin;
     }
 
     return headers;
@@ -503,17 +527,35 @@ class M3uController {
   }
 
   _buildProviderSourceHeaders(targetUrl) {
+    const headerMap = this._buildProviderRequestHeaderMap(targetUrl);
     const headers = [];
 
-    try {
-      const origin = new URL(targetUrl).origin;
-      headers.push(`Referer: ${origin}/`);
-      headers.push(`Origin: ${origin}`);
-    } catch {
-      // Keep headers empty when URL parsing fails.
+    if (headerMap.Referer) {
+      headers.push(`Referer: ${headerMap.Referer}`);
+    }
+
+    if (headerMap.Origin) {
+      headers.push(`Origin: ${headerMap.Origin}`);
     }
 
     return headers;
+  }
+
+  _resolveUpstreamResponseUrl(requestedUrl, response) {
+    const candidates = [
+      response?.request?.res?.responseUrl,
+      response?.request?._redirectable?._currentUrl,
+      response?.request?.responseURL,
+      response?.config?.url
+    ];
+
+    for (const value of candidates) {
+      if (typeof value === 'string' && value.trim()) {
+        return value;
+      }
+    }
+
+    return requestedUrl;
   }
 
   _buildConservativeProbeFallback(targetUrl, remuxReason = 'probe-request-failed') {
@@ -1678,8 +1720,6 @@ class M3uController {
       this._verifyAccessToken(accessToken, code);
       await this._assertAllowedProxyTarget(code, targetUrl);
       const requestMethod = req.method === 'HEAD' ? 'head' : 'get';
-      const upstreamRequestHeaders = this._buildUpstreamStreamHeaders(req);
-
       // Known HLS manifests do not need a preflight stream request.
       if (requestMethod === 'get' && this._isPlaylistResponse(targetUrl)) {
         const playlistResponse = await this._requestViaProviderProxy({
@@ -1687,13 +1727,14 @@ class M3uController {
           url: targetUrl,
           responseType: 'text',
           timeout: this._streamProxyTimeoutMs,
-          headers: this._buildUpstreamStreamHeaders(req, 'application/vnd.apple.mpegurl,*/*'),
+          headers: this._buildUpstreamStreamHeaders(req, 'application/vnd.apple.mpegurl,*/*', targetUrl),
           validateStatus: () => true
-        }, this._validateStreamResponse.bind(this), {
+        }, this._validatePlaylistResponse.bind(this), {
           preferredProxyIndex
         });
 
-        await this._rememberHlsAllowedOrigins(code, playlistResponse.data, targetUrl);
+        const resolvedPlaylistUrl = this._resolveUpstreamResponseUrl(targetUrl, playlistResponse);
+        await this._rememberHlsAllowedOrigins(code, playlistResponse.data, resolvedPlaylistUrl);
         const optimizedPlaylist = this._optimizeLivePlaylist(playlistResponse.data);
         const resolvedProxyIndex = Number.isInteger(playlistResponse.__providerProxyIndex) && playlistResponse.__providerProxyIndex >= 0
           ? playlistResponse.__providerProxyIndex
@@ -1709,7 +1750,7 @@ class M3uController {
 
         return res.send(this._rewriteHlsPlaylist(optimizedPlaylist, {
           baseApiUrl: this._getBaseApiUrl(req),
-          baseTargetUrl: targetUrl,
+          baseTargetUrl: resolvedPlaylistUrl,
           code,
           token: accessToken,
           preferredProxyIndex: resolvedProxyIndex
@@ -1721,7 +1762,7 @@ class M3uController {
         url: targetUrl,
         responseType: requestMethod === 'get' ? 'stream' : undefined,
         timeout: requestMethod === 'get' ? this._streamProxyReadTimeoutMs : this._upstreamTimeoutMs,
-        headers: upstreamRequestHeaders,
+        headers: this._buildUpstreamStreamHeaders(req, '*/*', targetUrl),
         validateStatus: () => true
       }, this._validateStreamResponse.bind(this), {
         preferredProxyIndex
@@ -1746,16 +1787,17 @@ class M3uController {
 
         const playlistResponse = await this._requestViaProviderProxy({
           method: 'get',
-          url: targetUrl,
+          url: this._resolveUpstreamResponseUrl(targetUrl, upstream),
           responseType: 'text',
           timeout: this._streamProxyTimeoutMs,
-          headers: this._buildUpstreamStreamHeaders(req, 'application/vnd.apple.mpegurl,*/*'),
+          headers: this._buildUpstreamStreamHeaders(req, 'application/vnd.apple.mpegurl,*/*', targetUrl),
           validateStatus: () => true
-        }, this._validateStreamResponse.bind(this), {
+        }, this._validatePlaylistResponse.bind(this), {
           preferredProxyIndex: playlistProxyIndex
         });
 
-        await this._rememberHlsAllowedOrigins(code, playlistResponse.data, targetUrl);
+        const resolvedPlaylistUrl = this._resolveUpstreamResponseUrl(targetUrl, playlistResponse);
+        await this._rememberHlsAllowedOrigins(code, playlistResponse.data, resolvedPlaylistUrl);
         const optimizedPlaylist = this._optimizeLivePlaylist(playlistResponse.data);
         const resolvedProxyIndex = Number.isInteger(playlistResponse.__providerProxyIndex) && playlistResponse.__providerProxyIndex >= 0
           ? playlistResponse.__providerProxyIndex
@@ -1771,7 +1813,7 @@ class M3uController {
 
         return res.send(this._rewriteHlsPlaylist(optimizedPlaylist, {
           baseApiUrl: this._getBaseApiUrl(req),
-          baseTargetUrl: targetUrl,
+          baseTargetUrl: resolvedPlaylistUrl,
           code,
           token: accessToken,
           preferredProxyIndex: resolvedProxyIndex
@@ -1809,7 +1851,7 @@ class M3uController {
       let upstream = await this._requestViaProviderProxy({
         method: 'head',
         url: targetUrl,
-        headers: this._buildUpstreamStreamHeaders(req),
+        headers: this._buildUpstreamStreamHeaders(req, '*/*', targetUrl),
         validateStatus: () => true
       });
 
@@ -1820,7 +1862,7 @@ class M3uController {
           responseType: 'stream',
           timeout: this._streamProxyTimeoutMs,
           headers: {
-            ...this._buildUpstreamStreamHeaders(req),
+            ...this._buildUpstreamStreamHeaders(req, '*/*', targetUrl),
             Range: 'bytes=0-1'
           },
           validateStatus: () => true
@@ -1845,7 +1887,7 @@ class M3uController {
             responseType: 'stream',
             timeout: this._streamProxyTimeoutMs,
             headers: {
-              ...this._buildUpstreamStreamHeaders(req),
+              ...this._buildUpstreamStreamHeaders(req, '*/*', targetUrl),
               Range: 'bytes=0-1'
             },
             validateStatus: () => true
@@ -2044,8 +2086,9 @@ class M3uController {
         responseType: 'stream',
         timeout: 15000,
         headers: {
-          'User-Agent': 'Flixify-V4-Proxy/1.0',
-          'Accept': 'image/*,*/*;q=0.8'
+          'User-Agent': this._providerUserAgent,
+          'Accept': 'image/*,*/*;q=0.8',
+          ...this._buildProviderRequestHeaderMap(targetUrl)
         }
       });
 

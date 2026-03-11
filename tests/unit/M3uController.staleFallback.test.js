@@ -131,6 +131,59 @@ describe('M3uController live proxy helpers', () => {
     expect(origins.has('https://keys.example.net')).toBe(true)
   })
 
+  test('resolves redirected upstream response URL for playlist rewriting', () => {
+    const controller = buildController()
+    const resolved = controller._resolveUpstreamResponseUrl(
+      'http://provider.example/live/81.m3u8',
+      {
+        request: {
+          res: {
+            responseUrl: 'http://edge.example/auth/token/live.m3u8'
+          }
+        }
+      }
+    )
+
+    expect(resolved).toBe('http://edge.example/auth/token/live.m3u8')
+  })
+
+  test('rewrites relative hls paths using redirected playlist host', () => {
+    const controller = buildController()
+    const rewritten = controller._rewriteHlsPlaylist(
+      [
+        '#EXTM3U',
+        '#EXTINF:9.9,',
+        '/hls/segment-001.ts'
+      ].join('\n'),
+      {
+        baseApiUrl: 'https://flixify.pro/api/v1',
+        baseTargetUrl: 'http://45.142.3.97/auth/token/live.m3u8',
+        code: 'ABC123',
+        token: 'jwt-token'
+      }
+    )
+
+    const rewrittenSegmentLine = rewritten
+      .split('\n')
+      .find((line) => line.includes('/stream/ABC123?'))
+    const parsed = new URL(rewrittenSegmentLine)
+    const proxiedTarget = decodeURIComponent(parsed.searchParams.get('url'))
+
+    expect(proxiedTarget).toBe('http://45.142.3.97/hls/segment-001.ts')
+  })
+
+  test('builds upstream stream headers with provider referer and origin', () => {
+    const controller = buildController()
+    const headers = controller._buildUpstreamStreamHeaders(
+      { headers: {} },
+      '*/*',
+      'http://provider.example/live/81.m3u8'
+    )
+
+    expect(headers.Referer).toBe('http://provider.example/')
+    expect(headers.Origin).toBe('http://provider.example')
+  })
+
   test('builds compact series summary catalog with counts and first episode', () => {
     const controller = buildController()
     const fullCatalog = [
