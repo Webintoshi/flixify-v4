@@ -12,7 +12,6 @@ const PRIMARY = '#E50914'
 const BG_DARK = '#0a0a0a'
 const BG_SURFACE = '#141414'
 const BG_CARD = '#1a1a1a'
-const LIVE_RECOVERY_COOLDOWN_MS = 3000
 
 const normalizeLiveGroupLabel = (value) => {
   const normalized = String(value || '').replace(/\s+/g, ' ').trim()
@@ -73,8 +72,6 @@ export default function PlayerPage() {
   const channelListRef = useRef(null)
   const countryScrollRef = useRef(null)
   const categoryScrollRef = useRef(null)
-  const liveRecoveryLockRef = useRef(false)
-  const lastLiveRecoveryAtRef = useRef(0)
   
   const { user, token } = useAuthStore()
   const mediaType = String(searchParams.get('type') || '').trim().toLowerCase()
@@ -143,123 +140,79 @@ export default function PlayerPage() {
     ]
   }, [channels.length, liveCountries, selectedCountry, staticLiveCountries])
 
-  const applyChannels = useCallback((nextChannels = []) => {
-    setChannels(nextChannels)
-
-    if (nextChannels.length === 0) {
-      setCurrentChannel(null)
-      setError('Canli kanal bulunamadi. Statik canli TV katalogu kontrol edilmeli.')
-      return []
-    }
-
-    setCurrentChannel((previous) => {
-      if (!previous) {
-        return nextChannels[0]
-      }
-
-      const previousKey = buildChannelIdentity(previous)
-      return nextChannels.find((channel) => buildChannelIdentity(channel) === previousKey) || nextChannels[0]
-    })
-
-    return nextChannels
-  }, [])
-
-  const loadLiveChannels = useCallback(async ({ signal, forceRefresh = false } = {}) => {
-    if (isVodMode || !hasAssignedPlaylist(user) || !token) {
-      return []
-    }
-
-    setLoading(true)
-    setError(null)
-    setBrokenLogoKeys(new Set())
-
-    const payload = await fetchLiveCatalog(user, token, {
-      signal,
-      country: selectedCountry,
-      forceRefresh,
-      disableCache: true,
-      ttlMs: 0
-    })
-
-    if (signal?.aborted) {
-      return []
-    }
-
-    const nextChannels = Array.isArray(payload?.items) ? payload.items : []
-    const nextCountries = Array.isArray(payload?.countries) && payload.countries.length > 0
-      ? payload.countries
-      : staticLiveCountries
-    const resolvedCountry = String(payload?.country || selectedCountry).trim().toUpperCase() || selectedCountry
-
-    setLiveCountries(nextCountries)
-
-    if (resolvedCountry !== selectedCountry) {
-      setSelectedCountry(resolvedCountry)
-    }
-
-    return applyChannels(nextChannels)
-  }, [applyChannels, isVodMode, selectedCountry, staticLiveCountries, token, user])
-
-  const recoverCurrentChannel = useCallback(async (fallbackMessage = 'Yayin yeniden yuklenemedi') => {
-    if (isVodMode || !currentChannel || liveRecoveryLockRef.current) {
-      return false
-    }
-
-    const elapsed = Date.now() - lastLiveRecoveryAtRef.current
-    if (elapsed < LIVE_RECOVERY_COOLDOWN_MS) {
-      return false
-    }
-
-    liveRecoveryLockRef.current = true
-    lastLiveRecoveryAtRef.current = Date.now()
-
-    try {
-      const currentKey = buildChannelIdentity(currentChannel)
-      const nextChannels = await loadLiveChannels({ forceRefresh: true })
-      const hasRecoveredChannel = nextChannels.some((channel) => buildChannelIdentity(channel) === currentKey)
-
-      if (!hasRecoveredChannel) {
-        setError(fallbackMessage)
-        setLoading(false)
-      }
-
-      return hasRecoveredChannel
-    } catch {
-      setError(fallbackMessage)
-      setLoading(false)
-      return false
-    } finally {
-      liveRecoveryLockRef.current = false
-    }
-  }, [currentChannel, isVodMode, loadLiveChannels])
-
   // Kanallari cek
   useEffect(() => {
     if (isVodMode) return
     if (!hasAssignedPlaylist(user) || !token) return
 
-    const abortController = new AbortController()
+    let cancelled = false
 
-    void loadLiveChannels({ signal: abortController.signal })
-      .catch(() => {
-        if (abortController.signal.aborted) {
+    const applyChannels = (nextChannels = []) => {
+      setChannels(nextChannels)
+
+      if (nextChannels.length === 0) {
+        setCurrentChannel(null)
+        setError('Canli kanal bulunamadi. Statik canli TV katalogu kontrol edilmeli.')
+        return
+      }
+
+      setCurrentChannel((previous) => {
+        if (!previous) {
+          return nextChannels[0]
+        }
+
+        const previousKey = buildChannelIdentity(previous)
+        return nextChannels.find((channel) => buildChannelIdentity(channel) === previousKey) || nextChannels[0]
+      })
+    }
+
+    const loadChannels = async ({ forceRefresh = false } = {}) => {
+      try {
+        setLoading(true)
+        setError(null)
+        setBrokenLogoKeys(new Set())
+
+        const payload = await fetchLiveCatalog(user, token, {
+          country: selectedCountry,
+          forceRefresh
+        })
+
+        if (cancelled) {
           return
         }
 
-        setChannels([])
-        setCurrentChannel(null)
-        setError('Canli TV katalogu yuklenemedi')
-      })
-      .finally(() => {
-        if (!abortController.signal.aborted) {
+        const nextChannels = Array.isArray(payload?.items) ? payload.items : []
+        const nextCountries = Array.isArray(payload?.countries) && payload.countries.length > 0
+          ? payload.countries
+          : staticLiveCountries
+        const resolvedCountry = String(payload?.country || selectedCountry).trim().toUpperCase() || selectedCountry
+
+        setLiveCountries(nextCountries)
+
+        if (resolvedCountry !== selectedCountry) {
+          setSelectedCountry(resolvedCountry)
+        }
+
+        applyChannels(nextChannels)
+      } catch {
+        if (!cancelled) {
+          setChannels([])
+          setCurrentChannel(null)
+          setError('Canli TV katalogu yuklenemedi')
+        }
+      } finally {
+        if (!cancelled) {
           setLoading(false)
         }
-      })
+      }
+    }
+
+    void loadChannels()
 
     return () => {
-      abortController.abort()
+      cancelled = true
     }
-  }, [isVodMode, loadLiveChannels, token, user])
+  }, [isVodMode, selectedCountry, staticLiveCountries, token, user])
 
   useEffect(() => {
     if (selectedCategory === 'all') return
@@ -374,19 +327,16 @@ export default function PlayerPage() {
   }, [])
 
   // Player - Kanal değişimi
-  useEffect(() => undefined, [currentChannel, isVodMode, recoverCurrentChannel])
-
   useEffect(() => {
     if (isVodMode) return
     if (!currentChannel || !videoRef.current) return
-
+    
     const video = videoRef.current
-    const url = `${currentChannel.url}${currentChannel.url.includes('?') ? '&' : '?'}_ts=${Date.now()}`
-    let cleanedUp = false
-
+    const url = currentChannel.url
     setError(null)
     setLoading(true)
-
+    
+    // Cleanup önceki player
     if (hlsPlayerRef.current) {
       hlsPlayerRef.current.destroy()
       hlsPlayerRef.current = null
@@ -395,40 +345,17 @@ export default function PlayerPage() {
       playerRef.current.destroy()
       playerRef.current = null
     }
-
+    
     video.pause()
     video.removeAttribute('src')
     video.load()
-
-    const attemptRecovery = (message = 'Yayin yeniden yuklenemedi') => {
-      if (cleanedUp) {
-        return
-      }
-
-      void recoverCurrentChannel(message).then((recovered) => {
-        if (!recovered && !cleanedUp) {
-          setLoading(false)
-        }
-      })
-    }
-
+    
+    // HLS stream
     if (Hls.isSupported()) {
       const hls = new Hls({
         enableWorker: true,
-        backBufferLength: 90,
-        maxBufferLength: 45,
-        liveSyncDurationCount: 4,
-        liveMaxLatencyDurationCount: 10,
-        manifestLoadingTimeOut: 20000,
-        levelLoadingTimeOut: 20000,
-        fragLoadingTimeOut: 30000,
-        manifestLoadingMaxRetry: 2,
-        levelLoadingMaxRetry: 2,
-        fragLoadingMaxRetry: 4,
-        xhrSetup: (xhr) => {
-          xhr.setRequestHeader('Cache-Control', 'no-cache, no-store, max-age=0')
-          xhr.setRequestHeader('Pragma', 'no-cache')
-        }
+        maxBufferLength: 30,
+        liveSyncDurationCount: 3,
       })
       hlsPlayerRef.current = hls
       hls.loadSource(url)
@@ -439,38 +366,35 @@ export default function PlayerPage() {
       })
       hls.on(Hls.Events.ERROR, (_, data) => {
         if (data?.fatal) {
-          attemptRecovery('Yayin baglantisi yenilenemedi')
+          setLoading(false)
+          setError('Yayin yuklenemedi')
           return
         }
-
-        const details = String(data?.details || '').toLowerCase()
-        if (details.includes('bufferstalled') || details.includes('fragloaderror')) {
-          video.play().catch(() => {})
-        }
+        if (data.fatal) setError('Yayın yüklenemedi')
       })
     } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-      const handleNativeLoadedMetadata = () => {
-        setLoading(false)
-        video.play().catch(() => {})
-      }
       const handleNativeError = () => {
-        attemptRecovery('Yayin baglantisi yenilenemedi')
+        setLoading(false)
+        setError('Yayin yuklenemedi')
       }
 
       video.src = url
-      video.addEventListener('loadedmetadata', handleNativeLoadedMetadata, { once: true })
+      video.addEventListener('loadedmetadata', () => {
+        setLoading(false)
+        video.play().catch(() => {})
+      }, { once: true })
       video.addEventListener('error', handleNativeError, { once: true })
     } else if (mpegts.getFeatureList().mseLivePlayback) {
       const player = mpegts.createPlayer({
         type: 'mpegts',
-        url,
+        url: url,
         isLive: true,
-        enableWorker: true
       })
       playerRef.current = player
       player.attachMediaElement(video)
       player.on(mpegts.Events.ERROR, () => {
-        attemptRecovery('Yayin baglantisi yenilenemedi')
+        setLoading(false)
+        setError('Yayin yuklenemedi')
       })
       player.load()
       player.play()
@@ -478,22 +402,21 @@ export default function PlayerPage() {
           setLoading(false)
         })
         .catch(() => {
-          attemptRecovery('Yayin baslatilamadi')
+          setLoading(false)
+          setError('Yayin yuklenemedi')
         })
     } else {
       setLoading(false)
       setError('Tarayici bu yayin formatini desteklemiyor')
     }
-
+    
     return () => {
-      cleanedUp = true
       hlsPlayerRef.current?.destroy()
-      hlsPlayerRef.current = null
       playerRef.current?.destroy()
-      playerRef.current = null
     }
-  }, [currentChannel, isVodMode, recoverCurrentChannel])
+  }, [currentChannel, isVodMode])
 
+  // Kontrolleri gizle/göster
   const handleMouseMove = useCallback(() => {
     setShowControls(true)
     clearTimeout(controlsTimeoutRef.current)
