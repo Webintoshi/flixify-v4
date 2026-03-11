@@ -12,6 +12,13 @@ const PRIMARY = '#E50914'
 const BG_DARK = '#0a0a0a'
 const BG_SURFACE = '#141414'
 const BG_CARD = '#1a1a1a'
+const LIVE_STARTUP_TIMEOUT_MS = 20000
+const LIVE_RELOAD_DELAY_MS = 1200
+const LIVE_MAX_NETWORK_RECOVERIES = 3
+const LIVE_MAX_MEDIA_RECOVERIES = 2
+const LIVE_MAX_RELOAD_ATTEMPTS = 2
+const LIVE_QUALITY_STORAGE_KEY = 'flixify_live_quality_preference'
+const LIVE_QUALITY_PREFERENCES = new Set(['auto', '4k', '1440', '1080', '720', '480'])
 
 const normalizeLiveGroupLabel = (value) => {
   const normalized = String(value || '').replace(/\s+/g, ' ').trim()
@@ -61,6 +68,221 @@ function buildStaticLiveCountries() {
   }))
 }
 
+function inferLiveStreamMode(channel = {}) {
+  const url = String(channel?.url || '').toLowerCase()
+
+  if (url.includes('.m3u8') || url.includes('output=hls') || url.includes('output=m3u8')) {
+    return 'hls'
+  }
+
+  if (url.includes('.ts') || url.includes('output=ts') || url.includes('output=mpegts')) {
+    return 'mpegts'
+  }
+
+  const sourceType = String(channel?.sourceType || '').trim().toLowerCase()
+  if (sourceType === 'mpegts' || sourceType === 'ts') {
+    return 'mpegts'
+  }
+
+  return 'hls'
+}
+
+function getSeekableWindowStart(video) {
+  if (!video?.seekable?.length) {
+    return null
+  }
+
+  const start = video.seekable.start(0)
+  return Number.isFinite(start) ? start : null
+}
+
+function getSeekableWindowEnd(video) {
+  if (!video?.seekable?.length) {
+    return null
+  }
+
+  const end = video.seekable.end(video.seekable.length - 1)
+  return Number.isFinite(end) ? end : null
+}
+
+function nudgeToLiveEdge(video, edgeOffsetSeconds = 1.5) {
+  const liveEdge = getSeekableWindowEnd(video)
+  const windowStart = getSeekableWindowStart(video)
+
+  if (!Number.isFinite(liveEdge) || !Number.isFinite(windowStart)) {
+    return false
+  }
+
+  const targetTime = Math.max(windowStart, liveEdge - edgeOffsetSeconds)
+  if (!Number.isFinite(targetTime) || Math.abs((video.currentTime || 0) - targetTime) < 0.5) {
+    return false
+  }
+
+  try {
+    video.currentTime = targetTime
+    return true
+  } catch {
+    return false
+  }
+}
+
+function readSavedLiveQualityPreference() {
+  if (typeof window === 'undefined') {
+    return 'auto'
+  }
+
+  try {
+    const value = String(window.localStorage.getItem(LIVE_QUALITY_STORAGE_KEY) || '').trim().toLowerCase()
+    if (value === '2160') return '4k'
+    return LIVE_QUALITY_PREFERENCES.has(value) ? value : 'auto'
+  } catch {
+    return 'auto'
+  }
+}
+
+function inferQualityHeight(value = '') {
+  const lowered = String(value || '').toLowerCase()
+
+  if (/\b8k\b/.test(lowered)) return 4320
+  if (/\b4k\b|\buhd\b|\b2160\b/.test(lowered)) return 2160
+  if (/\b1440\b|\b2k\b|\bqhd\b/.test(lowered)) return 1440
+  if (/\bfhd\b|full\s*hd|\b1080\b/.test(lowered)) return 1080
+  if (/\bhd\b|\b720\b/.test(lowered)) return 720
+  if (/\bsd\b|\b480\b/.test(lowered)) return 480
+  return 0
+}
+
+function resolveLevelHeight(level = {}) {
+  const directHeight = Number.parseInt(level?.height, 10)
+  if (Number.isFinite(directHeight) && directHeight > 0) {
+    return directHeight
+  }
+
+  const directWidth = Number.parseInt(level?.width, 10)
+  if (Number.isFinite(directWidth) && directWidth >= 3840) return 2160
+  if (Number.isFinite(directWidth) && directWidth >= 2560) return 1440
+  if (Number.isFinite(directWidth) && directWidth >= 1920) return 1080
+  if (Number.isFinite(directWidth) && directWidth >= 1280) return 720
+  return 0
+}
+
+function formatQualityLabel(height = 0) {
+  if (height >= 4320) return '8K UHD'
+  if (height >= 2160) return '4K UHD'
+  if (height >= 1440) return '1440p QHD'
+  if (height >= 1080) return '1080p FHD'
+  if (height >= 720) return '720p HD'
+  if (height >= 480) return '480p'
+  return 'Kaynak'
+}
+
+function mapHeightToQualityPreference(height = 0) {
+  if (height >= 2160) return '4k'
+  if (height >= 1440) return '1440'
+  if (height >= 1080) return '1080'
+  if (height >= 720) return '720'
+  return '480'
+}
+
+function inferChannelQualityLabel(channel = {}) {
+  const inferredHeight = inferQualityHeight(
+    `${channel?.name || ''} ${channel?.group || ''} ${channel?.sourceType || ''}`
+  )
+
+  return inferredHeight > 0 ? formatQualityLabel(inferredHeight) : 'Canli'
+}
+
+function buildActiveQualityLabel(channel = {}, level = null, isAuto = false) {
+  const levelHeight = resolveLevelHeight(level)
+  const baseLabel = levelHeight > 0 ? formatQualityLabel(levelHeight) : inferChannelQualityLabel(channel)
+
+  if (!isAuto || baseLabel === 'Canli') {
+    return baseLabel
+  }
+
+  return `Oto ${baseLabel}`
+}
+
+function buildHlsQualityOptions(levels = []) {
+  const byHeight = new Map()
+
+  levels.forEach((level, index) => {
+    const height = resolveLevelHeight(level)
+    if (!height) {
+      return
+    }
+
+    const current = byHeight.get(height)
+    const bitrate = Number(level?.bitrate || 0)
+    if (!current || bitrate > current.bitrate) {
+      byHeight.set(height, {
+        value: mapHeightToQualityPreference(height),
+        label: formatQualityLabel(height),
+        index,
+        bitrate
+      })
+    }
+  })
+
+  return [
+    { value: 'auto', label: 'Otomatik' },
+    ...Array.from(byHeight.values())
+      .sort((left, right) => {
+        const leftHeight = Number.parseInt(left.value, 10)
+        const rightHeight = Number.parseInt(right.value, 10)
+        return rightHeight - leftHeight
+      })
+      .filter((option, index, list) => (
+        list.findIndex((candidate) => candidate.value === option.value) === index
+      ))
+      .map(({ value, label }) => ({ value, label }))
+  ]
+}
+
+function pickHlsLevelIndex(levels = [], preference = 'auto') {
+  if (preference === 'auto') {
+    return -1
+  }
+
+  const targetHeight = preference === '4k'
+    ? 2160
+    : Number.parseInt(preference, 10)
+  if (!Number.isFinite(targetHeight) || targetHeight <= 0) {
+    return -1
+  }
+
+  const indexedLevels = levels
+    .map((level, index) => ({
+      index,
+      height: resolveLevelHeight(level),
+      bitrate: Number(level?.bitrate || 0)
+    }))
+    .filter((level) => level.height > 0)
+
+  if (indexedLevels.length === 0) {
+    return -1
+  }
+
+  const sortedByBestFit = [...indexedLevels].sort((left, right) => {
+    if (left.height === right.height) {
+      return right.bitrate - left.bitrate
+    }
+
+    return right.height - left.height
+  })
+
+  if (targetHeight >= 2160) {
+    return sortedByBestFit[0]?.index ?? -1
+  }
+
+  const capped = sortedByBestFit.find((level) => level.height <= targetHeight)
+  if (capped) {
+    return capped.index
+  }
+
+  return sortedByBestFit[sortedByBestFit.length - 1]?.index ?? -1
+}
+
 export default function PlayerPage() {
   const navigate = useNavigate()
   const [searchParams] = useSearchParams()
@@ -68,6 +290,17 @@ export default function PlayerPage() {
   const hlsPlayerRef = useRef(null)
   const playerRef = useRef(null)
   const controlsTimeoutRef = useRef(null)
+  const liveStartupTimeoutRef = useRef(null)
+  const liveRetryTimeoutRef = useRef(null)
+  const livePlaybackStartedRef = useRef(false)
+  const liveRecoveryStateRef = useRef({
+    key: '',
+    networkRetries: 0,
+    mediaRetries: 0,
+    reloadRetries: 0
+  })
+  const volumeRef = useRef(1)
+  const mutedRef = useRef(false)
   const observerRef = useRef(null)
   const channelListRef = useRef(null)
   
@@ -89,12 +322,15 @@ export default function PlayerPage() {
   const [showControls, setShowControls] = useState(true)
   const [volume, setVolume] = useState(1)
   const [isMuted, setIsMuted] = useState(false)
-  const [isFullscreen, setIsFullscreen] = useState(false)
   const [displayedChannels, setDisplayedChannels] = useState([])
   const [page, setPage] = useState(1)
   const [hasMore, setHasMore] = useState(false)
   const [brokenLogoKeys, setBrokenLogoKeys] = useState(() => new Set())
   const [liveCountries, setLiveCountries] = useState(() => staticLiveCountries)
+  const [playbackNonce, setPlaybackNonce] = useState(0)
+  const [selectedQuality, setSelectedQuality] = useState(() => readSavedLiveQualityPreference())
+  const [availableQualityOptions, setAvailableQualityOptions] = useState(() => [{ value: 'auto', label: 'Otomatik' }])
+  const [activeQualityLabel, setActiveQualityLabel] = useState('Canli')
   
   const ITEMS_PER_PAGE = 40
   const debouncedSearch = useDebounce(searchQuery, 200)
@@ -316,15 +552,117 @@ export default function PlayerPage() {
   )
 
   useEffect(() => {
+    volumeRef.current = volume
+    mutedRef.current = isMuted
+
+    const video = videoRef.current
+    if (!video) {
+      return
+    }
+
+    video.volume = volume
+    video.muted = isMuted
+  }, [isMuted, volume])
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return
+    }
+
+    try {
+      window.localStorage.setItem(LIVE_QUALITY_STORAGE_KEY, selectedQuality)
+    } catch {
+      // ignore local preference write errors
+    }
+  }, [selectedQuality])
+
+  const clearLiveStartupTimeout = useCallback(() => {
+    if (liveStartupTimeoutRef.current) {
+      clearTimeout(liveStartupTimeoutRef.current)
+      liveStartupTimeoutRef.current = null
+    }
+  }, [])
+
+  const clearLiveRetryTimeout = useCallback(() => {
+    if (liveRetryTimeoutRef.current) {
+      clearTimeout(liveRetryTimeoutRef.current)
+      liveRetryTimeoutRef.current = null
+    }
+  }, [])
+
+  const restartLivePlayback = useCallback((delayMs = 0) => {
+    clearLiveStartupTimeout()
+    clearLiveRetryTimeout()
+    setLoading(true)
+    setError(null)
+
+    if (delayMs > 0) {
+      liveRetryTimeoutRef.current = setTimeout(() => {
+        setPlaybackNonce((current) => current + 1)
+      }, delayMs)
+      return
+    }
+
+    setPlaybackNonce((current) => current + 1)
+  }, [clearLiveRetryTimeout, clearLiveStartupTimeout])
+
+  const applySelectedLiveQuality = useCallback((hlsInstance, preference = selectedQuality) => {
+    if (!hlsInstance) {
+      return -1
+    }
+
+    const nextLevelIndex = pickHlsLevelIndex(hlsInstance.levels || [], preference)
+    hlsInstance.currentLevel = nextLevelIndex
+
+    hlsInstance.nextLevel = nextLevelIndex
+    hlsInstance.loadLevel = nextLevelIndex
+
+    return nextLevelIndex
+  }, [selectedQuality])
+
+  useEffect(() => {
     return () => {
+      clearLiveStartupTimeout()
+      clearLiveRetryTimeout()
+
+      if (controlsTimeoutRef.current) {
+        clearTimeout(controlsTimeoutRef.current)
+      }
+
       if (observerRef.current) {
         observerRef.current.disconnect()
       }
     }
-  }, [])
+  }, [clearLiveRetryTimeout, clearLiveStartupTimeout])
+
+  useEffect(() => {
+    const hlsInstance = hlsPlayerRef.current
+
+    if (!currentChannel) {
+      setAvailableQualityOptions([{ value: 'auto', label: 'Otomatik' }])
+      setActiveQualityLabel('Canli')
+      return
+    }
+
+    if (!hlsInstance) {
+      setAvailableQualityOptions([{ value: 'auto', label: 'Otomatik' }])
+      setActiveQualityLabel(inferChannelQualityLabel(currentChannel))
+      return
+    }
+
+    setAvailableQualityOptions(buildHlsQualityOptions(hlsInstance.levels || []))
+
+    const nextLevelIndex = applySelectedLiveQuality(hlsInstance, selectedQuality)
+    const activeLevel = nextLevelIndex >= 0
+      ? hlsInstance.levels?.[nextLevelIndex]
+      : hlsInstance.levels?.[hlsInstance.currentLevel] || null
+
+    setActiveQualityLabel(buildActiveQualityLabel(currentChannel, activeLevel, selectedQuality === 'auto'))
+  }, [applySelectedLiveQuality, currentChannel, selectedQuality])
 
   // Player - Kanal değişimi
   useEffect(() => {
+    if (currentChannel) return
     if (isVodMode) return
     if (!currentChannel || !videoRef.current) return
     
@@ -413,6 +751,288 @@ export default function PlayerPage() {
     }
   }, [currentChannel, isVodMode])
 
+  useEffect(() => {
+    if (isVodMode) return
+    if (!currentChannel || !videoRef.current) return
+
+    const video = videoRef.current
+    const url = currentChannel.url
+    const streamMode = inferLiveStreamMode(currentChannel)
+    const playbackKey = `${buildChannelIdentity(currentChannel)}:${playbackNonce}`
+
+    livePlaybackStartedRef.current = false
+    liveRecoveryStateRef.current = {
+      key: playbackKey,
+      networkRetries: 0,
+      mediaRetries: 0,
+      reloadRetries: 0
+    }
+
+    setError(null)
+    setLoading(true)
+    setAvailableQualityOptions([{ value: 'auto', label: 'Otomatik' }])
+    setActiveQualityLabel(inferChannelQualityLabel(currentChannel))
+    clearLiveStartupTimeout()
+    clearLiveRetryTimeout()
+
+    if (hlsPlayerRef.current) {
+      hlsPlayerRef.current.destroy()
+      hlsPlayerRef.current = null
+    }
+
+    if (playerRef.current) {
+      playerRef.current.destroy()
+      playerRef.current = null
+    }
+
+    video.pause()
+    video.removeAttribute('src')
+    video.load()
+    video.preload = 'auto'
+    video.playsInline = true
+    video.crossOrigin = 'anonymous'
+    video.volume = volumeRef.current
+    video.muted = mutedRef.current
+
+    const setReadyState = () => {
+      livePlaybackStartedRef.current = true
+      clearLiveStartupTimeout()
+      setLoading(false)
+    }
+
+    const attemptPlay = () => {
+      video.play().catch(() => {})
+    }
+
+    const scheduleSoftReload = (delayMs = LIVE_RELOAD_DELAY_MS) => {
+      const recoveryState = liveRecoveryStateRef.current
+      if (recoveryState.key !== playbackKey) {
+        return true
+      }
+
+      if (recoveryState.reloadRetries >= LIVE_MAX_RELOAD_ATTEMPTS) {
+        return false
+      }
+
+      recoveryState.reloadRetries += 1
+      restartLivePlayback(delayMs)
+      return true
+    }
+
+    const failPlayback = (message = 'Yayin yuklenemedi') => {
+      clearLiveStartupTimeout()
+      setLoading(false)
+      setError(message)
+    }
+
+    const handleWaiting = () => {
+      if (livePlaybackStartedRef.current) {
+        setLoading(true)
+      }
+    }
+
+    const handleStall = () => {
+      if (nudgeToLiveEdge(video)) {
+        attemptPlay()
+        return
+      }
+
+      if (livePlaybackStartedRef.current) {
+        setLoading(true)
+      }
+    }
+
+    const handleNativeError = () => {
+      if (!scheduleSoftReload(700)) {
+        failPlayback('Yayin gecici olarak yanit vermiyor')
+      }
+    }
+
+    video.addEventListener('loadeddata', setReadyState)
+    video.addEventListener('canplay', setReadyState)
+    video.addEventListener('playing', setReadyState)
+    video.addEventListener('seeked', setReadyState)
+    video.addEventListener('waiting', handleWaiting)
+    video.addEventListener('stalled', handleStall)
+    video.addEventListener('seeking', handleWaiting)
+    video.addEventListener('error', handleNativeError)
+
+    liveStartupTimeoutRef.current = setTimeout(() => {
+      if (livePlaybackStartedRef.current || video.currentTime > 0) {
+        return
+      }
+
+      if (nudgeToLiveEdge(video)) {
+        attemptPlay()
+        return
+      }
+
+      if (!scheduleSoftReload(700)) {
+        failPlayback('Yayin belirtilen surede baslatilamadi')
+      }
+    }, LIVE_STARTUP_TIMEOUT_MS)
+
+    if (streamMode === 'hls' && Hls.isSupported()) {
+      const hls = new Hls({
+        enableWorker: true,
+        lowLatencyMode: false,
+        capLevelToPlayerSize: false,
+        backBufferLength: 90,
+        maxBufferLength: 90,
+        maxMaxBufferLength: 120,
+        liveSyncDurationCount: 6,
+        liveMaxLatencyDurationCount: 12,
+        manifestLoadingTimeOut: 20000,
+        levelLoadingTimeOut: 20000,
+        fragLoadingTimeOut: 30000,
+        manifestLoadingMaxRetry: 4,
+        levelLoadingMaxRetry: 4,
+        fragLoadingMaxRetry: 6,
+        fragLoadingRetryDelay: 1000,
+        fragLoadingMaxRetryTimeout: 8000,
+        startFragPrefetch: true,
+        maxLiveSyncPlaybackRate: 1.2
+      })
+      hlsPlayerRef.current = hls
+      hls.loadSource(url)
+      hls.attachMedia(video)
+
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        setAvailableQualityOptions(buildHlsQualityOptions(hls.levels || []))
+        const nextLevelIndex = applySelectedLiveQuality(hls, selectedQuality)
+        const activeLevel = nextLevelIndex >= 0
+          ? hls.levels?.[nextLevelIndex]
+          : hls.levels?.[hls.nextAutoLevel] || hls.levels?.[hls.currentLevel] || null
+        setActiveQualityLabel(buildActiveQualityLabel(currentChannel, activeLevel, selectedQuality === 'auto'))
+        setLoading(false)
+        attemptPlay()
+      })
+
+      hls.on(Hls.Events.LEVEL_LOADED, () => {
+        if (livePlaybackStartedRef.current) {
+          setLoading(false)
+        }
+      })
+
+      hls.on(Hls.Events.LEVEL_SWITCHED, (_, data) => {
+        const activeLevel = hls.levels?.[data?.level] || null
+        setActiveQualityLabel(buildActiveQualityLabel(currentChannel, activeLevel, selectedQuality === 'auto'))
+      })
+
+      hls.on(Hls.Events.ERROR, (_, data) => {
+        const details = String(data?.details || '').toLowerCase()
+
+        if (!data?.fatal) {
+          if (
+            details.includes('bufferstalled') ||
+            details.includes('bufferseekoverhole') ||
+            details.includes('fragloaderror')
+          ) {
+            if (nudgeToLiveEdge(video)) {
+              attemptPlay()
+            }
+          }
+          return
+        }
+
+        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+          const recoveryState = liveRecoveryStateRef.current
+          if (recoveryState.networkRetries < LIVE_MAX_NETWORK_RECOVERIES) {
+            recoveryState.networkRetries += 1
+            setLoading(true)
+            hls.startLoad()
+            return
+          }
+
+          if (!scheduleSoftReload()) {
+            failPlayback('Yayin baglantisi kesildi')
+          }
+          return
+        }
+
+        if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+          const recoveryState = liveRecoveryStateRef.current
+          if (recoveryState.mediaRetries < LIVE_MAX_MEDIA_RECOVERIES) {
+            recoveryState.mediaRetries += 1
+            setLoading(true)
+            hls.recoverMediaError()
+            return
+          }
+
+          if (!scheduleSoftReload()) {
+            failPlayback('Yayin kod cozucu hatasi nedeniyle durdu')
+          }
+          return
+        }
+
+        if (!scheduleSoftReload()) {
+          failPlayback('Yayin yuklenemedi')
+        }
+      })
+    } else if (streamMode === 'hls' && video.canPlayType('application/vnd.apple.mpegurl')) {
+      setActiveQualityLabel(inferChannelQualityLabel(currentChannel))
+      video.src = url
+      video.load()
+      attemptPlay()
+    } else if (streamMode === 'mpegts' && mpegts.getFeatureList().mseLivePlayback) {
+      setActiveQualityLabel(inferChannelQualityLabel(currentChannel))
+      const player = mpegts.createPlayer({
+        type: 'mpegts',
+        url: url,
+        isLive: true,
+      })
+      playerRef.current = player
+      player.attachMediaElement(video)
+      player.on(mpegts.Events.ERROR, () => {
+        if (!scheduleSoftReload(700)) {
+          failPlayback('Yayin yuklenemedi')
+        }
+      })
+      player.load()
+      player.play()
+        .then(() => {
+          setLoading(false)
+        })
+        .catch(() => {
+          if (!scheduleSoftReload(700)) {
+            failPlayback('Yayin yuklenemedi')
+          }
+        })
+    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      setActiveQualityLabel(inferChannelQualityLabel(currentChannel))
+      video.src = url
+      video.load()
+      attemptPlay()
+    } else {
+      failPlayback('Tarayici bu yayin formatini desteklemiyor')
+    }
+
+    return () => {
+      clearLiveStartupTimeout()
+      video.removeEventListener('loadeddata', setReadyState)
+      video.removeEventListener('canplay', setReadyState)
+      video.removeEventListener('playing', setReadyState)
+      video.removeEventListener('seeked', setReadyState)
+      video.removeEventListener('waiting', handleWaiting)
+      video.removeEventListener('stalled', handleStall)
+      video.removeEventListener('seeking', handleWaiting)
+      video.removeEventListener('error', handleNativeError)
+      hlsPlayerRef.current?.destroy()
+      hlsPlayerRef.current = null
+      playerRef.current?.destroy()
+      playerRef.current = null
+    }
+  }, [
+    clearLiveRetryTimeout,
+    clearLiveStartupTimeout,
+    currentChannel,
+    isVodMode,
+    selectedQuality,
+    playbackNonce,
+    restartLivePlayback,
+    applySelectedLiveQuality
+  ])
+
   // Kontrolleri gizle/göster
   const handleMouseMove = useCallback(() => {
     setShowControls(true)
@@ -448,11 +1068,6 @@ export default function PlayerPage() {
     }
   }
 
-  useEffect(() => {
-    const handler = () => setIsFullscreen(!!document.fullscreenElement)
-    document.addEventListener('fullscreenchange', handler)
-    return () => document.removeEventListener('fullscreenchange', handler)
-  }, [])
 
   // Kanal değiştir (ok tuşları)
   useEffect(() => {
@@ -621,7 +1236,7 @@ export default function PlayerPage() {
                   <p className="text-white mb-4">{error}</p>
                   <button 
                     onClick={() => {
-                      window.location.reload()
+                      restartLivePlayback()
                     }}
                     className="flex items-center gap-2 px-6 py-3 rounded-xl mx-auto font-bold"
                     style={{ backgroundColor: PRIMARY, color: 'white' }}
@@ -648,12 +1263,28 @@ export default function PlayerPage() {
             >
               {/* Kanal Bilgisi */}
               <div className="mb-4">
-                <h2 className="text-2xl font-bold text-white">{currentChannel?.name}</h2>
+                <div className="flex items-center gap-3 flex-wrap">
+                  <h2 className="text-2xl font-bold text-white">{currentChannel?.name}</h2>
+                  {activeQualityLabel !== 'Canli' && (
+                    <span
+                      className="px-3 py-1 rounded-full text-xs font-black tracking-[0.18em]"
+                      style={{
+                        color: activeQualityLabel.includes('4K') ? '#fff7d6' : 'white',
+                        backgroundColor: activeQualityLabel.includes('4K') ? 'rgba(245, 158, 11, 0.28)' : 'rgba(255,255,255,0.14)',
+                        border: activeQualityLabel.includes('4K')
+                          ? '1px solid rgba(245, 158, 11, 0.6)'
+                          : '1px solid rgba(255,255,255,0.15)'
+                      }}
+                    >
+                      {activeQualityLabel}
+                    </span>
+                  )}
+                </div>
                 <p className="text-white/60">{currentChannel?.group}</p>
               </div>
               
               {/* Kontrol Butonları */}
-              <div className="flex items-center gap-6">
+              <div className="flex items-center gap-6 flex-wrap">
                 {/* Ses */}
                 <div className="flex items-center gap-3">
                   <button 
@@ -672,6 +1303,25 @@ export default function PlayerPage() {
                     className="w-32 h-2 rounded-lg appearance-none cursor-pointer"
                     style={{ backgroundColor: 'rgba(255,255,255,0.3)' }}
                   />
+                </div>
+
+                <div className="flex items-center gap-3">
+                  <span className="text-xs font-bold uppercase tracking-[0.2em] text-white/60">Kalite</span>
+                  <select
+                    value={availableQualityOptions.some((option) => option.value === selectedQuality) ? selectedQuality : 'auto'}
+                    onChange={(e) => setSelectedQuality(e.target.value)}
+                    className="px-4 py-2 rounded-xl text-white text-sm font-bold outline-none"
+                    style={{
+                      backgroundColor: 'rgba(255,255,255,0.12)',
+                      border: '1px solid rgba(255,255,255,0.14)'
+                    }}
+                  >
+                    {availableQualityOptions.map((option) => (
+                      <option key={option.value} value={option.value} style={{ backgroundColor: BG_CARD }}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
                 </div>
                 
                 {/* Fullscreen */}

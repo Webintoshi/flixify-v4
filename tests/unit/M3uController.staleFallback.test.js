@@ -65,6 +65,21 @@ describe('M3uController live proxy helpers', () => {
     expect(controller._buildProxyCandidates([])).toEqual([{ proxy: null, proxyIndex: -1 }])
   })
 
+  test('uses a wider live HLS window by default when no env override exists', () => {
+    const previousValue = process.env.LIVE_HLS_KEEP_SEGMENTS
+    delete process.env.LIVE_HLS_KEEP_SEGMENTS
+
+    const controller = buildController()
+
+    if (previousValue === undefined) {
+      delete process.env.LIVE_HLS_KEEP_SEGMENTS
+    } else {
+      process.env.LIVE_HLS_KEEP_SEGMENTS = previousValue
+    }
+
+    expect(controller._liveHlsKeepSegments).toBe(60)
+  })
+
   test('prunes old live segments and adjusts media sequence', () => {
     const controller = buildController()
     const raw = [

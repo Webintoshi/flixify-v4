@@ -58,7 +58,7 @@ class M3uController {
         ? configuredLiveKeepSegments
         : 0;
     } else {
-      this._liveHlsKeepSegments = 24;
+      this._liveHlsKeepSegments = 60;
     }
     this._httpAgent = new http.Agent({
       keepAlive: true,

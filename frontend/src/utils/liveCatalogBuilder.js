@@ -83,10 +83,11 @@ function getSourceTypeScore(sourceType = '') {
 
 function getQualityScore(name = '') {
   const lowered = String(name || '').toLowerCase()
+  if (/\b8k\b/.test(lowered)) return 20
+  if (/\b4k\b|\buhd\b/.test(lowered)) return 18
   if (/\bfhd\b|full\s*hd/.test(lowered)) return 16
   if (/\bhd\b/.test(lowered)) return 14
   if (/\bsd\b/.test(lowered)) return 12
-  if (/\b4k\b|\buhd\b/.test(lowered)) return 10
   if (/\bhevc\b|h\.?265/.test(lowered)) return 7
   if (/\braw\b/.test(lowered)) return 5
   return 8
