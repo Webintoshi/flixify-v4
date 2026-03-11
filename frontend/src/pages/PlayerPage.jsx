@@ -6,6 +6,7 @@ import mpegts from 'mpegts.js'
 import Hls from 'hls.js'
 import { fetchLiveCatalog, getCachedLiveCatalogSnapshot, hasAssignedPlaylist, hasValidSubscription } from '../services/playlist'
 import { DEFAULT_LIVE_COUNTRY_CODE, LIVE_TV_COUNTRIES } from '../config/liveTvTaxonomy'
+import { resolveChannelFallbackLogo } from '../config/channelLogoFallbacks'
 import VodPlayer from '../components/player/VodPlayer'
 
 const PRIMARY = '#E50914'
@@ -169,6 +170,7 @@ export default function PlayerPage() {
   const [volume, setVolume] = useState(1)
   const [isMuted, setIsMuted] = useState(false)
   const [brokenLogoKeys, setBrokenLogoKeys] = useState(() => new Set())
+  const [brokenFallbackLogoKeys, setBrokenFallbackLogoKeys] = useState(() => new Set())
   const [liveCountries, setLiveCountries] = useState(() => {
     const cachedCountries = initialLiveCatalogSnapshot?.value?.countries
     return Array.isArray(cachedCountries) && cachedCountries.length > 0
@@ -344,6 +346,7 @@ export default function PlayerPage() {
       }
       hasBootstrappedCatalogRef.current = hasChannels || hasBootstrappedCatalogRef.current
       setBrokenLogoKeys(new Set())
+      setBrokenFallbackLogoKeys(new Set())
       setError(hasChannels ? null : 'Canli kanal bulunamadi. Statik canli TV katalogu kontrol edilmeli.')
       setLoading(false)
     } catch {
@@ -482,18 +485,48 @@ export default function PlayerPage() {
     []
   )
 
-  const isChannelLogoVisible = useCallback(
+  const resolveChannelLogoSource = useCallback(
     (channel) => {
-      const logo = String(channel?.logo || '').trim()
-      if (!logo) return false
-      return !brokenLogoKeys.has(buildChannelLogoKey(channel))
+      const logoKey = buildChannelLogoKey(channel)
+      const remoteLogo = String(channel?.logo || '').trim()
+      const fallbackLogo = resolveChannelFallbackLogo(channel)
+
+      if (remoteLogo && !brokenLogoKeys.has(logoKey)) {
+        return {
+          src: remoteLogo,
+          kind: 'remote'
+        }
+      }
+
+      if (fallbackLogo && !brokenFallbackLogoKeys.has(logoKey)) {
+        return {
+          src: fallbackLogo,
+          kind: 'fallback'
+        }
+      }
+
+      return {
+        src: '',
+        kind: 'none'
+      }
     },
-    [brokenLogoKeys, buildChannelLogoKey]
+    [brokenFallbackLogoKeys, brokenLogoKeys, buildChannelLogoKey]
   )
 
   const handleChannelLogoError = useCallback(
-    (channel) => {
+    (channel, sourceKind = 'remote') => {
       const key = buildChannelLogoKey(channel)
+
+      if (sourceKind === 'fallback') {
+        setBrokenFallbackLogoKeys((prev) => {
+          if (prev.has(key)) return prev
+          const next = new Set(prev)
+          next.add(key)
+          return next
+        })
+        return
+      }
+
       setBrokenLogoKeys((prev) => {
         if (prev.has(key)) return prev
         const next = new Set(prev)
@@ -502,6 +535,11 @@ export default function PlayerPage() {
       })
     },
     [buildChannelLogoKey]
+  )
+
+  const currentChannelLogo = useMemo(
+    () => resolveChannelLogoSource(currentChannel),
+    [currentChannel, resolveChannelLogoSource]
   )
 
   useEffect(() => {
@@ -841,11 +879,12 @@ export default function PlayerPage() {
                     className="w-10 h-10 rounded-lg flex items-center justify-center"
                     style={{ backgroundColor: 'rgba(255,255,255,0.05)' }}
                   >
-                    {isChannelLogoVisible(currentChannel) ? (
+                    {currentChannelLogo.src ? (
                       <img
-                        src={currentChannel?.logo}
+                        src={currentChannelLogo.src}
                         alt=""
                         className="w-8 h-8 object-contain"
+                        onError={() => handleChannelLogoError(currentChannel, currentChannelLogo.kind)}
                       />
                     ) : (
                       <Tv className="w-4 h-4 text-white/40" />
@@ -933,7 +972,7 @@ export default function PlayerPage() {
                 <div className="h-full flex flex-col">
                   {visibleChannels.map((channel, index) => {
                     const isActive = buildChannelIdentity(currentChannel) === buildChannelIdentity(channel)
-                    const showLogo = isChannelLogoVisible(channel)
+                    const channelLogo = resolveChannelLogoSource(channel)
                     const channelNumber = (channelPage * CHANNELS_PER_PAGE) + index + 1
                     
                     return (
@@ -957,12 +996,12 @@ export default function PlayerPage() {
                           className="w-8 h-8 rounded flex-shrink-0 flex items-center justify-center"
                           style={{ backgroundColor: isActive ? 'rgba(255,255,255,0.15)' : 'rgba(255,255,255,0.05)' }}
                         >
-                          {showLogo ? (
+                          {channelLogo.src ? (
                             <img
-                              src={channel.logo}
+                              src={channelLogo.src}
                               alt=""
                               loading="lazy"
-                              onError={() => handleChannelLogoError(channel)}
+                              onError={() => handleChannelLogoError(channel, channelLogo.kind)}
                               className="w-6 h-6 object-contain"
                             />
                           ) : (
