@@ -1130,6 +1130,123 @@ class M3uController {
     return `${req.protocol}://${req.get('host')}/api/v1`;
   }
 
+  _extractProxyTargetFromUrl(proxyUrl) {
+    const normalizedUrl = String(proxyUrl || '').trim();
+    if (!normalizedUrl) {
+      return null;
+    }
+
+    try {
+      const parsed = new URL(normalizedUrl, 'http://proxy.local');
+      const pathname = String(parsed.pathname || '');
+      const targetUrl = String(parsed.searchParams.get('url') || '').trim();
+      const preferredProxyIndex = this._parsePreferredProxyIndex(parsed.searchParams.get('up'));
+
+      if (!targetUrl) {
+        return null;
+      }
+
+      if (pathname.includes('/api/v1/stream/')) {
+        return {
+          type: 'stream',
+          targetUrl,
+          preferredProxyIndex
+        };
+      }
+
+      if (pathname.includes('/api/v1/m3u/logo/')) {
+        return {
+          type: 'logo',
+          targetUrl,
+          preferredProxyIndex
+        };
+      }
+
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  _rehydrateProxyUrlForRequest(proxyUrl, baseApiUrl, code, token) {
+    const normalizedUrl = String(proxyUrl || '').trim();
+    if (!normalizedUrl) {
+      return '';
+    }
+
+    const proxyTarget = this._extractProxyTargetFromUrl(normalizedUrl);
+    if (!proxyTarget) {
+      return normalizedUrl;
+    }
+
+    if (proxyTarget.type === 'stream') {
+      return this._buildStreamProxyUrl(
+        baseApiUrl,
+        code,
+        token,
+        proxyTarget.targetUrl,
+        proxyTarget.preferredProxyIndex
+      );
+    }
+
+    if (proxyTarget.type === 'logo') {
+      return this._buildLogoProxyUrl(baseApiUrl, code, token, proxyTarget.targetUrl);
+    }
+
+    return normalizedUrl;
+  }
+
+  _rehydrateSeriesCatalogForRequest(catalog = [], baseApiUrl, code, token) {
+    if (!Array.isArray(catalog)) {
+      return [];
+    }
+
+    return catalog.map((series) => {
+      const seasons = series?.seasons && typeof series.seasons === 'object'
+        ? Object.fromEntries(
+          Object.entries(series.seasons).map(([seasonKey, episodes]) => ([
+            seasonKey,
+            Array.isArray(episodes)
+              ? episodes.map((episode) => ({
+                ...episode,
+                logo: this._rehydrateProxyUrlForRequest(episode?.logo, baseApiUrl, code, token),
+                url: this._rehydrateProxyUrlForRequest(episode?.url, baseApiUrl, code, token)
+              }))
+              : []
+          ]))
+        )
+        : {};
+
+      return {
+        ...series,
+        logo: this._rehydrateProxyUrlForRequest(series?.logo, baseApiUrl, code, token),
+        logoCandidates: Array.isArray(series?.logoCandidates)
+          ? series.logoCandidates.map((candidate) => (
+            this._rehydrateProxyUrlForRequest(candidate, baseApiUrl, code, token)
+          ))
+          : [],
+        seasons
+      };
+    });
+  }
+
+  _rehydrateMovieCatalogForRequest(catalog = [], baseApiUrl, code, token) {
+    if (!Array.isArray(catalog)) {
+      return [];
+    }
+
+    return catalog.map((movie) => ({
+      ...movie,
+      logo: this._rehydrateProxyUrlForRequest(movie?.logo, baseApiUrl, code, token),
+      logoCandidates: Array.isArray(movie?.logoCandidates)
+        ? movie.logoCandidates.map((candidate) => (
+          this._rehydrateProxyUrlForRequest(candidate, baseApiUrl, code, token)
+        ))
+        : [],
+      url: this._rehydrateProxyUrlForRequest(movie?.url, baseApiUrl, code, token)
+    }));
+  }
+
   _buildStreamProxyUrl(baseApiUrl, code, token, targetUrl, preferredProxyIndex = null) {
     const baseUrl = `${baseApiUrl}/stream/${encodeURIComponent(code)}?token=${encodeURIComponent(token)}&url=${encodeURIComponent(targetUrl)}`;
     return Number.isInteger(preferredProxyIndex) && preferredProxyIndex >= 0
@@ -1701,9 +1818,10 @@ class M3uController {
           logoProxyBuilder: (targetUrl) => this._buildLogoProxyUrl(baseApiUrl, code, accessToken, targetUrl)
         });
       });
+      const hydratedCatalog = this._rehydrateSeriesCatalogForRequest(catalog, baseApiUrl, code, accessToken);
 
       if (seriesNameFilter) {
-        const seriesItem = this._findSeriesByName(catalog, seriesNameFilter);
+        const seriesItem = this._findSeriesByName(hydratedCatalog, seriesNameFilter);
 
         if (!seriesItem) {
           return res.status(404).json({
@@ -1721,7 +1839,7 @@ class M3uController {
         });
       }
 
-      const items = compact ? this._buildSeriesSummaryCatalog(catalog) : catalog;
+      const items = compact ? this._buildSeriesSummaryCatalog(hydratedCatalog) : hydratedCatalog;
 
       res.json({
         status: 'success',
@@ -1759,12 +1877,13 @@ class M3uController {
           logoProxyBuilder: (targetUrl) => this._buildLogoProxyUrl(baseApiUrl, code, accessToken, targetUrl)
         });
       });
+      const hydratedCatalog = this._rehydrateMovieCatalogForRequest(catalog, baseApiUrl, code, accessToken);
 
       res.json({
         status: 'success',
         data: {
-          items: catalog,
-          total: catalog.length,
+          items: hydratedCatalog,
+          total: hydratedCatalog.length,
           generatedAt: new Date().toISOString()
         }
       });

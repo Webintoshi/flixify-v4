@@ -1,6 +1,7 @@
 const DEFAULT_API_BASE_PATH = '/api/v1'
 const DEDICATED_PRODUCTION_API_BASE_URL = 'https://api-v4.flixify.pro/api/v1'
 const RETRYABLE_API_STATUS_CODES = new Set([408, 425, 429, 500, 502, 503, 504])
+const SAFE_FAILOVER_STATUS_CODES = new Set([404, 405, 421, 501])
 
 const rawApiBaseUrl = String(import.meta.env.VITE_API_URL || DEFAULT_API_BASE_PATH).trim()
 const rawFallbackApiBaseUrl = String(import.meta.env.VITE_API_FALLBACK_URL || '').trim()
@@ -131,6 +132,66 @@ export const API_BASE_CANDIDATES = buildApiBaseCandidates()
 export const API_BASE_URL = API_BASE_CANDIDATES[0] || DEFAULT_API_BASE_PATH
 export const API_FALLBACK_BASE_URLS = API_BASE_CANDIDATES.slice(1)
 
+function getApiBasePaths() {
+  return dedupeValues([
+    DEFAULT_API_BASE_PATH,
+    ...API_BASE_CANDIDATES.map((baseUrl) => {
+      if (isAbsoluteHttpUrl(baseUrl)) {
+        try {
+          return ensureLeadingSlash(new URL(baseUrl).pathname || DEFAULT_API_BASE_PATH)
+        } catch {
+          return ''
+        }
+      }
+
+      return ensureLeadingSlash(baseUrl)
+    })
+  ]).sort((left, right) => right.length - left.length)
+}
+
+function extractKnownApiPath(input = '') {
+  const normalizedInput = String(input || '').trim()
+  if (!normalizedInput) {
+    return ''
+  }
+
+  const candidateBasePaths = getApiBasePaths()
+  const extractFromPath = (rawPath = '') => {
+    const normalizedPath = ensureLeadingSlash(rawPath)
+
+    for (const basePath of candidateBasePaths) {
+      if (!basePath) {
+        continue
+      }
+
+      if (normalizedPath === basePath) {
+        return ''
+      }
+
+      if (
+        normalizedPath.startsWith(`${basePath}/`)
+        || normalizedPath.startsWith(`${basePath}?`)
+        || normalizedPath.startsWith(`${basePath}#`)
+      ) {
+        return normalizedPath.slice(basePath.length) || ''
+      }
+    }
+
+    return null
+  }
+
+  if (isAbsoluteHttpUrl(normalizedInput)) {
+    try {
+      const parsed = new URL(normalizedInput)
+      return extractFromPath(`${parsed.pathname}${parsed.search}${parsed.hash}`)
+    } catch {
+      return null
+    }
+  }
+
+  return extractFromPath(normalizedInput)
+}
+
 function extractRequestPath(input = '') {
   const normalizedInput = String(input || '').trim()
   if (!normalizedInput) {
@@ -215,6 +276,37 @@ export function buildApiCandidateUrls(path = '') {
   return API_BASE_CANDIDATES.map((baseUrl) => buildApiUrl(requestPath, baseUrl))
 }
 
+export function normalizeApiResourceUrl(input = '', baseUrl = API_BASE_URL) {
+  const apiPath = extractKnownApiPath(input)
+
+  if (apiPath === null) {
+    return String(input || '').trim()
+  }
+
+  return buildApiUrl(apiPath, baseUrl)
+}
+
+function getRequestMethod(init = {}) {
+  return String(init?.method || 'GET').trim().toUpperCase() || 'GET'
+}
+
+function shouldFallbackToNextCandidate(response, index, candidateUrls, retryableStatuses, init = {}) {
+  if (!response || response.ok || index >= candidateUrls.length - 1) {
+    return false
+  }
+
+  if (retryableStatuses.has(response.status)) {
+    return true
+  }
+
+  const method = getRequestMethod(init)
+  if (!['GET', 'HEAD'].includes(method)) {
+    return false
+  }
+
+  return SAFE_FAILOVER_STATUS_CODES.has(response.status)
+}
+
 export async function apiFetch(path = '', init = {}, options = {}) {
   const { retryStatuses = RETRYABLE_API_STATUS_CODES } = options
   const candidateUrls = buildApiCandidateUrls(path)
@@ -229,7 +321,7 @@ export async function apiFetch(path = '', init = {}, options = {}) {
     try {
       const response = await fetch(requestUrl, init)
 
-      if (response.ok || index === candidateUrls.length - 1 || !retryableStatuses.has(response.status)) {
+      if (!shouldFallbackToNextCandidate(response, index, candidateUrls, retryableStatuses, init)) {
         return response
       }
 

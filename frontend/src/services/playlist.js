@@ -1,4 +1,4 @@
-import { apiFetch, buildApiUrl } from '../config/api'
+import { apiFetch, buildApiUrl, normalizeApiResourceUrl } from '../config/api'
 import {
   parseSeriesFromPlaylist,
   groupSeriesEpisodes,
@@ -22,6 +22,7 @@ const parsedMemoryCache = new Map()
 const catalogMemoryCache = new Map()
 const inflightPlaylistRequests = new Map()
 const inflightCatalogRequests = new Map()
+const API_PROXY_RESOURCE_PATTERN = /(^|\/)api\/v1\/(?:stream\/|m3u\/logo\/|m3u\/[^/?#]+\.m3u(?:[?#]|$)|vod\/)/i
 
 function canUseSessionStorage() {
   return typeof window !== 'undefined' && typeof window.sessionStorage !== 'undefined'
@@ -468,6 +469,98 @@ function uniqueStringList(values = []) {
   return result
 }
 
+function normalizeProxyResourceUrl(value) {
+  const normalized = String(value || '').trim()
+  if (!normalized) {
+    return ''
+  }
+
+  if (!API_PROXY_RESOURCE_PATTERN.test(normalized)) {
+    return normalized
+  }
+
+  return normalizeApiResourceUrl(normalized)
+}
+
+function normalizeEpisodeItemUrls(episode = {}) {
+  return {
+    ...episode,
+    logo: normalizeProxyResourceUrl(episode?.logo),
+    url: normalizeProxyResourceUrl(episode?.url)
+  }
+}
+
+function normalizeSeriesCatalogItemUrls(series = {}) {
+  const seasons = series?.seasons && typeof series.seasons === 'object'
+    ? Object.fromEntries(
+      Object.entries(series.seasons).map(([seasonKey, episodes]) => ([
+        seasonKey,
+        Array.isArray(episodes) ? episodes.map((episode) => normalizeEpisodeItemUrls(episode)) : []
+      ]))
+    )
+    : {}
+
+  return {
+    ...series,
+    logo: normalizeProxyResourceUrl(series?.logo),
+    logoCandidates: uniqueStringList(series?.logoCandidates).map((value) => normalizeProxyResourceUrl(value)),
+    firstEpisode: series?.firstEpisode ? normalizeEpisodeItemUrls(series.firstEpisode) : series?.firstEpisode || null,
+    seasons
+  }
+}
+
+function normalizeMovieCatalogItemUrls(movie = {}) {
+  return {
+    ...movie,
+    logo: normalizeProxyResourceUrl(movie?.logo),
+    logoCandidates: uniqueStringList(movie?.logoCandidates).map((value) => normalizeProxyResourceUrl(value)),
+    url: normalizeProxyResourceUrl(movie?.url)
+  }
+}
+
+function normalizeLiveCatalogPayloadUrls(payload = {}) {
+  const items = Array.isArray(payload?.items)
+    ? payload.items.map((item) => ({
+      ...item,
+      logo: normalizeProxyResourceUrl(item?.logo),
+      url: normalizeProxyResourceUrl(item?.url)
+    }))
+    : []
+
+  return {
+    ...payload,
+    items
+  }
+}
+
+function normalizeCatalogPayloadUrls(catalogType, payload) {
+  if (catalogType === 'live') {
+    return normalizeLiveCatalogPayloadUrls(payload)
+  }
+
+  if (!Array.isArray(payload)) {
+    if (catalogType === 'series' && payload && typeof payload === 'object') {
+      return normalizeSeriesCatalogItemUrls(payload)
+    }
+
+    if (catalogType === 'movies' && payload && typeof payload === 'object') {
+      return normalizeMovieCatalogItemUrls(payload)
+    }
+
+    return payload
+  }
+
+  if (catalogType === 'series') {
+    return payload.map((series) => normalizeSeriesCatalogItemUrls(series))
+  }
+
+  if (catalogType === 'movies') {
+    return payload.map((movie) => normalizeMovieCatalogItemUrls(movie))
+  }
+
+  return payload
+}
+
 function normalizeSeriesName(value) {
   return String(value || '').trim().toLowerCase()
 }
@@ -771,7 +864,7 @@ export async function fetchUserPlaylist(user, token, options = {}) {
           continue
         }
 
-        if (shouldStoreCache && staleCached && isTransient) {
+        if (shouldStoreCache && staleCached && (isTransient || error?.status === 404)) {
           return staleCached
         }
 
@@ -886,14 +979,17 @@ async function fetchCatalog(user, token, catalogType, options = {}) {
   }
 
   if (!preferCatalogApi && resolvedDeliveryMode !== 'proxy') {
-    const directRequest = fetchCatalogFallback(user, token, catalogType, {
-      signal,
-      forceRefresh,
-      ttlMs,
-      compact,
-      seriesName,
-      deliveryMode: resolvedDeliveryMode
-    }).then((items) => cacheEntry(catalogMemoryCache, catalogCacheKey, items))
+      const directRequest = fetchCatalogFallback(user, token, catalogType, {
+        signal,
+        forceRefresh,
+        ttlMs,
+        compact,
+        seriesName,
+        deliveryMode: resolvedDeliveryMode
+    }).then((items) => {
+      const normalizedItems = normalizeCatalogPayloadUrls(catalogType, items)
+      return cacheEntry(catalogMemoryCache, catalogCacheKey, normalizedItems)
+    })
 
     return directRequest.catch((error) => {
       if (staleCached) {
@@ -941,9 +1037,11 @@ async function fetchCatalog(user, token, catalogType, options = {}) {
               forceRefresh,
               ttlMs,
               compact,
-              seriesName
+              seriesName,
+              deliveryMode: resolvedDeliveryMode
             })
-            return cacheEntry(catalogMemoryCache, catalogCacheKey, fallbackItems)
+            const normalizedFallbackItems = normalizeCatalogPayloadUrls(catalogType, fallbackItems)
+            return cacheEntry(catalogMemoryCache, catalogCacheKey, normalizedFallbackItems)
           }
 
           const payload = await response.json().catch(() => ({}))
@@ -964,7 +1062,8 @@ async function fetchCatalog(user, token, catalogType, options = {}) {
             : items
         }
 
-        return cacheEntry(catalogMemoryCache, catalogCacheKey, result)
+        const normalizedResult = normalizeCatalogPayloadUrls(catalogType, result)
+        return cacheEntry(catalogMemoryCache, catalogCacheKey, normalizedResult)
       } catch (error) {
         lastError = error
 
@@ -972,6 +1071,7 @@ async function fetchCatalog(user, token, catalogType, options = {}) {
         const isTransient =
           error?.status >= 500 ||
           /Failed to fetch/i.test(error?.message || '')
+        const canUseStaleCache = isTransient || error?.status === 404
 
         if (isAbort) {
           throw error
@@ -988,7 +1088,8 @@ async function fetchCatalog(user, token, catalogType, options = {}) {
               deliveryMode: resolvedDeliveryMode
             })
 
-            return cacheEntry(catalogMemoryCache, catalogCacheKey, fallbackItems)
+            const normalizedFallbackItems = normalizeCatalogPayloadUrls(catalogType, fallbackItems)
+            return cacheEntry(catalogMemoryCache, catalogCacheKey, normalizedFallbackItems)
           } catch (fallbackError) {
             lastError = fallbackError
           }
@@ -999,8 +1100,8 @@ async function fetchCatalog(user, token, catalogType, options = {}) {
           continue
         }
 
-        if (staleCached && isTransient) {
-          return staleCached
+        if (staleCached && canUseStaleCache) {
+          return normalizeCatalogPayloadUrls(catalogType, staleCached)
         }
 
         throw error
@@ -1048,7 +1149,7 @@ export async function fetchLiveCatalog(user, token, options = {}) {
   const staleCached = shouldStoreCache ? getAnyCachedEntry(catalogMemoryCache, catalogCacheKey) : null
 
   if (cached) {
-    return cached
+    return normalizeCatalogPayloadUrls('live', cached)
   }
 
   const queryParams = new URLSearchParams({ country: normalizedCountry })
@@ -1096,7 +1197,8 @@ export async function fetchLiveCatalog(user, token, options = {}) {
           generatedAt: payload?.data?.generatedAt || null
         }
 
-        return shouldStoreCache ? cacheEntry(catalogMemoryCache, catalogCacheKey, result) : result
+        const normalizedResult = normalizeCatalogPayloadUrls('live', result)
+        return shouldStoreCache ? cacheEntry(catalogMemoryCache, catalogCacheKey, normalizedResult) : normalizedResult
       } catch (error) {
         lastError = error
 
@@ -1104,6 +1206,7 @@ export async function fetchLiveCatalog(user, token, options = {}) {
         const isTransient =
           error?.status >= 500 ||
           /Failed to fetch/i.test(error?.message || '')
+        const canUseStaleCache = isTransient || error?.status === 404
 
         if (isAbort) {
           throw error
@@ -1120,7 +1223,8 @@ export async function fetchLiveCatalog(user, token, options = {}) {
               deliveryMode: resolvedDeliveryMode
             })
 
-            return shouldStoreCache ? cacheEntry(catalogMemoryCache, catalogCacheKey, fallbackResult) : fallbackResult
+            const normalizedFallbackResult = normalizeCatalogPayloadUrls('live', fallbackResult)
+            return shouldStoreCache ? cacheEntry(catalogMemoryCache, catalogCacheKey, normalizedFallbackResult) : normalizedFallbackResult
           } catch (fallbackError) {
             lastError = fallbackError
           }
@@ -1131,8 +1235,8 @@ export async function fetchLiveCatalog(user, token, options = {}) {
           continue
         }
 
-        if (staleCached && isTransient) {
-          return staleCached
+        if (staleCached && canUseStaleCache) {
+          return normalizeCatalogPayloadUrls('live', staleCached)
         }
 
         throw error
@@ -1180,6 +1284,7 @@ export function getCachedLiveCatalogSnapshot(user, token, options = {}) {
 
   return {
     ...snapshot,
+    value: normalizeCatalogPayloadUrls('live', snapshot.value),
     country: normalizedCountry,
     cacheKey: catalogCacheKey
   }

@@ -274,4 +274,61 @@ describe('M3uController live proxy helpers', () => {
     expect(found).toEqual({ name: 'Dark' })
     expect(missing).toBeNull()
   })
+
+  test('rehydrates cached series proxy urls for the current request host', () => {
+    const controller = buildController()
+    const rehydrated = controller._rehydrateSeriesCatalogForRequest(
+      [
+        {
+          name: 'Dark',
+          logo: 'https://legacy.example/api/v1/m3u/logo/ABC123?token=old-token&url=https%3A%2F%2Fimg.example%2Fdark.png',
+          logoCandidates: [
+            'https://legacy.example/api/v1/m3u/logo/ABC123?token=old-token&url=https%3A%2F%2Fimg.example%2Fdark.png'
+          ],
+          seasons: {
+            1: [
+              {
+                id: 'dark-s1e1',
+                logo: '/api/v1/m3u/logo/ABC123?token=old-token&url=https%3A%2F%2Fimg.example%2Fdark.png',
+                url: 'https://legacy.example/api/v1/stream/ABC123?token=old-token&url=http%3A%2F%2Fprovider.example%2Fseries%2Fdark-s1e1.m3u8&up=2'
+              }
+            ]
+          }
+        }
+      ],
+      'https://api-v4.flixify.pro/api/v1',
+      'ABC123',
+      'new-token'
+    )
+
+    expect(rehydrated[0].logo).toBe(
+      'https://api-v4.flixify.pro/api/v1/m3u/logo/ABC123?token=new-token&url=https%3A%2F%2Fimg.example%2Fdark.png'
+    )
+    expect(rehydrated[0].seasons[1][0].url).toContain('https://api-v4.flixify.pro/api/v1/stream/ABC123?')
+    expect(rehydrated[0].seasons[1][0].url).toContain('token=new-token')
+    expect(rehydrated[0].seasons[1][0].url).toContain('up=2')
+  })
+
+  test('rehydrates cached movie proxy urls for the current request host', () => {
+    const controller = buildController()
+    const rehydrated = controller._rehydrateMovieCatalogForRequest(
+      [
+        {
+          title: 'Inception',
+          logo: 'https://legacy.example/api/v1/m3u/logo/ABC123?token=old-token&url=https%3A%2F%2Fimg.example%2Finception.jpg',
+          url: 'https://legacy.example/api/v1/stream/ABC123?token=old-token&url=http%3A%2F%2Fprovider.example%2Fmovie%2Finception.m3u8'
+        }
+      ],
+      'https://api-v4.flixify.pro/api/v1',
+      'ABC123',
+      'new-token'
+    )
+
+    expect(rehydrated[0].logo).toBe(
+      'https://api-v4.flixify.pro/api/v1/m3u/logo/ABC123?token=new-token&url=https%3A%2F%2Fimg.example%2Finception.jpg'
+    )
+    expect(rehydrated[0].url).toBe(
+      'https://api-v4.flixify.pro/api/v1/stream/ABC123?token=new-token&url=http%3A%2F%2Fprovider.example%2Fmovie%2Finception.m3u8'
+    )
+  })
 })
