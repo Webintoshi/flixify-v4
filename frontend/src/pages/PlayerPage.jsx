@@ -4,7 +4,7 @@ import { useAuthStore } from '../stores/authStore'
 import { Search, Tv, Volume2, VolumeX, Maximize, AlertCircle, RefreshCw, ChevronUp, ChevronDown } from 'lucide-react'
 import mpegts from 'mpegts.js'
 import Hls from 'hls.js'
-import { fetchLiveCatalog, hasAssignedPlaylist, hasValidSubscription } from '../services/playlist'
+import { fetchLiveCatalog, getCachedLiveCatalogSnapshot, hasAssignedPlaylist, hasValidSubscription } from '../services/playlist'
 import { DEFAULT_LIVE_COUNTRY_CODE, LIVE_TV_COUNTRIES } from '../config/liveTvTaxonomy'
 import VodPlayer from '../components/player/VodPlayer'
 
@@ -12,6 +12,8 @@ const PRIMARY = '#E50914'
 const BG_DARK = '#0a0a0a'
 const BG_SURFACE = '#141414'
 const BG_CARD = '#1a1a1a'
+const LIVE_CATALOG_TTL_MS = 5 * 60 * 1000
+const LIVE_PAGE_STATE_PREFIX = 'iptv_live_page_state_v1_'
 
 const normalizeLiveGroupLabel = (value) => {
   const normalized = String(value || '').replace(/\s+/g, ' ').trim()
@@ -19,6 +21,13 @@ const normalizeLiveGroupLabel = (value) => {
 }
 
 const normalizeLiveGroupKey = (value) => normalizeLiveGroupLabel(value).toLocaleUpperCase('tr-TR')
+
+const normalizeLiveCountryCode = (value) => {
+  const normalized = String(value || '').trim().toUpperCase()
+  return LIVE_TV_COUNTRIES.some((country) => country.code === normalized)
+    ? normalized
+    : DEFAULT_LIVE_COUNTRY_CODE
+}
 
 const buildLiveCategoryIcon = (value) => {
   const cleaned = normalizeLiveGroupLabel(value).replace(/[^0-9A-Za-z/&\s-]/g, ' ')
@@ -44,6 +53,54 @@ function buildChannelIdentity(channel = {}) {
     String(channel?.name || '').trim(),
     String(channel?.group || '').trim()
   ].join('|')
+}
+
+function canUseLocalStorage() {
+  return typeof window !== 'undefined' && typeof window.localStorage !== 'undefined'
+}
+
+function buildLivePageStateKey(userCode) {
+  const normalizedCode = String(userCode || '').trim()
+  return normalizedCode ? `${LIVE_PAGE_STATE_PREFIX}${normalizedCode}` : ''
+}
+
+function readPersistedLivePageState(userCode) {
+  if (!canUseLocalStorage()) return null
+
+  const key = buildLivePageStateKey(userCode)
+  if (!key) return null
+
+  try {
+    const raw = localStorage.getItem(key)
+    return raw ? JSON.parse(raw) : null
+  } catch {
+    return null
+  }
+}
+
+function writePersistedLivePageState(userCode, value) {
+  if (!canUseLocalStorage()) return
+
+  const key = buildLivePageStateKey(userCode)
+  if (!key) return
+
+  try {
+    localStorage.setItem(key, JSON.stringify(value))
+  } catch {
+    // ignore storage write errors
+  }
+}
+
+function resolvePreferredChannel(channels = [], previousChannel = null, preferredState = {}) {
+  const previousIdentity = buildChannelIdentity(previousChannel)
+  const preferredIdentity = String(preferredState?.currentChannelKey || '').trim()
+  const preferredId = String(preferredState?.currentChannelId || '').trim()
+
+  return channels.find((channel) => (
+    (preferredId && String(channel?.id || '').trim() === preferredId)
+    || (preferredIdentity && buildChannelIdentity(channel) === preferredIdentity)
+    || (previousIdentity && buildChannelIdentity(channel) === previousIdentity)
+  )) || channels[0] || null
 }
 
 function buildStaticLiveCountries() {
@@ -74,26 +131,70 @@ export default function PlayerPage() {
   const videoUrl = searchParams.get('url') || ''
   const videoTitle = searchParams.get('title') || ''
   const isVodMode = ['movie', 'series'].includes(mediaType) && Boolean(videoUrl)
-  
-  const [channels, setChannels] = useState([])
-  const [currentChannel, setCurrentChannel] = useState(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState(null)
-  const [searchQuery, setSearchQuery] = useState('')
-  const [isSearching, setIsSearching] = useState(false)
   const staticLiveCountries = useMemo(() => buildStaticLiveCountries(), [])
-  const [selectedCountry, setSelectedCountry] = useState(DEFAULT_LIVE_COUNTRY_CODE)
-  const [selectedCategory, setSelectedCategory] = useState('all')
+  const initialLivePageState = useMemo(() => readPersistedLivePageState(user?.code), [user?.code])
+  const initialSelectedCountry = useMemo(
+    () => normalizeLiveCountryCode(initialLivePageState?.selectedCountry),
+    [initialLivePageState?.selectedCountry]
+  )
+  const initialLiveCatalogSnapshot = useMemo(() => {
+    if (isVodMode || !user?.code || !token) {
+      return null
+    }
+
+    return getCachedLiveCatalogSnapshot(user, token, {
+      country: initialSelectedCountry,
+      ttlMs: LIVE_CATALOG_TTL_MS,
+      allowStale: true
+    })
+  }, [initialSelectedCountry, isVodMode, token, user])
+  
+  const [channels, setChannels] = useState(() => (
+    Array.isArray(initialLiveCatalogSnapshot?.value?.items) ? initialLiveCatalogSnapshot.value.items : []
+  ))
+  const [currentChannel, setCurrentChannel] = useState(() => (
+    resolvePreferredChannel(
+      Array.isArray(initialLiveCatalogSnapshot?.value?.items) ? initialLiveCatalogSnapshot.value.items : [],
+      null,
+      initialLivePageState
+    )
+  ))
+  const [loading, setLoading] = useState(() => !initialLiveCatalogSnapshot?.value)
+  const [error, setError] = useState(null)
+  const [searchQuery, setSearchQuery] = useState(() => String(initialLivePageState?.searchQuery || ''))
+  const [isSearching, setIsSearching] = useState(false)
+  const [selectedCountry, setSelectedCountry] = useState(initialSelectedCountry)
+  const [selectedCategory, setSelectedCategory] = useState(() => String(initialLivePageState?.selectedCategory || 'all') || 'all')
   const [showControls, setShowControls] = useState(true)
   const [volume, setVolume] = useState(1)
   const [isMuted, setIsMuted] = useState(false)
   const [brokenLogoKeys, setBrokenLogoKeys] = useState(() => new Set())
-  const [liveCountries, setLiveCountries] = useState(() => staticLiveCountries)
+  const [liveCountries, setLiveCountries] = useState(() => {
+    const cachedCountries = initialLiveCatalogSnapshot?.value?.countries
+    return Array.isArray(cachedCountries) && cachedCountries.length > 0
+      ? cachedCountries
+      : staticLiveCountries
+  })
   
   const [channelPage, setChannelPage] = useState(0)
-  const CHANNELS_PER_PAGE = 12
+  const CHANNELS_PER_PAGE = 10
+  const userRef = useRef(user)
+  const tokenRef = useRef(token)
+  const latestCatalogRequestIdRef = useRef(0)
+  const hasBootstrappedCatalogRef = useRef(Boolean(initialLiveCatalogSnapshot?.value))
+  const restoredUserCodeRef = useRef(user?.code || '')
+  const skipCategoryResetRef = useRef(false)
+  const preferredChannelStateRef = useRef({
+    currentChannelId: String(initialLivePageState?.currentChannelId || '').trim(),
+    currentChannelKey: String(initialLivePageState?.currentChannelKey || '').trim()
+  })
   
   const debouncedSearch = useDebounce(searchQuery, 300)
+
+  useEffect(() => {
+    userRef.current = user
+    tokenRef.current = token
+  }, [user, token])
 
   useEffect(() => {
     if (searchQuery !== debouncedSearch) {
@@ -112,6 +213,11 @@ export default function PlayerPage() {
   }, [user, navigate])
 
   useEffect(() => {
+    if (skipCategoryResetRef.current) {
+      skipCategoryResetRef.current = false
+      return
+    }
+
     setSelectedCategory('all')
   }, [selectedCountry])
 
@@ -141,75 +247,179 @@ export default function PlayerPage() {
   }, [channels.length, liveCountries, selectedCountry, staticLiveCountries])
 
   useEffect(() => {
-    if (isVodMode) return
-    if (!hasAssignedPlaylist(user) || !token) return
+    if (isVodMode || !user?.code) return
 
-    let cancelled = false
+    writePersistedLivePageState(user.code, {
+      selectedCountry,
+      selectedCategory,
+      searchQuery,
+      currentChannelId: String(currentChannel?.id || '').trim(),
+      currentChannelKey: buildChannelIdentity(currentChannel)
+    })
+  }, [currentChannel, isVodMode, searchQuery, selectedCategory, selectedCountry, user?.code])
 
-    const applyChannels = (nextChannels = []) => {
-      setChannels(nextChannels)
+  const applyCatalogPayload = useCallback((payload, options = {}) => {
+    const requestedCountry = normalizeLiveCountryCode(options.requestedCountry || selectedCountry)
+    const nextChannels = Array.isArray(payload?.items) ? payload.items : []
+    const nextCountries = Array.isArray(payload?.countries) && payload.countries.length > 0
+      ? payload.countries
+      : staticLiveCountries
+    const resolvedCountry = normalizeLiveCountryCode(payload?.country || requestedCountry)
 
-      if (nextChannels.length === 0) {
-        setCurrentChannel(null)
-        setError('Canli kanal bulunamadi. Statik canli TV katalogu kontrol edilmeli.')
+    setLiveCountries(nextCountries)
+
+    if (resolvedCountry !== requestedCountry) {
+      skipCategoryResetRef.current = true
+      setSelectedCountry(resolvedCountry)
+    }
+
+    setChannels(nextChannels)
+
+    if (nextChannels.length === 0) {
+      setCurrentChannel(null)
+      return false
+    }
+
+    setCurrentChannel((previous) => resolvePreferredChannel(nextChannels, previous, options.preferredState))
+    return true
+  }, [selectedCountry, staticLiveCountries])
+
+  const loadChannels = useCallback(async ({ forceRefresh = false, background = false } = {}) => {
+    const currentUser = userRef.current
+    const currentToken = tokenRef.current
+
+    if (isVodMode || !hasAssignedPlaylist(currentUser) || !currentToken) {
+      setLoading(false)
+      return
+    }
+
+    const requestId = latestCatalogRequestIdRef.current + 1
+    latestCatalogRequestIdRef.current = requestId
+    const requestedCountry = normalizeLiveCountryCode(selectedCountry)
+    const cachedSnapshot = !forceRefresh
+      ? getCachedLiveCatalogSnapshot(currentUser, currentToken, {
+        country: requestedCountry,
+        ttlMs: LIVE_CATALOG_TTL_MS,
+        allowStale: true
+      })
+      : null
+
+    if (cachedSnapshot?.value) {
+      applyCatalogPayload(cachedSnapshot.value, {
+        requestedCountry,
+        preferredState: preferredChannelStateRef.current
+      })
+      setError(null)
+      setLoading(false)
+      hasBootstrappedCatalogRef.current = true
+    } else if (!background) {
+      setLoading(true)
+    }
+
+    const shouldRevalidate = forceRefresh || !cachedSnapshot?.value || cachedSnapshot.isStale
+    if (!shouldRevalidate) {
+      return
+    }
+
+    try {
+      const payload = await fetchLiveCatalog(currentUser, currentToken, {
+        country: requestedCountry,
+        forceRefresh: forceRefresh || Boolean(cachedSnapshot?.isStale),
+        disableCache: false,
+        ttlMs: LIVE_CATALOG_TTL_MS
+      })
+
+      if (requestId !== latestCatalogRequestIdRef.current) {
         return
       }
 
-      setCurrentChannel((previous) => {
-        if (!previous) {
-          return nextChannels[0]
-        }
-
-        const previousKey = buildChannelIdentity(previous)
-        return nextChannels.find((channel) => buildChannelIdentity(channel) === previousKey) || nextChannels[0]
+      const hasChannels = applyCatalogPayload(payload, {
+        requestedCountry,
+        preferredState: preferredChannelStateRef.current
       })
+
+      preferredChannelStateRef.current = {
+        currentChannelId: '',
+        currentChannelKey: ''
+      }
+      hasBootstrappedCatalogRef.current = hasChannels || hasBootstrappedCatalogRef.current
+      setBrokenLogoKeys(new Set())
+      setError(hasChannels ? null : 'Canli kanal bulunamadi. Statik canli TV katalogu kontrol edilmeli.')
+      setLoading(false)
+    } catch {
+      if (requestId !== latestCatalogRequestIdRef.current) {
+        return
+      }
+
+      if (cachedSnapshot?.value) {
+        setLoading(false)
+        return
+      }
+
+      setChannels([])
+      setCurrentChannel(null)
+      setError('Canli TV katalogu yuklenemedi')
+      setLoading(false)
+    }
+  }, [applyCatalogPayload, isVodMode, selectedCountry])
+
+  useEffect(() => {
+    if (isVodMode || !user?.code) return
+    if (restoredUserCodeRef.current === user.code) return
+
+    restoredUserCodeRef.current = user.code
+    const persistedState = readPersistedLivePageState(user.code)
+    const restoredCountry = normalizeLiveCountryCode(persistedState?.selectedCountry)
+
+    preferredChannelStateRef.current = {
+      currentChannelId: String(persistedState?.currentChannelId || '').trim(),
+      currentChannelKey: String(persistedState?.currentChannelKey || '').trim()
     }
 
-    const loadChannels = async ({ forceRefresh = false } = {}) => {
-      try {
-        setLoading(true)
-        setError(null)
-        setBrokenLogoKeys(new Set())
+    if (typeof persistedState?.searchQuery === 'string') {
+      setSearchQuery(persistedState.searchQuery)
+    }
 
-        const payload = await fetchLiveCatalog(user, token, {
-          country: selectedCountry,
-          forceRefresh
+    if (persistedState?.selectedCategory) {
+      setSelectedCategory(String(persistedState.selectedCategory))
+    }
+
+    if (restoredCountry !== selectedCountry) {
+      skipCategoryResetRef.current = true
+      setSelectedCountry(restoredCountry)
+    }
+
+    if (token) {
+      const cachedSnapshot = getCachedLiveCatalogSnapshot(user, token, {
+        country: restoredCountry,
+        ttlMs: LIVE_CATALOG_TTL_MS,
+        allowStale: true
+      })
+
+      if (cachedSnapshot?.value) {
+        applyCatalogPayload(cachedSnapshot.value, {
+          requestedCountry: restoredCountry,
+          preferredState: preferredChannelStateRef.current
         })
-
-        if (cancelled) return
-
-        const nextChannels = Array.isArray(payload?.items) ? payload.items : []
-        const nextCountries = Array.isArray(payload?.countries) && payload.countries.length > 0
-          ? payload.countries
-          : staticLiveCountries
-        const resolvedCountry = String(payload?.country || selectedCountry).trim().toUpperCase() || selectedCountry
-
-        setLiveCountries(nextCountries)
-
-        if (resolvedCountry !== selectedCountry) {
-          setSelectedCountry(resolvedCountry)
-        }
-
-        applyChannels(nextChannels)
-      } catch {
-        if (!cancelled) {
-          setChannels([])
-          setCurrentChannel(null)
-          setError('Canli TV katalogu yuklenemedi')
-        }
-      } finally {
-        if (!cancelled) {
-          setLoading(false)
-        }
+        setLoading(false)
+        setError(null)
+        hasBootstrappedCatalogRef.current = true
       }
     }
+  }, [applyCatalogPayload, isVodMode, selectedCountry, token, user])
 
-    void loadChannels()
+  useEffect(() => {
+    if (isVodMode) return
+    if (!hasAssignedPlaylist(user) || !token) return
 
-    return () => {
-      cancelled = true
-    }
-  }, [isVodMode, selectedCountry, staticLiveCountries, token, user])
+    const hasCachedSnapshot = Boolean(getCachedLiveCatalogSnapshot(user, token, {
+      country: selectedCountry,
+      ttlMs: LIVE_CATALOG_TTL_MS,
+      allowStale: true
+    })?.value)
+
+    void loadChannels({ background: hasCachedSnapshot })
+  }, [isVodMode, loadChannels, selectedCountry, token, user])
 
   useEffect(() => {
     if (selectedCategory === 'all') return
