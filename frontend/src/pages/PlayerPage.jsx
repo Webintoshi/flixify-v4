@@ -4,7 +4,7 @@ import { useAuthStore } from '../stores/authStore'
 import { Search, Tv, Play, Volume2, VolumeX, Maximize, AlertCircle, RefreshCw } from 'lucide-react'
 import mpegts from 'mpegts.js'
 import Hls from 'hls.js'
-import { fetchParsedPlaylist, hasValidSubscription } from '../services/playlist'
+import { fetchParsedPlaylist, hasAssignedPlaylist, hasValidSubscription } from '../services/playlist'
 import { parseLiveChannelsByCountry } from '../utils/playlistParser'
 
 const PRIMARY = '#E50914'
@@ -65,26 +65,39 @@ export default function PlayerPage() {
     }
   }, [user, navigate])
 
-  // Kanalları çek
+  // Kanallari cek
   useEffect(() => {
-    if (!user?.hasM3U) return
-    
+    if (!hasAssignedPlaylist(user) || !token) return
+
     const loadChannels = async () => {
       try {
         setLoading(true)
+        setError(null)
+
         const parsed = await fetchParsedPlaylist(user, token, {
+          cacheKey: 'live-channels-tr-v1',
           parser: (text) => parseLiveChannelsByCountry(text, 'TR'),
-          forceRefresh: false
+          forceRefresh: true,
+          disableCache: true,
+          scope: 'live'
         })
-        setChannels(parsed)
-        if (parsed.length > 0) setCurrentChannel(parsed[0])
+
+        const nextChannels = Array.isArray(parsed) ? parsed : []
+        setChannels(nextChannels)
+
+        if (nextChannels.length > 0) {
+          setCurrentChannel(nextChannels[0])
+        } else {
+          setCurrentChannel(null)
+          setError('Canli kanal bulunamadi. M3U listesi veya grup filtreleri kontrol edilmeli.')
+        }
       } catch (err) {
-        setError('Kanallar yüklenemedi')
+        setError('Kanallar yuklenemedi')
       } finally {
         setLoading(false)
       }
     }
-    
+
     loadChannels()
   }, [user, token])
 
@@ -241,7 +254,7 @@ export default function PlayerPage() {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [filteredChannels, currentChannel])
 
-  if (!user?.hasM3U) {
+  if (!hasAssignedPlaylist(user)) {
     return (
       <div className="min-h-screen flex items-center justify-center" style={{ backgroundColor: BG_DARK }}>
         <div className="text-center p-8">
