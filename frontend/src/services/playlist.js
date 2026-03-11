@@ -187,21 +187,26 @@ function buildPlaylistSources(user, options = {}) {
     : [{ mode: 'proxy', url: proxyUrl }]
 }
 
-async function fetchPlaylistSource(source, token, signal) {
+async function fetchPlaylistSource(source, token, signal, options = {}) {
+  const { disableCache = false } = options
   const isDirectSource = source?.mode === 'direct'
   const headers = isDirectSource
     ? {
-      Accept: 'application/vnd.apple.mpegurl, application/x-mpegurl, text/plain, */*'
+      Accept: 'application/vnd.apple.mpegurl, application/x-mpegurl, text/plain, */*',
+      'Cache-Control': disableCache ? 'no-cache, no-store, max-age=0' : 'no-cache',
+      Pragma: 'no-cache'
     }
     : {
-      Authorization: `Bearer ${token}`
+      Authorization: `Bearer ${token}`,
+      'Cache-Control': disableCache ? 'no-cache, no-store, max-age=0' : 'no-cache',
+      Pragma: 'no-cache'
     }
 
   const response = await fetch(source.url, {
     signal,
     headers,
     credentials: isDirectSource ? 'omit' : 'same-origin',
-    cache: isDirectSource ? 'no-store' : 'default'
+    cache: disableCache || isDirectSource ? 'no-store' : 'default'
   })
 
   if (!response.ok) {
@@ -519,6 +524,7 @@ async function fetchLiveCatalogFallback(user, token, options = {}) {
     country = 'TR',
     forceRefresh = false,
     ttlMs = DEFAULT_TTL_MS,
+    disableCache = false,
     deliveryMode = null
   } = options
 
@@ -526,6 +532,7 @@ async function fetchLiveCatalogFallback(user, token, options = {}) {
     cacheKey: `catalog-fallback:live:${String(country || 'TR').trim().toUpperCase()}:v1`,
     parser: (playlistText) => buildLiveCatalogFromPlaylist(playlistText, country),
     forceRefresh,
+    disableCache,
     ttlMs,
     signal,
     scope: 'live',
@@ -628,7 +635,9 @@ export async function fetchUserPlaylist(user, token, options = {}) {
 
         for (const source of sources) {
           try {
-            const text = await fetchPlaylistSource(source, token, signal)
+            const text = await fetchPlaylistSource(source, token, signal, {
+              disableCache: disableCache || isLiveScope
+            })
             return shouldStoreCache ? cacheEntry(rawMemoryCache, rawCacheKey, text) : text
           } catch (sourceError) {
             if (source.mode === 'proxy') {
@@ -917,6 +926,7 @@ export async function fetchLiveCatalog(user, token, options = {}) {
     signal,
     country = 'TR',
     forceRefresh = false,
+    disableCache = true,
     ttlMs = DEFAULT_TTL_MS,
     retries = 1
   } = options
@@ -934,22 +944,24 @@ export async function fetchLiveCatalog(user, token, options = {}) {
   const tokenKey = tokenFingerprint(token)
   const catalogVariant = `country:${normalizedCountry}`
   const catalogCacheKey = buildCatalogCacheKey(user.code, tokenKey, 'live', catalogVariant, resolvedDeliveryMode)
-  const cached = !forceRefresh ? getCachedEntry(catalogMemoryCache, catalogCacheKey, ttlMs) : null
-  const staleCached = getAnyCachedEntry(catalogMemoryCache, catalogCacheKey)
+  const shouldUseCache = !disableCache && !forceRefresh && ttlMs > 0
+  const shouldStoreCache = !disableCache && ttlMs > 0
+  const cached = shouldUseCache ? getCachedEntry(catalogMemoryCache, catalogCacheKey, ttlMs) : null
+  const staleCached = shouldStoreCache ? getAnyCachedEntry(catalogMemoryCache, catalogCacheKey) : null
 
   if (cached) {
     return cached
   }
 
   const queryParams = new URLSearchParams({ country: normalizedCountry })
-  if (forceRefresh) {
+  if (forceRefresh || disableCache) {
     queryParams.set('forceRefresh', 'true')
   }
 
   const endpoint = buildApiUrl(`/catalog/live?${queryParams.toString()}`)
-  const inflightKey = `catalog:live:${user.code}:${tokenKey}:${catalogVariant}:${forceRefresh ? 'refresh' : 'cached'}`
+  const inflightKey = `catalog:live:${user.code}:${tokenKey}:${catalogVariant}:${forceRefresh || disableCache ? 'refresh' : 'cached'}`
 
-  if (!forceRefresh && inflightCatalogRequests.has(inflightKey)) {
+  if (!forceRefresh && !disableCache && inflightCatalogRequests.has(inflightKey)) {
     return inflightCatalogRequests.get(inflightKey)
   }
 
@@ -960,8 +972,11 @@ export async function fetchLiveCatalog(user, token, options = {}) {
       try {
         const response = await fetch(endpoint, {
           signal,
+          cache: disableCache ? 'no-store' : 'default',
           headers: {
-            Authorization: `Bearer ${token}`
+            Authorization: `Bearer ${token}`,
+            'Cache-Control': disableCache ? 'no-cache, no-store, max-age=0' : 'no-cache',
+            Pragma: 'no-cache'
           }
         })
 
@@ -983,7 +998,7 @@ export async function fetchLiveCatalog(user, token, options = {}) {
           generatedAt: payload?.data?.generatedAt || null
         }
 
-        return cacheEntry(catalogMemoryCache, catalogCacheKey, result)
+        return shouldStoreCache ? cacheEntry(catalogMemoryCache, catalogCacheKey, result) : result
       } catch (error) {
         lastError = error
 
@@ -1002,11 +1017,12 @@ export async function fetchLiveCatalog(user, token, options = {}) {
               signal,
               country: normalizedCountry,
               forceRefresh,
+              disableCache,
               ttlMs,
               deliveryMode: resolvedDeliveryMode
             })
 
-            return cacheEntry(catalogMemoryCache, catalogCacheKey, fallbackResult)
+            return shouldStoreCache ? cacheEntry(catalogMemoryCache, catalogCacheKey, fallbackResult) : fallbackResult
           } catch (fallbackError) {
             lastError = fallbackError
           }
