@@ -5,11 +5,17 @@ import {
   parseMoviesFromPlaylist,
   dedupeByTitle
 } from '../utils/playlistParser'
+import { buildLiveCatalogFromPlaylist } from '../utils/liveCatalogBuilder'
 
 const PLAYLIST_RAW_CACHE_PREFIX = 'iptv_playlist_raw_v2_'
 const PLAYLIST_PARSED_CACHE_PREFIX = 'iptv_playlist_parsed_v2_'
 const CATALOG_CACHE_PREFIX = 'iptv_catalog_v1_'
 const DEFAULT_TTL_MS = 5 * 60 * 1000
+const PLAYLIST_PATH_FIXES = [
+  ['/playlisth/', '/playlist/'],
+  ['/playlists/', '/playlist/']
+]
+const PLAYLIST_DELIVERY_MODES = new Set(['proxy', 'direct', 'hybrid'])
 
 const rawMemoryCache = new Map()
 const parsedMemoryCache = new Map()
@@ -39,16 +45,194 @@ function normalizeScope(scope) {
   return String(scope || 'full').toLowerCase() === 'live' ? 'live' : 'full'
 }
 
-function buildRawCacheKey(userCode, tokenKey, scope = 'full') {
-  return `${PLAYLIST_RAW_CACHE_PREFIX}${scope}_${userCode}_${tokenKey}`
+function normalizeDeliveryMode(value) {
+  const normalized = String(value || '').trim().toLowerCase()
+  return PLAYLIST_DELIVERY_MODES.has(normalized) ? normalized : null
 }
 
-function buildParsedCacheKey(userCode, tokenKey, cacheKey, scope = 'full') {
-  return `${PLAYLIST_PARSED_CACHE_PREFIX}${scope}_${userCode}_${tokenKey}_${cacheKey}`
+function resolvePlaylistDeliveryMode(user, requestedMode = null) {
+  const explicitMode = normalizeDeliveryMode(requestedMode)
+  if (explicitMode) {
+    return explicitMode
+  }
+
+  const userMode = normalizeDeliveryMode(user?.playlistDeliveryMode)
+  if (userMode) {
+    return userMode
+  }
+
+  return user?.m3uDirectUrl ? 'hybrid' : 'proxy'
 }
 
-function buildCatalogCacheKey(userCode, tokenKey, catalogType, variant = 'default') {
-  return `${CATALOG_CACHE_PREFIX}${catalogType}_${userCode}_${tokenKey}_${variant}`
+function normalizePathSegments(value) {
+  return PLAYLIST_PATH_FIXES.reduce(
+    (current, [needle, replacement]) => current.replace(needle, replacement),
+    String(value || '').trim()
+  )
+}
+
+function shouldForceHlsOutput(urlObject) {
+  if (!urlObject) {
+    return false
+  }
+
+  const pathname = String(urlObject.pathname || '').toLowerCase()
+  return pathname.includes('/playlist/') && pathname.includes('m3u_plus')
+}
+
+function normalizeDirectPlaylistUrl(value) {
+  if (!value || typeof value !== 'string') {
+    return ''
+  }
+
+  const normalizedRaw = normalizePathSegments(value)
+
+  try {
+    const parsed = new URL(normalizedRaw)
+    if (shouldForceHlsOutput(parsed)) {
+      parsed.searchParams.set('output', 'hls')
+    }
+    return parsed.toString()
+  } catch {
+    return normalizedRaw
+  }
+}
+
+function applyPlaylistScope(url, scope = 'full') {
+  if (!url || normalizeScope(scope) !== 'live') {
+    return url
+  }
+
+  try {
+    const parsed = new URL(url)
+    const pathname = String(parsed.pathname || '').toLowerCase()
+    if (
+      parsed.searchParams.has('output') ||
+      (pathname.includes('/playlist/') && pathname.includes('m3u_plus')) ||
+      pathname.endsWith('/get.php')
+    ) {
+      parsed.searchParams.set('output', 'hls')
+    }
+    return parsed.toString()
+  } catch {
+    return url
+  }
+}
+
+function buildProxyPlaylistUrl(userCode, options = {}) {
+  const { forceRefresh = false, disableCache = false, scope = 'full' } = options
+  const normalizedScope = normalizeScope(scope)
+  const queryParams = new URLSearchParams()
+
+  if (forceRefresh || disableCache) {
+    queryParams.set('forceRefresh', 'true')
+  }
+
+  if (normalizedScope === 'live') {
+    queryParams.set('scope', 'live')
+  }
+
+  const playlistQuery = queryParams.toString() ? `?${queryParams.toString()}` : ''
+  return buildApiUrl(`/m3u/${userCode}.m3u${playlistQuery}`)
+}
+
+function buildDirectPlaylistUrl(user, scope = 'full') {
+  const directUrl = String(user?.m3uDirectUrl || '').trim()
+  if (!directUrl) {
+    return ''
+  }
+
+  const normalized = normalizeDirectPlaylistUrl(directUrl)
+
+  try {
+    const parsed = new URL(normalized)
+    if (parsed.protocol !== 'https:') {
+      return ''
+    }
+
+    return applyPlaylistScope(parsed.toString(), scope)
+  } catch {
+    return ''
+  }
+}
+
+function buildPlaylistSources(user, options = {}) {
+  const { forceRefresh = false, disableCache = false, scope = 'full', deliveryMode = null } = options
+  const resolvedMode = resolvePlaylistDeliveryMode(user, deliveryMode)
+  const normalizedScope = normalizeScope(scope)
+  const directUrl = buildDirectPlaylistUrl(user, normalizedScope)
+  const proxyUrl = buildProxyPlaylistUrl(user?.code, {
+    forceRefresh,
+    disableCache,
+    scope: normalizedScope
+  })
+
+  if (resolvedMode === 'direct') {
+    if (!directUrl) {
+      throw new Error('Provider HTTPS playlist URL hazir degil.')
+    }
+
+    return [{ mode: 'direct', url: directUrl }]
+  }
+
+  if (resolvedMode === 'proxy') {
+    return [{ mode: 'proxy', url: proxyUrl }]
+  }
+
+  return directUrl
+    ? [
+      { mode: 'direct', url: directUrl },
+      { mode: 'proxy', url: proxyUrl }
+    ]
+    : [{ mode: 'proxy', url: proxyUrl }]
+}
+
+async function fetchPlaylistSource(source, token, signal) {
+  const isDirectSource = source?.mode === 'direct'
+  const headers = isDirectSource
+    ? {
+      Accept: 'application/vnd.apple.mpegurl, application/x-mpegurl, text/plain, */*'
+    }
+    : {
+      Authorization: `Bearer ${token}`
+    }
+
+  const response = await fetch(source.url, {
+    signal,
+    headers,
+    credentials: isDirectSource ? 'omit' : 'same-origin',
+    cache: isDirectSource ? 'no-store' : 'default'
+  })
+
+  if (!response.ok) {
+    const statusError = new Error(
+      isDirectSource
+        ? `Provider playlist yuklenemedi (HTTP ${response.status})`
+        : `Playlist yuklenemedi (HTTP ${response.status})`
+    )
+    statusError.status = response.status
+    throw statusError
+  }
+
+  const text = await response.text()
+
+  if (!text || !text.trim()) {
+    throw new Error('Playlist bos dondu')
+  }
+
+  return text
+}
+
+function buildRawCacheKey(userCode, tokenKey, scope = 'full', deliveryMode = 'proxy') {
+  return `${PLAYLIST_RAW_CACHE_PREFIX}${deliveryMode}_${scope}_${userCode}_${tokenKey}`
+}
+
+function buildParsedCacheKey(userCode, tokenKey, cacheKey, scope = 'full', deliveryMode = 'proxy') {
+  return `${PLAYLIST_PARSED_CACHE_PREFIX}${deliveryMode}_${scope}_${userCode}_${tokenKey}_${cacheKey}`
+}
+
+function buildCatalogCacheKey(userCode, tokenKey, catalogType, variant = 'default', deliveryMode = 'proxy') {
+  return `${CATALOG_CACHE_PREFIX}${deliveryMode}_${catalogType}_${userCode}_${tokenKey}_${variant}`
 }
 
 function getFreshCacheEntry(cacheMap, key, ttlMs) {
@@ -300,7 +484,14 @@ function buildMoviesCatalogFallback(playlistText) {
 }
 
 async function fetchCatalogFallback(user, token, catalogType, options = {}) {
-  const { forceRefresh = false, ttlMs = DEFAULT_TTL_MS, signal, compact = false, seriesName = '' } = options
+  const {
+    forceRefresh = false,
+    ttlMs = DEFAULT_TTL_MS,
+    signal,
+    compact = false,
+    seriesName = '',
+    deliveryMode = null
+  } = options
   const parser =
     catalogType === 'series'
       ? buildSeriesCatalogFallback
@@ -311,7 +502,8 @@ async function fetchCatalogFallback(user, token, catalogType, options = {}) {
     parser,
     forceRefresh,
     ttlMs,
-    signal
+    signal,
+    deliveryMode
   })
 
   if (catalogType !== 'series') {
@@ -321,19 +513,39 @@ async function fetchCatalogFallback(user, token, catalogType, options = {}) {
   return transformSeriesCatalogPayload(parsed, { compact, seriesName })
 }
 
-function invalidateMapByPrefix(cacheMap, prefix) {
+async function fetchLiveCatalogFallback(user, token, options = {}) {
+  const {
+    signal,
+    country = 'TR',
+    forceRefresh = false,
+    ttlMs = DEFAULT_TTL_MS,
+    deliveryMode = null
+  } = options
+
+  return fetchParsedPlaylist(user, token, {
+    cacheKey: `catalog-fallback:live:${String(country || 'TR').trim().toUpperCase()}:v1`,
+    parser: (playlistText) => buildLiveCatalogFromPlaylist(playlistText, country),
+    forceRefresh,
+    ttlMs,
+    signal,
+    scope: 'live',
+    deliveryMode
+  })
+}
+
+function invalidateMapByFragments(cacheMap, fragments = []) {
   for (const key of cacheMap.keys()) {
-    if (key.startsWith(prefix)) {
+    if (fragments.every((fragment) => key.includes(fragment))) {
       cacheMap.delete(key)
     }
   }
 }
 
-function invalidateSessionByPrefix(prefix) {
+function invalidateSessionByFragments(fragments = []) {
   if (!canUseSessionStorage()) return
   try {
     Object.keys(sessionStorage)
-      .filter((key) => key.startsWith(prefix))
+      .filter((key) => fragments.every((fragment) => key.includes(fragment)))
       .forEach((key) => sessionStorage.removeItem(key))
   } catch {
     // ignore
@@ -343,20 +555,15 @@ function invalidateSessionByPrefix(prefix) {
 export function invalidatePlaylistCache(userCode) {
   if (!userCode) return
 
-  const rawPrefix = `${PLAYLIST_RAW_CACHE_PREFIX}${userCode}_`
-  const parsedPrefix = `${PLAYLIST_PARSED_CACHE_PREFIX}${userCode}_`
-  const seriesCatalogPrefix = `${CATALOG_CACHE_PREFIX}series_${userCode}_`
-  const moviesCatalogPrefix = `${CATALOG_CACHE_PREFIX}movies_${userCode}_`
+  const userMarker = `_${userCode}_`
 
-  invalidateMapByPrefix(rawMemoryCache, rawPrefix)
-  invalidateMapByPrefix(parsedMemoryCache, parsedPrefix)
-  invalidateMapByPrefix(catalogMemoryCache, seriesCatalogPrefix)
-  invalidateMapByPrefix(catalogMemoryCache, moviesCatalogPrefix)
+  invalidateMapByFragments(rawMemoryCache, [PLAYLIST_RAW_CACHE_PREFIX, userMarker])
+  invalidateMapByFragments(parsedMemoryCache, [PLAYLIST_PARSED_CACHE_PREFIX, userMarker])
+  invalidateMapByFragments(catalogMemoryCache, [CATALOG_CACHE_PREFIX, userMarker])
 
-  invalidateSessionByPrefix(rawPrefix)
-  invalidateSessionByPrefix(parsedPrefix)
-  invalidateSessionByPrefix(seriesCatalogPrefix)
-  invalidateSessionByPrefix(moviesCatalogPrefix)
+  invalidateSessionByFragments([PLAYLIST_RAW_CACHE_PREFIX, userMarker])
+  invalidateSessionByFragments([PLAYLIST_PARSED_CACHE_PREFIX, userMarker])
+  invalidateSessionByFragments([CATALOG_CACHE_PREFIX, userMarker])
 }
 
 export function hasAssignedPlaylist(user) {
@@ -376,7 +583,8 @@ export async function fetchUserPlaylist(user, token, options = {}) {
     disableCache = false,
     scope = 'full',
     ttlMs = DEFAULT_TTL_MS,
-    retries = 1
+    retries = 1,
+    deliveryMode = null
   } = options
 
   if (!user?.code) {
@@ -389,19 +597,11 @@ export async function fetchUserPlaylist(user, token, options = {}) {
 
   const tokenKey = tokenFingerprint(token)
   const normalizedScope = normalizeScope(scope)
+  const resolvedDeliveryMode = resolvePlaylistDeliveryMode(user, deliveryMode)
   const isLiveScope = normalizedScope === 'live'
   const shouldUseCache = !disableCache && !forceRefresh && !isLiveScope
   const shouldStoreCache = !disableCache && !isLiveScope
-  const queryParams = new URLSearchParams()
-  if (forceRefresh || disableCache) {
-    queryParams.set('forceRefresh', 'true')
-  }
-  if (isLiveScope) {
-    queryParams.set('scope', 'live')
-  }
-  const playlistQuery = queryParams.toString() ? `?${queryParams.toString()}` : ''
-  const playlistUrl = buildApiUrl(`/m3u/${user.code}.m3u${playlistQuery}`)
-  const rawCacheKey = buildRawCacheKey(user.code, tokenKey, normalizedScope)
+  const rawCacheKey = buildRawCacheKey(user.code, tokenKey, normalizedScope, resolvedDeliveryMode)
   const cached = shouldUseCache ? getCachedEntry(rawMemoryCache, rawCacheKey, ttlMs) : null
   const staleCached = shouldStoreCache ? getAnyCachedEntry(rawMemoryCache, rawCacheKey) : null
 
@@ -409,7 +609,7 @@ export async function fetchUserPlaylist(user, token, options = {}) {
     return cached
   }
 
-  const inflightKey = `playlist:${user.code}:${tokenKey}:${normalizedScope}:${forceRefresh || disableCache ? 'refresh' : 'cached'}`
+  const inflightKey = `playlist:${resolvedDeliveryMode}:${user.code}:${tokenKey}:${normalizedScope}:${forceRefresh || disableCache ? 'refresh' : 'cached'}`
   if (!forceRefresh && !disableCache && inflightPlaylistRequests.has(inflightKey)) {
     return inflightPlaylistRequests.get(inflightKey)
   }
@@ -419,37 +619,33 @@ export async function fetchUserPlaylist(user, token, options = {}) {
 
     for (let attempt = 0; attempt <= retries; attempt += 1) {
       try {
-        const response = await fetch(playlistUrl, {
-          signal,
-          headers: {
-            'Authorization': `Bearer ${token}`,
-            'User-Agent': 'VLC/3.0.18 LibVLC/3.0.18'
-          }
+        const sources = buildPlaylistSources(user, {
+          forceRefresh,
+          disableCache,
+          scope: normalizedScope,
+          deliveryMode: resolvedDeliveryMode
         })
 
-        if (!response.ok) {
-          if (response.status === 401) {
-            throw new Error('Oturum suresi dolmus. Lutfen tekrar giris yapin.')
-          }
-          if (response.status === 403) {
-            throw new Error('Aktif paket veya M3U atamasi gerekiyor.')
-          }
-          if (response.status === 404) {
-            throw new Error('Playlist bulunamadi.')
-          }
+        for (const source of sources) {
+          try {
+            const text = await fetchPlaylistSource(source, token, signal)
+            return shouldStoreCache ? cacheEntry(rawMemoryCache, rawCacheKey, text) : text
+          } catch (sourceError) {
+            if (source.mode === 'proxy') {
+              if (sourceError?.status === 401) {
+                throw new Error('Oturum suresi dolmus. Lutfen tekrar giris yapin.')
+              }
+              if (sourceError?.status === 403) {
+                throw new Error('Aktif paket veya M3U atamasi gerekiyor.')
+              }
+              if (sourceError?.status === 404) {
+                throw new Error('Playlist bulunamadi.')
+              }
+            }
 
-          const transientError = new Error(`Playlist yuklenemedi (HTTP ${response.status})`)
-          transientError.status = response.status
-          throw transientError
+            lastError = sourceError
+          }
         }
-
-        const text = await response.text()
-
-        if (!text || !text.trim()) {
-          throw new Error('Playlist bos dondu')
-        }
-
-        return shouldStoreCache ? cacheEntry(rawMemoryCache, rawCacheKey, text) : text
       } catch (error) {
         lastError = error
 
@@ -496,7 +692,8 @@ export async function fetchParsedPlaylist(user, token, options = {}) {
     disableCache = false,
     scope = 'full',
     ttlMs = DEFAULT_TTL_MS,
-    signal
+    signal,
+    deliveryMode = null
   } = options
 
   if (!cacheKey) {
@@ -513,10 +710,11 @@ export async function fetchParsedPlaylist(user, token, options = {}) {
 
   const tokenKey = tokenFingerprint(token)
   const normalizedScope = normalizeScope(scope)
+  const resolvedDeliveryMode = resolvePlaylistDeliveryMode(user, deliveryMode)
   const isLiveScope = normalizedScope === 'live'
   const shouldUseCache = !disableCache && !forceRefresh && !isLiveScope
   const shouldStoreCache = !disableCache && !isLiveScope
-  const parsedCacheKey = buildParsedCacheKey(user.code, tokenKey, cacheKey, normalizedScope)
+  const parsedCacheKey = buildParsedCacheKey(user.code, tokenKey, cacheKey, normalizedScope, resolvedDeliveryMode)
   const cached = shouldUseCache ? getCachedEntry(parsedMemoryCache, parsedCacheKey, ttlMs) : null
   const staleCached = shouldStoreCache ? getAnyCachedEntry(parsedMemoryCache, parsedCacheKey) : null
 
@@ -530,7 +728,8 @@ export async function fetchParsedPlaylist(user, token, options = {}) {
       disableCache,
       scope: normalizedScope,
       ttlMs,
-      signal
+      signal,
+      deliveryMode: resolvedDeliveryMode
     })
 
     const parsed = parser(text)
@@ -551,7 +750,9 @@ async function fetchCatalog(user, token, catalogType, options = {}) {
     ttlMs = DEFAULT_TTL_MS,
     retries = 1,
     compact = false,
-    seriesName = ''
+    seriesName = '',
+    deliveryMode = null,
+    preferCatalogApi = true
   } = options
 
   if (!['series', 'movies'].includes(catalogType)) {
@@ -567,13 +768,33 @@ async function fetchCatalog(user, token, catalogType, options = {}) {
   }
 
   const tokenKey = tokenFingerprint(token)
+  const resolvedDeliveryMode = resolvePlaylistDeliveryMode(user, deliveryMode)
   const catalogVariant = buildCatalogVariant(catalogType, { compact, seriesName })
-  const catalogCacheKey = buildCatalogCacheKey(user.code, tokenKey, catalogType, catalogVariant)
+  const catalogCacheKey = buildCatalogCacheKey(user.code, tokenKey, catalogType, catalogVariant, resolvedDeliveryMode)
   const cached = !forceRefresh ? getCachedEntry(catalogMemoryCache, catalogCacheKey, ttlMs) : null
   const staleCached = getAnyCachedEntry(catalogMemoryCache, catalogCacheKey)
 
   if (cached) {
     return cached
+  }
+
+  if (!preferCatalogApi && resolvedDeliveryMode !== 'proxy') {
+    const directRequest = fetchCatalogFallback(user, token, catalogType, {
+      signal,
+      forceRefresh,
+      ttlMs,
+      compact,
+      seriesName,
+      deliveryMode: resolvedDeliveryMode
+    }).then((items) => cacheEntry(catalogMemoryCache, catalogCacheKey, items))
+
+    return directRequest.catch((error) => {
+      if (staleCached) {
+        return staleCached
+      }
+
+      throw error
+    })
   }
 
   const queryParams = new URLSearchParams()
@@ -588,7 +809,7 @@ async function fetchCatalog(user, token, catalogType, options = {}) {
   }
   const query = queryParams.toString()
   const endpoint = buildApiUrl(`/catalog/${catalogType}${query ? `?${query}` : ''}`)
-  const inflightKey = `catalog:${catalogType}:${catalogVariant}:${user.code}:${tokenKey}:${forceRefresh ? 'refresh' : 'cached'}`
+  const inflightKey = `catalog:${resolvedDeliveryMode}:${catalogType}:${catalogVariant}:${user.code}:${tokenKey}:${forceRefresh ? 'refresh' : 'cached'}`
 
   if (!forceRefresh && inflightCatalogRequests.has(inflightKey)) {
     return inflightCatalogRequests.get(inflightKey)
@@ -649,6 +870,23 @@ async function fetchCatalog(user, token, catalogType, options = {}) {
           throw error
         }
 
+        if (resolvedDeliveryMode !== 'proxy') {
+          try {
+            const fallbackItems = await fetchCatalogFallback(user, token, catalogType, {
+              signal,
+              forceRefresh,
+              ttlMs,
+              compact,
+              seriesName,
+              deliveryMode: resolvedDeliveryMode
+            })
+
+            return cacheEntry(catalogMemoryCache, catalogCacheKey, fallbackItems)
+          } catch (fallbackError) {
+            lastError = fallbackError
+          }
+        }
+
         if (attempt < retries && isTransient) {
           await delay(600)
           continue
@@ -692,9 +930,10 @@ export async function fetchLiveCatalog(user, token, options = {}) {
   }
 
   const normalizedCountry = String(country || 'TR').trim().toUpperCase() || 'TR'
+  const resolvedDeliveryMode = resolvePlaylistDeliveryMode(user)
   const tokenKey = tokenFingerprint(token)
   const catalogVariant = `country:${normalizedCountry}`
-  const catalogCacheKey = buildCatalogCacheKey(user.code, tokenKey, 'live', catalogVariant)
+  const catalogCacheKey = buildCatalogCacheKey(user.code, tokenKey, 'live', catalogVariant, resolvedDeliveryMode)
   const cached = !forceRefresh ? getCachedEntry(catalogMemoryCache, catalogCacheKey, ttlMs) : null
   const staleCached = getAnyCachedEntry(catalogMemoryCache, catalogCacheKey)
 
@@ -755,6 +994,22 @@ export async function fetchLiveCatalog(user, token, options = {}) {
 
         if (isAbort) {
           throw error
+        }
+
+        if (error?.status === 404) {
+          try {
+            const fallbackResult = await fetchLiveCatalogFallback(user, token, {
+              signal,
+              country: normalizedCountry,
+              forceRefresh,
+              ttlMs,
+              deliveryMode: resolvedDeliveryMode
+            })
+
+            return cacheEntry(catalogMemoryCache, catalogCacheKey, fallbackResult)
+          } catch (fallbackError) {
+            lastError = fallbackError
+          }
         }
 
         if (attempt < retries && isTransient) {

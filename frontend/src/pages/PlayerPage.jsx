@@ -1,10 +1,12 @@
 import { useEffect, useRef, useState, useMemo, useCallback } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { useAuthStore } from '../stores/authStore'
-import { Search, Tv, Play, Volume2, VolumeX, Maximize, AlertCircle, RefreshCw } from 'lucide-react'
+import { Search, Tv, Volume2, VolumeX, Maximize, AlertCircle, RefreshCw } from 'lucide-react'
 import mpegts from 'mpegts.js'
 import Hls from 'hls.js'
 import { fetchLiveCatalog, hasAssignedPlaylist, hasValidSubscription } from '../services/playlist'
+import { DEFAULT_LIVE_COUNTRY_CODE, LIVE_TV_COUNTRIES } from '../config/liveTvTaxonomy'
+import VodPlayer from '../components/player/VodPlayer'
 
 const PRIMARY = '#E50914'
 const BG_DARK = '#0a0a0a'
@@ -45,8 +47,23 @@ function buildChannelIdentity(channel = {}) {
   ].join('|')
 }
 
+function buildStaticLiveCountries() {
+  return LIVE_TV_COUNTRIES.map((country) => ({
+    code: country.code,
+    name: country.name,
+    defaultSelected: Boolean(country.defaultSelected),
+    count: 0,
+    categories: (Array.isArray(country.categories) ? country.categories : []).map((category) => ({
+      id: `group:${normalizeLiveGroupKey(category)}`,
+      name: normalizeLiveGroupLabel(category),
+      count: 0
+    }))
+  }))
+}
+
 export default function PlayerPage() {
   const navigate = useNavigate()
+  const [searchParams] = useSearchParams()
   const videoRef = useRef(null)
   const hlsPlayerRef = useRef(null)
   const playerRef = useRef(null)
@@ -55,6 +72,10 @@ export default function PlayerPage() {
   const channelListRef = useRef(null)
   
   const { user, token } = useAuthStore()
+  const mediaType = String(searchParams.get('type') || '').trim().toLowerCase()
+  const videoUrl = searchParams.get('url') || ''
+  const videoTitle = searchParams.get('title') || ''
+  const isVodMode = ['movie', 'series'].includes(mediaType) && Boolean(videoUrl)
   
   // States
   const [channels, setChannels] = useState([])
@@ -62,7 +83,8 @@ export default function PlayerPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [searchQuery, setSearchQuery] = useState('')
-  const [selectedCountry, setSelectedCountry] = useState('TR')
+  const staticLiveCountries = useMemo(() => buildStaticLiveCountries(), [])
+  const [selectedCountry, setSelectedCountry] = useState(DEFAULT_LIVE_COUNTRY_CODE)
   const [selectedCategory, setSelectedCategory] = useState('all')
   const [showControls, setShowControls] = useState(true)
   const [volume, setVolume] = useState(1)
@@ -72,8 +94,7 @@ export default function PlayerPage() {
   const [page, setPage] = useState(1)
   const [hasMore, setHasMore] = useState(false)
   const [brokenLogoKeys, setBrokenLogoKeys] = useState(() => new Set())
-  const [liveCountries, setLiveCountries] = useState([])
-  const [liveCategories, setLiveCategories] = useState([])
+  const [liveCountries, setLiveCountries] = useState(() => staticLiveCountries)
   
   const ITEMS_PER_PAGE = 40
   const debouncedSearch = useDebounce(searchQuery, 200)
@@ -91,8 +112,34 @@ export default function PlayerPage() {
     setSelectedCategory('all')
   }, [selectedCountry])
 
+  const liveCategories = useMemo(() => {
+    const activeCountry = liveCountries.find((country) => country.code === selectedCountry)
+      || staticLiveCountries.find((country) => country.code === selectedCountry)
+      || staticLiveCountries.find((country) => country.defaultSelected)
+      || staticLiveCountries[0]
+      || null
+
+    const categoryItems = Array.isArray(activeCountry?.categories) ? activeCountry.categories : []
+
+    return [
+      {
+        id: 'all',
+        name: 'Tumu',
+        icon: 'TV',
+        count: channels.length
+      },
+      ...categoryItems.map((category) => ({
+        id: category?.id || `group:${normalizeLiveGroupKey(category?.name)}`,
+        name: normalizeLiveGroupLabel(category?.name),
+        icon: buildLiveCategoryIcon(category?.name),
+        count: Number(category?.count || 0)
+      }))
+    ]
+  }, [channels.length, liveCountries, selectedCountry, staticLiveCountries])
+
   // Kanallari cek
   useEffect(() => {
+    if (isVodMode) return
     if (!hasAssignedPlaylist(user) || !token) return
 
     let cancelled = false
@@ -132,37 +179,22 @@ export default function PlayerPage() {
         }
 
         const nextChannels = Array.isArray(payload?.items) ? payload.items : []
-        const nextCountries = Array.isArray(payload?.countries) ? payload.countries : []
+        const nextCountries = Array.isArray(payload?.countries) && payload.countries.length > 0
+          ? payload.countries
+          : staticLiveCountries
         const resolvedCountry = String(payload?.country || selectedCountry).trim().toUpperCase() || selectedCountry
-        const activeCountry = nextCountries.find((country) => country.code === resolvedCountry) || null
-        const nextCategories = [
-          {
-            id: 'all',
-            name: 'Tumu',
-            icon: 'TV',
-            count: nextChannels.length
-          },
-          ...((Array.isArray(activeCountry?.categories) ? activeCountry.categories : []).map((category) => ({
-            id: category?.id || `group:${normalizeLiveGroupKey(category?.name)}`,
-            name: normalizeLiveGroupLabel(category?.name),
-            icon: buildLiveCategoryIcon(category?.name),
-            count: Number(category?.count || 0)
-          })))
-        ]
 
         setLiveCountries(nextCountries)
-        setLiveCategories(nextCategories)
 
         if (resolvedCountry !== selectedCountry) {
           setSelectedCountry(resolvedCountry)
         }
 
         applyChannels(nextChannels)
-      } catch (err) {
+      } catch {
         if (!cancelled) {
           setChannels([])
           setCurrentChannel(null)
-          setLiveCategories([])
           setError('Canli TV katalogu yuklenemedi')
         }
       } finally {
@@ -172,12 +204,12 @@ export default function PlayerPage() {
       }
     }
 
-    void loadChannels({ forceRefresh: true })
+    void loadChannels()
 
     return () => {
       cancelled = true
     }
-  }, [selectedCountry, user, token])
+  }, [isVodMode, selectedCountry, staticLiveCountries, token, user])
 
   useEffect(() => {
     if (selectedCategory === 'all') return
@@ -293,6 +325,7 @@ export default function PlayerPage() {
 
   // Player - Kanal değişimi
   useEffect(() => {
+    if (isVodMode) return
     if (!currentChannel || !videoRef.current) return
     
     const video = videoRef.current
@@ -329,14 +362,25 @@ export default function PlayerPage() {
         video.play().catch(() => {})
       })
       hls.on(Hls.Events.ERROR, (_, data) => {
+        if (data?.fatal) {
+          setLoading(false)
+          setError('Yayin yuklenemedi')
+          return
+        }
         if (data.fatal) setError('Yayın yüklenemedi')
       })
     } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+      const handleNativeError = () => {
+        setLoading(false)
+        setError('Yayin yuklenemedi')
+      }
+
       video.src = url
       video.addEventListener('loadedmetadata', () => {
         setLoading(false)
         video.play().catch(() => {})
       }, { once: true })
+      video.addEventListener('error', handleNativeError, { once: true })
     } else if (mpegts.getFeatureList().mseLivePlayback) {
       const player = mpegts.createPlayer({
         type: 'mpegts',
@@ -345,16 +389,29 @@ export default function PlayerPage() {
       })
       playerRef.current = player
       player.attachMediaElement(video)
+      player.on(mpegts.Events.ERROR, () => {
+        setLoading(false)
+        setError('Yayin yuklenemedi')
+      })
       player.load()
-      player.play().catch(() => {})
+      player.play()
+        .then(() => {
+          setLoading(false)
+        })
+        .catch(() => {
+          setLoading(false)
+          setError('Yayin yuklenemedi')
+        })
+    } else {
       setLoading(false)
+      setError('Tarayici bu yayin formatini desteklemiyor')
     }
     
     return () => {
       hlsPlayerRef.current?.destroy()
       playerRef.current?.destroy()
     }
-  }, [currentChannel])
+  }, [currentChannel, isVodMode])
 
   // Kontrolleri gizle/göster
   const handleMouseMove = useCallback(() => {
@@ -416,6 +473,17 @@ export default function PlayerPage() {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [filteredChannels, currentChannel])
 
+  if (isVodMode) {
+    return (
+      <VodPlayer
+        mode={mediaType}
+        videoUrl={videoUrl}
+        videoTitle={videoTitle}
+        onBack={() => navigate(mediaType === 'series' ? '/series' : '/movies')}
+      />
+    )
+  }
+
   if (!hasAssignedPlaylist(user)) {
     return (
       <div className="min-h-screen flex items-center justify-center" style={{ backgroundColor: BG_DARK }}>
@@ -467,7 +535,7 @@ export default function PlayerPage() {
         </div>
       </header>
 
-      {/* ========== ULKELER VE KATEGORILER ========== */}
+      {/* ========== KATEGORİLER - Büyük TV Dostu Butonlar ========== */}
       <div className="px-6 py-4" style={{ backgroundColor: BG_DARK }}>
         <div className="max-w-7xl mx-auto space-y-4">
           <div className="overflow-x-auto">
@@ -552,7 +620,9 @@ export default function PlayerPage() {
                   <AlertCircle className="w-16 h-16 mx-auto mb-4" style={{ color: PRIMARY }} />
                   <p className="text-white mb-4">{error}</p>
                   <button 
-                    onClick={() => window.location.reload()}
+                    onClick={() => {
+                      window.location.reload()
+                    }}
                     className="flex items-center gap-2 px-6 py-3 rounded-xl mx-auto font-bold"
                     style={{ backgroundColor: PRIMARY, color: 'white' }}
                   >
