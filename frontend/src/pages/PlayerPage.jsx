@@ -29,7 +29,6 @@ const buildLiveCategoryIcon = (value) => {
   return `${tokens[0][0] || ''}${tokens[1][0] || ''}`.toLocaleUpperCase('tr-TR')
 }
 
-// Debounce hook for AJAX search
 function useDebounce(value, delay) {
   const [debouncedValue, setDebouncedValue] = useState(value)
   useEffect(() => {
@@ -76,7 +75,6 @@ export default function PlayerPage() {
   const videoTitle = searchParams.get('title') || ''
   const isVodMode = ['movie', 'series'].includes(mediaType) && Boolean(videoUrl)
   
-  // States
   const [channels, setChannels] = useState([])
   const [currentChannel, setCurrentChannel] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -92,13 +90,11 @@ export default function PlayerPage() {
   const [brokenLogoKeys, setBrokenLogoKeys] = useState(() => new Set())
   const [liveCountries, setLiveCountries] = useState(() => staticLiveCountries)
   
-  // TV Navigation - 12 items per page
   const [channelPage, setChannelPage] = useState(0)
   const CHANNELS_PER_PAGE = 12
   
   const debouncedSearch = useDebounce(searchQuery, 300)
 
-  // AJAX Search indicator
   useEffect(() => {
     if (searchQuery !== debouncedSearch) {
       setIsSearching(true)
@@ -107,7 +103,6 @@ export default function PlayerPage() {
     }
   }, [searchQuery, debouncedSearch])
 
-  // Paket kontrolü
   useEffect(() => {
     if (user && !hasValidSubscription(user)) {
       navigate('/profil/paketler', { 
@@ -145,7 +140,6 @@ export default function PlayerPage() {
     ]
   }, [channels.length, liveCountries, selectedCountry, staticLiveCountries])
 
-  // Kanallari cek
   useEffect(() => {
     if (isVodMode) return
     if (!hasAssignedPlaylist(user) || !token) return
@@ -182,9 +176,7 @@ export default function PlayerPage() {
           forceRefresh
         })
 
-        if (cancelled) {
-          return
-        }
+        if (cancelled) return
 
         const nextChannels = Array.isArray(payload?.items) ? payload.items : []
         const nextCountries = Array.isArray(payload?.countries) && payload.countries.length > 0
@@ -226,7 +218,6 @@ export default function PlayerPage() {
     }
   }, [liveCategories, selectedCategory])
 
-  // Filtreleme
   const filteredChannels = useMemo(() => {
     let filtered = channels
 
@@ -244,12 +235,10 @@ export default function PlayerPage() {
     return filtered
   }, [channels, selectedCategory, debouncedSearch])
 
-  // Reset page when filters change
   useEffect(() => {
     setChannelPage(0)
   }, [filteredChannels.length, selectedCategory, selectedCountry])
 
-  // Calculate visible channels (12 per page)
   const visibleChannels = useMemo(() => {
     const start = channelPage * CHANNELS_PER_PAGE
     return filteredChannels.slice(start, start + CHANNELS_PER_PAGE)
@@ -265,7 +254,6 @@ export default function PlayerPage() {
     setChannelPage((prev) => Math.min(totalPages - 1, prev + 1))
   }
 
-  // Keep current channel in view
   useEffect(() => {
     if (!currentChannel || filteredChannels.length === 0) return
     
@@ -306,7 +294,6 @@ export default function PlayerPage() {
     [buildChannelLogoKey]
   )
 
-  // Player - Kanal değişimi
   useEffect(() => {
     if (isVodMode) return
     if (!currentChannel || !videoRef.current) return
@@ -316,7 +303,6 @@ export default function PlayerPage() {
     setError(null)
     setLoading(true)
     
-    // Cleanup önceki player
     if (hlsPlayerRef.current) {
       hlsPlayerRef.current.destroy()
       hlsPlayerRef.current = null
@@ -330,7 +316,6 @@ export default function PlayerPage() {
     video.removeAttribute('src')
     video.load()
     
-    // HLS stream
     if (Hls.isSupported()) {
       const hls = new Hls({
         enableWorker: true,
@@ -378,9 +363,7 @@ export default function PlayerPage() {
       })
       player.load()
       player.play()
-        .then(() => {
-          setLoading(false)
-        })
+        .then(() => setLoading(false))
         .catch(() => {
           setLoading(false)
           setError('Yayin yuklenemedi')
@@ -396,14 +379,12 @@ export default function PlayerPage() {
     }
   }, [currentChannel, isVodMode])
 
-  // Kontrolleri gizle/göster
   const handleMouseMove = useCallback(() => {
     setShowControls(true)
     clearTimeout(controlsTimeoutRef.current)
     controlsTimeoutRef.current = setTimeout(() => setShowControls(false), 3000)
   }, [])
 
-  // Ses kontrolü
   const toggleMute = () => {
     const video = videoRef.current
     if (!video) return
@@ -420,7 +401,6 @@ export default function PlayerPage() {
     setIsMuted(newVol === 0)
   }
 
-  // Fullscreen
   const toggleFullscreen = () => {
     const container = document.getElementById('video-container')
     if (!container) return
@@ -432,18 +412,7 @@ export default function PlayerPage() {
   }
 
   useEffect(() => {
-    const handler = () => {
-      const isFs = !!document.fullscreenElement
-      document.body.classList.toggle('fullscreen-mode', isFs)
-    }
-    document.addEventListener('fullscreenchange', handler)
-    return () => document.removeEventListener('fullscreenchange', handler)
-  }, [])
-
-  // Kanal değiştir (ok tuşları)
-  useEffect(() => {
     const handleKeyDown = (e) => {
-      // Focus search on 'S' key
       if (e.key === 's' || e.key === 'S') {
         e.preventDefault()
         searchInputRef.current?.focus()
@@ -461,7 +430,6 @@ export default function PlayerPage() {
           setCurrentChannel(filteredChannels[currentIndex + 1])
         }
       }
-      // Page navigation with Page Up/Down
       if (e.key === 'PageUp') {
         e.preventDefault()
         handlePrevPage()
@@ -499,343 +467,349 @@ export default function PlayerPage() {
   }
 
   return (
-    <div className="h-screen flex flex-col overflow-hidden" style={{ backgroundColor: BG_DARK }}>
-      {/* ========== HEADER - Bigger Categories ========== */}
+    <div className="min-h-screen flex flex-col" style={{ backgroundColor: BG_DARK }}>
+      {/* ========== HEADER - Container Style ========== */}
       <header 
-        className="flex-shrink-0 px-4 py-3 flex items-center gap-4"
+        className="flex-shrink-0"
         style={{ backgroundColor: BG_SURFACE, borderBottom: '1px solid rgba(255,255,255,0.08)' }}
       >
-        {/* Logo */}
-        <div className="flex items-center gap-2 flex-shrink-0">
-          <div 
-            className="w-10 h-10 rounded-lg flex items-center justify-center"
-            style={{ backgroundColor: PRIMARY }}
-          >
-            <Tv className="w-5 h-5 text-white" />
-          </div>
-          <span className="text-base font-bold text-white hidden lg:block">Canlı TV</span>
-        </div>
+        <div className="max-w-[1600px] mx-auto px-4 lg:px-6">
+          <div className="flex items-center gap-4 py-3">
+            {/* Logo */}
+            <div className="flex items-center gap-2 flex-shrink-0">
+              <div 
+                className="w-9 h-9 rounded-lg flex items-center justify-center"
+                style={{ backgroundColor: PRIMARY }}
+              >
+                <Tv className="w-4 h-4 text-white" />
+              </div>
+              <span className="text-sm font-bold text-white hidden sm:block">Canlı TV</span>
+            </div>
 
-        {/* Categories - Bigger */}
-        <div className="flex-1 overflow-x-auto hide-scrollbar">
-          <div className="flex gap-2 min-w-max">
+            {/* Countries */}
+            <div className="flex-1 overflow-x-auto hide-scrollbar">
+              <div className="flex gap-1.5 min-w-max">
+                {liveCountries.map((country) => (
+                  <button
+                    key={country.code}
+                    onClick={() => setSelectedCountry(country.code)}
+                    className="px-3 py-1.5 rounded-md text-xs font-medium transition-all whitespace-nowrap"
+                    style={{
+                      backgroundColor: selectedCountry === country.code ? PRIMARY : 'rgba(255,255,255,0.08)',
+                      color: 'white',
+                      opacity: country.count > 0 ? 1 : 0.5,
+                    }}
+                  >
+                    {country.name}
+                    <span className="ml-1 opacity-60">{country.count}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+          
+          {/* Categories - Second Row */}
+          <div className="flex items-center gap-3 pb-3 overflow-x-auto hide-scrollbar">
             {liveCategories.map((cat) => (
               <button
                 key={cat.id}
                 onClick={() => setSelectedCategory(cat.id)}
-                className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium transition-all whitespace-nowrap"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-all whitespace-nowrap"
                 style={{
-                  backgroundColor: selectedCategory === cat.id ? PRIMARY : 'rgba(255,255,255,0.08)',
-                  color: selectedCategory === cat.id ? 'white' : 'rgba(255,255,255,0.8)',
-                  border: `1px solid ${selectedCategory === cat.id ? PRIMARY : 'transparent'}`,
+                  backgroundColor: selectedCategory === cat.id ? PRIMARY : 'transparent',
+                  color: selectedCategory === cat.id ? 'white' : 'rgba(255,255,255,0.7)',
+                  border: `1px solid ${selectedCategory === cat.id ? PRIMARY : 'rgba(255,255,255,0.1)'}`,
                 }}
               >
                 <span className="font-bold">{cat.icon}</span>
                 <span>{cat.name}</span>
-                <span className="ml-1 text-xs opacity-60">{cat.count}</span>
+                <span className="opacity-50 ml-0.5">{cat.count}</span>
               </button>
             ))}
           </div>
         </div>
       </header>
 
-      {/* ========== MAIN CONTENT - Responsive Grid ========== */}
-      <div className="flex-1 flex overflow-hidden">
-        
-        {/* ========== LEFT - Player ========== */}
-        <main className="flex-1 flex flex-col min-w-0">
-          
-          {/* Video Container - Smaller height */}
-          <div 
-            id="video-container"
-            className="relative flex-1 overflow-hidden"
-            style={{ 
-              backgroundColor: '#000',
-              maxHeight: 'calc(100vh - 140px)'
-            }}
-            onMouseMove={handleMouseMove}
-            onClick={() => setShowControls(true)}
-          >
-            {/* Loading */}
-            {loading && (
-              <div className="absolute inset-0 flex items-center justify-center z-10 bg-black/50">
-                <div className="text-center">
-                  <div 
-                    className="w-12 h-12 border-2 border-t-transparent rounded-full animate-spin mx-auto mb-2"
-                    style={{ borderColor: PRIMARY, borderTopColor: 'transparent' }}
-                  />
-                  <p className="text-white/70 text-sm">Yükleniyor...</p>
-                </div>
-              </div>
-            )}
+      {/* ========== MAIN CONTENT - Container ========== */}
+      <main className="flex-1 overflow-hidden">
+        <div className="max-w-[1600px] mx-auto px-4 lg:px-6 h-full py-4">
+          <div className="flex gap-4 h-full">
             
-            {/* Error */}
-            {error && (
-              <div className="absolute inset-0 flex items-center justify-center z-10 bg-black/80">
-                <div className="text-center p-4">
-                  <AlertCircle className="w-12 h-12 mx-auto mb-2" style={{ color: PRIMARY }} />
-                  <p className="text-white text-sm mb-2">{error}</p>
-                  <button 
-                    onClick={() => window.location.reload()}
-                    className="flex items-center gap-2 px-4 py-2 rounded-lg mx-auto text-sm font-medium"
-                    style={{ backgroundColor: PRIMARY, color: 'white' }}
-                  >
-                    <RefreshCw className="w-4 h-4" />
-                    Yeniden Dene
-                  </button>
-                </div>
-              </div>
-            )}
-            
-            {/* Video */}
-            <video 
-              ref={videoRef}
-              className="w-full h-full object-contain"
-              autoPlay
-              playsInline
-            />
-            
-            {/* Player Controls */}
-            <div 
-              className={`absolute bottom-0 left-0 right-0 p-4 transition-opacity duration-300 ${showControls ? 'opacity-100' : 'opacity-0'}`}
-              style={{ background: 'linear-gradient(to top, rgba(0,0,0,0.9) 0%, transparent 100%)' }}
-            >
-              <div className="mb-3">
-                <h2 className="text-xl font-bold text-white">{currentChannel?.name}</h2>
-                <p className="text-sm text-white/60">{currentChannel?.group}</p>
-              </div>
-              
-              <div className="flex items-center gap-3">
-                <button 
-                  onClick={toggleMute}
-                  className="w-10 h-10 rounded-full flex items-center justify-center text-white hover:bg-white/20 transition-colors"
-                >
-                  {isMuted ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
-                </button>
-                <input
-                  type="range"
-                  min="0"
-                  max="1"
-                  step="0.1"
-                  value={isMuted ? 0 : volume}
-                  onChange={handleVolumeChange}
-                  className="w-24 h-1.5 rounded-lg appearance-none cursor-pointer"
-                  style={{ backgroundColor: 'rgba(255,255,255,0.3)' }}
+            {/* ========== LEFT - Player ========== */}
+            <div className="flex-1 flex flex-col min-w-0">
+              {/* Video Container */}
+              <div 
+                id="video-container"
+                className="relative flex-1 rounded-xl overflow-hidden"
+                style={{ 
+                  backgroundColor: '#000',
+                  minHeight: '400px'
+                }}
+                onMouseMove={handleMouseMove}
+                onClick={() => setShowControls(true)}
+              >
+                {loading && (
+                  <div className="absolute inset-0 flex items-center justify-center z-10 bg-black/50">
+                    <div className="text-center">
+                      <div 
+                        className="w-10 h-10 border-2 border-t-transparent rounded-full animate-spin mx-auto mb-2"
+                        style={{ borderColor: PRIMARY, borderTopColor: 'transparent' }}
+                      />
+                      <p className="text-white/70 text-xs">Yükleniyor...</p>
+                    </div>
+                  </div>
+                )}
+                
+                {error && (
+                  <div className="absolute inset-0 flex items-center justify-center z-10 bg-black/80">
+                    <div className="text-center p-4">
+                      <AlertCircle className="w-10 h-10 mx-auto mb-2" style={{ color: PRIMARY }} />
+                      <p className="text-white text-sm mb-2">{error}</p>
+                      <button 
+                        onClick={() => window.location.reload()}
+                        className="flex items-center gap-1.5 px-4 py-2 rounded-lg mx-auto text-xs font-medium"
+                        style={{ backgroundColor: PRIMARY, color: 'white' }}
+                      >
+                        <RefreshCw className="w-3.5 h-3.5" />
+                        Yeniden Dene
+                      </button>
+                    </div>
+                  </div>
+                )}
+                
+                <video 
+                  ref={videoRef}
+                  className="w-full h-full object-contain"
+                  autoPlay
+                  playsInline
                 />
-                <button 
-                  onClick={toggleFullscreen}
-                  className="w-10 h-10 rounded-full flex items-center justify-center text-white hover:bg-white/20 transition-colors ml-auto"
+                
+                <div 
+                  className={`absolute bottom-0 left-0 right-0 p-4 transition-opacity duration-300 ${showControls ? 'opacity-100' : 'opacity-0'}`}
+                  style={{ background: 'linear-gradient(to top, rgba(0,0,0,0.9) 0%, transparent 100%)' }}
                 >
-                  <Maximize className="w-5 h-5" />
-                </button>
+                  <div className="mb-2">
+                    <h2 className="text-lg font-bold text-white">{currentChannel?.name}</h2>
+                    <p className="text-xs text-white/60">{currentChannel?.group}</p>
+                  </div>
+                  
+                  <div className="flex items-center gap-3">
+                    <button 
+                      onClick={toggleMute}
+                      className="w-9 h-9 rounded-full flex items-center justify-center text-white hover:bg-white/20 transition-colors"
+                    >
+                      {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
+                    </button>
+                    <input
+                      type="range"
+                      min="0"
+                      max="1"
+                      step="0.1"
+                      value={isMuted ? 0 : volume}
+                      onChange={handleVolumeChange}
+                      className="w-20 h-1 rounded-lg appearance-none cursor-pointer"
+                      style={{ backgroundColor: 'rgba(255,255,255,0.3)' }}
+                    />
+                    <button 
+                      onClick={toggleFullscreen}
+                      className="w-9 h-9 rounded-full flex items-center justify-center text-white hover:bg-white/20 transition-colors ml-auto"
+                    >
+                      <Maximize className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Info Bar */}
+              <div 
+                className="mt-3 px-4 py-3 rounded-xl flex items-center justify-between"
+                style={{ backgroundColor: BG_SURFACE }}
+              >
+                <div className="flex items-center gap-3">
+                  <div 
+                    className="w-10 h-10 rounded-lg flex items-center justify-center"
+                    style={{ backgroundColor: 'rgba(255,255,255,0.05)' }}
+                  >
+                    {isChannelLogoVisible(currentChannel) ? (
+                      <img
+                        src={currentChannel?.logo}
+                        alt=""
+                        className="w-8 h-8 object-contain"
+                      />
+                    ) : (
+                      <Tv className="w-4 h-4 text-white/40" />
+                    )}
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-semibold text-white">{currentChannel?.name}</h3>
+                    <p className="text-xs text-white/50">{currentChannel?.group}</p>
+                  </div>
+                </div>
+                
+                <div className="flex items-center gap-3 text-xs text-white/40">
+                  <span className="hidden md:inline">↑↓ Kanal • S: Ara</span>
+                  <span className="px-2 py-1 rounded bg-white/5">{filteredChannels.length} kanal</span>
+                </div>
               </div>
             </div>
-          </div>
 
-          {/* Info Bar */}
-          <div 
-            className="flex-shrink-0 px-4 py-3 flex items-center justify-between"
-            style={{ backgroundColor: BG_SURFACE, borderTop: '1px solid rgba(255,255,255,0.05)' }}
-          >
-            <div className="flex items-center gap-3">
-              <div 
-                className="w-9 h-9 rounded-lg flex items-center justify-center"
-                style={{ backgroundColor: 'rgba(255,255,255,0.05)' }}
-              >
-                {isChannelLogoVisible(currentChannel) ? (
-                  <img
-                    src={currentChannel?.logo}
-                    alt=""
-                    className="w-7 h-7 object-contain"
+            {/* ========== RIGHT SIDEBAR ========== */}
+            <aside 
+              className="flex-shrink-0 w-72 lg:w-80 flex flex-col rounded-xl overflow-hidden"
+              style={{ backgroundColor: BG_SURFACE }}
+            >
+              {/* Search */}
+              <div className="p-3" style={{ borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                <div className="relative">
+                  <Search className={`absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 transition-colors ${isSearching ? 'animate-pulse' : 'text-white/40'}`} style={{ color: isSearching ? PRIMARY : undefined }} />
+                  <input
+                    ref={searchInputRef}
+                    type="text"
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    placeholder="Kanal ara... (S tuşu)"
+                    className="w-full pl-10 pr-8 py-2.5 rounded-lg text-sm text-white placeholder-white/40 outline-none transition-all"
+                    style={{ 
+                      backgroundColor: BG_CARD, 
+                      border: `1px solid ${isSearching ? PRIMARY : 'rgba(255,255,255,0.08)'}`,
+                    }}
                   />
-                ) : (
-                  <Tv className="w-4 h-4 text-white/40" />
+                  {searchQuery && (
+                    <button
+                      onClick={() => setSearchQuery('')}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-white/40 hover:text-white text-xs"
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
+                {isSearching && (
+                  <div className="mt-1.5 text-[10px] text-white/40 flex items-center gap-1.5">
+                    <div className="w-3 h-3 border border-t-transparent rounded-full animate-spin" style={{ borderColor: `${PRIMARY} transparent transparent transparent` }} />
+                    Aranıyor...
+                  </div>
                 )}
               </div>
-              <div className="min-w-0">
-                <h3 className="text-sm font-semibold text-white truncate">{currentChannel?.name}</h3>
-                <p className="text-xs text-white/50">{currentChannel?.group}</p>
-              </div>
-            </div>
-            
-            <div className="flex items-center gap-4 text-xs text-white/40">
-              <span className="hidden sm:inline">↑↓ Kanal değiştir • S tuşu ile ara</span>
-              <span>{filteredChannels.length} kanal</span>
-            </div>
-          </div>
-        </main>
 
-        {/* ========== RIGHT SIDEBAR - Search + 12 Channels ========== */}
-        <aside 
-          className="flex-shrink-0 w-64 sm:w-72 lg:w-80 flex flex-col"
-          style={{ 
-            backgroundColor: BG_SURFACE,
-            borderLeft: '1px solid rgba(255,255,255,0.05)'
-          }}
-        >
-          {/* Search Box - Moved to sidebar */}
-          <div 
-            className="px-3 py-3"
-            style={{ backgroundColor: BG_SURFACE, borderBottom: '1px solid rgba(255,255,255,0.05)' }}
-          >
-            <div className="relative">
-              <Search className={`absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 transition-colors ${isSearching ? 'text-primary animate-pulse' : 'text-white/40'}`} style={{ color: isSearching ? PRIMARY : undefined }} />
-              <input
-                ref={searchInputRef}
-                type="text"
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="Kanal ara... (S tuşu)"
-                className="w-full pl-10 pr-3 py-2.5 rounded-lg text-sm text-white placeholder-white/40 outline-none transition-all"
+              {/* Header */}
+              <div 
+                className="px-3 py-2 flex items-center justify-between"
+                style={{ backgroundColor: 'rgba(0,0,0,0.2)' }}
+              >
+                <h3 className="text-xs font-semibold text-white/90">Kanallar</h3>
+                <span className="text-[10px] text-white/40 font-mono px-1.5 py-0.5 rounded bg-white/5">
+                  {channelPage + 1}/{totalPages}
+                </span>
+              </div>
+
+              {/* Up Button */}
+              <button
+                onClick={handlePrevPage}
+                disabled={channelPage === 0}
+                className="flex-shrink-0 w-full py-2 flex items-center justify-center transition-all"
                 style={{ 
-                  backgroundColor: BG_CARD, 
-                  border: `1px solid ${isSearching ? PRIMARY : 'rgba(255,255,255,0.08)'}`,
+                  backgroundColor: channelPage === 0 ? 'transparent' : 'rgba(255,255,255,0.05)',
+                  opacity: channelPage === 0 ? 0.2 : 1,
+                  borderBottom: '1px solid rgba(255,255,255,0.05)',
+                  cursor: channelPage === 0 ? 'not-allowed' : 'pointer'
                 }}
-              />
-              {searchQuery && (
-                <button
-                  onClick={() => setSearchQuery('')}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-white/40 hover:text-white text-xs"
-                >
-                  ✕
-                </button>
-              )}
-            </div>
-            {isSearching && (
-              <div className="mt-1 text-[10px] text-white/40 flex items-center gap-1">
-                <div className="w-3 h-3 border border-t-transparent rounded-full animate-spin" style={{ borderColor: `${PRIMARY} transparent transparent transparent` }} />
-                Aranıyor...
-              </div>
-            )}
-          </div>
-
-          {/* Channels Header */}
-          <div 
-            className="px-3 py-2 flex items-center justify-between"
-            style={{ backgroundColor: 'rgba(0,0,0,0.2)', borderBottom: '1px solid rgba(255,255,255,0.05)' }}
-          >
-            <h3 className="text-xs font-semibold text-white/90">Kanallar</h3>
-            <span className="text-[10px] text-white/40 font-mono">
-              {channelPage + 1}/{totalPages}
-            </span>
-          </div>
-
-          {/* Up Button */}
-          <button
-            onClick={handlePrevPage}
-            disabled={channelPage === 0}
-            className="flex-shrink-0 w-full py-2 flex items-center justify-center transition-all"
-            style={{ 
-              backgroundColor: channelPage === 0 ? 'transparent' : 'rgba(255,255,255,0.05)',
-              opacity: channelPage === 0 ? 0.2 : 1,
-              borderBottom: '1px solid rgba(255,255,255,0.05)',
-              cursor: channelPage === 0 ? 'not-allowed' : 'pointer'
-            }}
-          >
-            <ChevronUp className="w-5 h-5 text-white" />
-          </button>
-          
-          {/* Channel List - 12 Channels */}
-          <div className="flex-1 overflow-hidden">
-            <div className="h-full flex flex-col">
-              {visibleChannels.map((channel, index) => {
-                const isActive = buildChannelIdentity(currentChannel) === buildChannelIdentity(channel)
-                const showLogo = isChannelLogoVisible(channel)
-                const channelNumber = (channelPage * CHANNELS_PER_PAGE) + index + 1
-                
-                return (
-                  <button
-                    key={channel.name + index}
-                    onClick={() => setCurrentChannel(channel)}
-                    className="flex items-center gap-2 px-3 py-2 transition-all text-left flex-1 min-h-0"
-                    style={{
-                      backgroundColor: isActive ? PRIMARY : index % 2 === 0 ? 'rgba(255,255,255,0.02)' : 'transparent',
-                      borderBottom: '1px solid rgba(255,255,255,0.03)',
-                    }}
-                  >
-                    {/* Channel Number */}
-                    <span 
-                      className="text-[11px] font-mono w-5 text-center flex-shrink-0"
-                      style={{ color: isActive ? 'rgba(255,255,255,0.9)' : 'rgba(255,255,255,0.35)' }}
-                    >
-                      {channelNumber}
-                    </span>
-                    
-                    {/* Logo */}
-                    <div 
-                      className="w-8 h-8 rounded flex-shrink-0 flex items-center justify-center"
-                      style={{ 
-                        backgroundColor: isActive ? 'rgba(255,255,255,0.15)' : 'rgba(255,255,255,0.05)',
-                      }}
-                    >
-                      {showLogo ? (
-                        <img
-                          src={channel.logo}
-                          alt=""
-                          loading="lazy"
-                          onError={() => handleChannelLogoError(channel)}
-                          className="w-6 h-6 object-contain"
-                        />
-                      ) : (
-                        <span className="text-[9px] font-bold text-white/40">TV</span>
-                      )}
-                    </div>
-                    
-                    {/* Channel Name */}
-                    <div className="flex-1 min-w-0 overflow-hidden">
-                      <h4 className={`text-xs truncate ${isActive ? 'text-white font-medium' : 'text-white/80'}`}>
-                        {channel.name}
-                      </h4>
-                    </div>
-                    
-                    {/* Active Indicator */}
-                    {isActive && (
-                      <div className="w-2 h-2 rounded-full bg-white animate-pulse flex-shrink-0" />
-                    )}
-                  </button>
-                )
-              })}
+              >
+                <ChevronUp className="w-5 h-5 text-white" />
+              </button>
               
-              {/* Empty slots */}
-              {visibleChannels.length < CHANNELS_PER_PAGE && (
-                Array.from({ length: CHANNELS_PER_PAGE - visibleChannels.length }).map((_, i) => (
-                  <div 
-                    key={`empty-${i}`}
-                    className="flex-1 min-h-0 px-3"
-                    style={{ 
-                      backgroundColor: (visibleChannels.length + i) % 2 === 0 ? 'rgba(255,255,255,0.02)' : 'transparent',
-                      borderBottom: '1px solid rgba(255,255,255,0.02)' 
-                    }}
-                  />
-                ))
-              )}
-            </div>
-          </div>
+              {/* Channel List - 12 Channels */}
+              <div className="flex-1 overflow-hidden">
+                <div className="h-full flex flex-col">
+                  {visibleChannels.map((channel, index) => {
+                    const isActive = buildChannelIdentity(currentChannel) === buildChannelIdentity(channel)
+                    const showLogo = isChannelLogoVisible(channel)
+                    const channelNumber = (channelPage * CHANNELS_PER_PAGE) + index + 1
+                    
+                    return (
+                      <button
+                        key={channel.name + index}
+                        onClick={() => setCurrentChannel(channel)}
+                        className="flex items-center gap-2.5 px-3 py-2.5 transition-all text-left flex-1 min-h-0"
+                        style={{
+                          backgroundColor: isActive ? PRIMARY : 'transparent',
+                          borderBottom: '1px solid rgba(255,255,255,0.03)',
+                        }}
+                      >
+                        <span 
+                          className="text-[11px] font-mono w-5 text-center flex-shrink-0"
+                          style={{ color: isActive ? 'rgba(255,255,255,0.9)' : 'rgba(255,255,255,0.35)' }}
+                        >
+                          {channelNumber}
+                        </span>
+                        
+                        <div 
+                          className="w-8 h-8 rounded flex-shrink-0 flex items-center justify-center"
+                          style={{ backgroundColor: isActive ? 'rgba(255,255,255,0.15)' : 'rgba(255,255,255,0.05)' }}
+                        >
+                          {showLogo ? (
+                            <img
+                              src={channel.logo}
+                              alt=""
+                              loading="lazy"
+                              onError={() => handleChannelLogoError(channel)}
+                              className="w-6 h-6 object-contain"
+                            />
+                          ) : (
+                            <span className="text-[9px] font-bold text-white/40">TV</span>
+                          )}
+                        </div>
+                        
+                        <div className="flex-1 min-w-0 overflow-hidden">
+                          <h4 className={`text-xs truncate ${isActive ? 'text-white font-medium' : 'text-white/80'}`}>
+                            {channel.name}
+                          </h4>
+                        </div>
+                        
+                        {isActive && (
+                          <div className="w-2 h-2 rounded-full bg-white animate-pulse flex-shrink-0" />
+                        )}
+                      </button>
+                    )
+                  })}
+                  
+                  {visibleChannels.length < CHANNELS_PER_PAGE && (
+                    Array.from({ length: CHANNELS_PER_PAGE - visibleChannels.length }).map((_, i) => (
+                      <div 
+                        key={`empty-${i}`}
+                        className="flex-1 min-h-0"
+                        style={{ borderBottom: '1px solid rgba(255,255,255,0.02)' }}
+                      />
+                    ))
+                  )}
+                </div>
+              </div>
 
-          {/* Down Button */}
-          <button
-            onClick={handleNextPage}
-            disabled={channelPage >= totalPages - 1}
-            className="flex-shrink-0 w-full py-2 flex items-center justify-center transition-all"
-            style={{ 
-              backgroundColor: channelPage >= totalPages - 1 ? 'transparent' : 'rgba(255,255,255,0.05)',
-              opacity: channelPage >= totalPages - 1 ? 0.2 : 1,
-              borderTop: '1px solid rgba(255,255,255,0.05)',
-              cursor: channelPage >= totalPages - 1 ? 'not-allowed' : 'pointer'
-            }}
-          >
-            <ChevronDown className="w-5 h-5 text-white" />
-          </button>
+              {/* Down Button */}
+              <button
+                onClick={handleNextPage}
+                disabled={channelPage >= totalPages - 1}
+                className="flex-shrink-0 w-full py-2 flex items-center justify-center transition-all"
+                style={{ 
+                  backgroundColor: channelPage >= totalPages - 1 ? 'transparent' : 'rgba(255,255,255,0.05)',
+                  opacity: channelPage >= totalPages - 1 ? 0.2 : 1,
+                  borderTop: '1px solid rgba(255,255,255,0.05)',
+                  cursor: channelPage >= totalPages - 1 ? 'not-allowed' : 'pointer'
+                }}
+              >
+                <ChevronDown className="w-5 h-5 text-white" />
+              </button>
 
-          {/* Total count */}
-          <div 
-            className="px-3 py-2 text-center text-[10px] text-white/30"
-            style={{ borderTop: '1px solid rgba(255,255,255,0.05)' }}
-          >
-            {filteredChannels.length} kanal • Sayfa {channelPage + 1}/{totalPages}
+              {/* Footer */}
+              <div 
+                className="px-3 py-2 text-center text-[10px] text-white/30"
+                style={{ borderTop: '1px solid rgba(255,255,255,0.05)' }}
+              >
+                {filteredChannels.length} kanal
+              </div>
+            </aside>
           </div>
-        </aside>
-      </div>
+        </div>
+      </main>
     </div>
   )
 }
