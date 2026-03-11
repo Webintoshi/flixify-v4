@@ -18,6 +18,13 @@ const logger = require('../../config/logger');
 
 const PackageController = require('../controllers/PackageController');
 
+function setNoStoreHeaders(res) {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  res.setHeader('Surrogate-Control', 'no-store');
+}
+
 function createRoutes({
   authController,
   adminController,
@@ -35,15 +42,57 @@ function createRoutes({
   const router = express.Router();
 
   // Health check (no auth required)
-  router.get('/health', (req, res) => {
+  router.get('/health', async (req, res) => {
+    setNoStoreHeaders(res);
+    const runtimeStatus = typeof req.app.locals.getRuntimeStatus === 'function'
+      ? await req.app.locals.getRuntimeStatus()
+      : null;
+
+    res.json({
+      status: 'success',
+      data: {
+        service: 'iptv-platform',
+        version: runtimeStatus?.version || process.env.npm_package_version || '1.0.0',
+        timestamp: runtimeStatus?.timestamp || new Date().toISOString(),
+        serverIp: req.socket.localAddress,
+        uptimeSeconds: runtimeStatus?.uptimeSeconds || Math.round(process.uptime()),
+        mediaTooling: runtimeStatus?.dependencies?.media || req.app.locals.mediaTooling || null,
+        dependencies: runtimeStatus?.dependencies || null
+      }
+    });
+  });
+
+  router.get('/ready', async (req, res) => {
+    setNoStoreHeaders(res);
+    const runtimeStatus = typeof req.app.locals.getRuntimeStatus === 'function'
+      ? await req.app.locals.getRuntimeStatus({ forceRefresh: true })
+      : null;
+
+    const databaseHealthy = runtimeStatus?.dependencies?.database?.healthy !== false;
+    const mediaHealthy = runtimeStatus?.dependencies?.media?.healthy !== false;
+    const ready = Boolean(databaseHealthy && mediaHealthy);
+
+    return res.status(ready ? 200 : 503).json({
+      status: ready ? 'ready' : 'degraded',
+      data: runtimeStatus || {
+        timestamp: new Date().toISOString(),
+        service: 'iptv-platform'
+      }
+    });
+  });
+
+  router.get('/', (_req, res) => {
+    setNoStoreHeaders(res);
     res.json({
       status: 'success',
       data: {
         service: 'iptv-platform',
         version: process.env.npm_package_version || '1.0.0',
-        timestamp: new Date().toISOString(),
-        serverIp: req.socket.localAddress,
-        mediaTooling: req.app.locals.mediaTooling || null
+        endpoints: {
+          health: '/api/v1/health',
+          ready: '/api/v1/ready',
+          m3uHealth: '/api/v1/m3u/health'
+        }
       }
     });
   });

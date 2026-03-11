@@ -13,7 +13,7 @@
  */
 
 import { useState, useEffect, useCallback, useRef } from 'react'
-import { buildApiUrl } from '../config/api'
+import { apiFetch } from '../config/api'
 
 const CACHE_KEY_PREFIX = 'iptv_m3u_v2_'
 const DEFAULT_TTL_MS = 5 * 60 * 1000 // 5 dakika
@@ -99,7 +99,7 @@ export function useM3UCache(userCode, token, options = {}) {
     setError(null)
 
     try {
-      const response = await fetch(buildApiUrl(`/m3u/${userCode}.m3u`), {
+      const response = await apiFetch(`/m3u/${userCode}.m3u`, {
         signal: abortControllerRef.current.signal,
         headers: {
           'Authorization': `Bearer ${token}`,

@@ -2264,11 +2264,35 @@ class M3uController {
   });
 
   healthCheck = asyncHandler(async (req, res) => {
+    const cacheStatus = typeof this._cacheService?.getStatus === 'function'
+      ? this._cacheService.getStatus()
+      : null;
+
     res.json({
       status: 'success',
       data: {
         circuitBreaker: {
-          state: this._circuitBreaker.opened ? 'OPEN' : 'CLOSED'
+          state: this._circuitBreaker.opened ? 'OPEN' : 'CLOSED',
+          stats: this._circuitBreaker.stats
+        },
+        cache: cacheStatus,
+        inflight: {
+          rawPlaylist: this._rawPlaylistInflight.size,
+          catalog: this._catalogInflight.size,
+          sharedLiveCatalog: this._sharedLiveCatalogInflight.size
+        },
+        sessions: {
+          vod: this._vodSessions.size
+        },
+        originCaches: {
+          providerOrigins: this._userProviderOrigins.size,
+          allowedOrigins: this._userAllowedOrigins.size
+        },
+        streamProxy: {
+          upstreamTimeoutMs: this._upstreamTimeoutMs,
+          streamTimeoutMs: this._streamProxyTimeoutMs,
+          streamReadTimeoutMs: this._streamProxyReadTimeoutMs,
+          liveHlsKeepSegments: this._liveHlsKeepSegments
         }
       }
     });

@@ -1,5 +1,7 @@
 import axios from 'axios'
-import { API_BASE_URL } from '../config/api'
+import { API_BASE_URL, API_FALLBACK_BASE_URLS } from '../config/api'
+
+const RETRYABLE_API_STATUS_CODES = new Set([408, 425, 429, 500, 502, 503, 504])
 
 const api = axios.create({
   baseURL: API_BASE_URL,
@@ -22,6 +24,61 @@ const generateUUID = () => {
   })
 }
 
+function isRetryableApiError(error) {
+  if (!error) {
+    return false
+  }
+
+  if (!error.response) {
+    return true
+  }
+
+  return RETRYABLE_API_STATUS_CODES.has(Number(error.response.status))
+}
+
+async function retryWithFallbackBaseUrls(error) {
+  const originalConfig = error?.config
+  if (!originalConfig || originalConfig._apiFallbackLocked || API_FALLBACK_BASE_URLS.length === 0) {
+    throw error
+  }
+
+  const attemptedBaseUrls = new Set(
+    Array.isArray(originalConfig._apiAttemptedBaseUrls)
+      ? originalConfig._apiAttemptedBaseUrls
+      : [originalConfig.baseURL || API_BASE_URL]
+  )
+
+  let lastError = error
+
+  for (const fallbackBaseUrl of API_FALLBACK_BASE_URLS) {
+    if (!fallbackBaseUrl || attemptedBaseUrls.has(fallbackBaseUrl)) {
+      continue
+    }
+
+    attemptedBaseUrls.add(fallbackBaseUrl)
+
+    try {
+      return await api.request({
+        ...originalConfig,
+        baseURL: fallbackBaseUrl,
+        headers: {
+          ...(originalConfig.headers || {}),
+          'X-Request-ID': generateUUID()
+        },
+        _apiFallbackLocked: true,
+        _apiAttemptedBaseUrls: Array.from(attemptedBaseUrls)
+      })
+    } catch (fallbackError) {
+      lastError = fallbackError
+      if (!isRetryableApiError(fallbackError)) {
+        break
+      }
+    }
+  }
+
+  throw lastError
+}
+
 // Request interceptor
 api.interceptors.request.use(
   (config) => {
@@ -35,7 +92,15 @@ api.interceptors.request.use(
 // Response interceptor
 api.interceptors.response.use(
   (response) => response,
-  (error) => {
+  async (error) => {
+    if (isRetryableApiError(error)) {
+      try {
+        return await retryWithFallbackBaseUrls(error)
+      } catch (retryError) {
+        error = retryError
+      }
+    }
+
     // Handle specific error cases
     if (error.response?.status === 401) {
       // Token expired or invalid - only logout if explicitly auth failed

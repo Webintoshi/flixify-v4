@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
 import { Copy, Download, Check, ArrowRight } from 'lucide-react';
 import { useAuthStore } from '../stores/authStore';
-import { buildApiUrl } from '../config/api';
+import { apiFetch } from '../config/api';
 
 // Renk tanımları
 const PRIMARY = '#E50914';
@@ -78,7 +78,7 @@ function RegisterPage() {
     setError(null);
 
     try {
-      const response = await fetch(buildApiUrl('/auth/register-public'), {
+      const response = await apiFetch('/auth/register-public', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json'

@@ -1,4 +1,4 @@
-import { buildApiUrl } from '../config/api'
+import { apiFetch, buildApiUrl } from '../config/api'
 import {
   parseSeriesFromPlaylist,
   groupSeriesEpisodes,
@@ -202,12 +202,19 @@ async function fetchPlaylistSource(source, token, signal, options = {}) {
       Pragma: 'no-cache'
     }
 
-  const response = await fetch(source.url, {
-    signal,
-    headers,
-    credentials: isDirectSource ? 'omit' : 'same-origin',
-    cache: disableCache || isDirectSource ? 'no-store' : 'default'
-  })
+  const response = isDirectSource
+    ? await fetch(source.url, {
+      signal,
+      headers,
+      credentials: 'omit',
+      cache: 'no-store'
+    })
+    : await apiFetch(source.url, {
+      signal,
+      headers,
+      credentials: 'same-origin',
+      cache: disableCache ? 'no-store' : 'default'
+    })
 
   if (!response.ok) {
     const statusError = new Error(
@@ -262,6 +269,19 @@ function setMemoryCacheEntry(cacheMap, key, value) {
   return value
 }
 
+function getFreshMemoryCacheRecord(cacheMap, key, ttlMs) {
+  const entry = cacheMap.get(key)
+  if (!entry) return null
+  if (now() - entry.timestamp > ttlMs) {
+    return null
+  }
+  return entry
+}
+
+function getStaleMemoryCacheRecord(cacheMap, key) {
+  return cacheMap.get(key) || null
+}
+
 function getSessionCacheEntry(key, ttlMs) {
   if (!canUseSessionStorage()) return null
 
@@ -313,6 +333,38 @@ function setSessionCacheEntry(key, value) {
   return value
 }
 
+function getFreshSessionCacheRecord(key, ttlMs) {
+  if (!canUseSessionStorage()) return null
+
+  try {
+    const raw = sessionStorage.getItem(key)
+    if (!raw) return null
+
+    const parsed = JSON.parse(raw)
+    if (!parsed?.timestamp || now() - parsed.timestamp > ttlMs) {
+      sessionStorage.removeItem(key)
+      return null
+    }
+
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+function getStaleSessionCacheRecord(key) {
+  if (!canUseSessionStorage()) return null
+
+  try {
+    const raw = sessionStorage.getItem(key)
+    if (!raw) return null
+
+    return JSON.parse(raw)
+  } catch {
+    return null
+  }
+}
+
 function getCachedEntry(cacheMap, key, ttlMs) {
   const memoryValue = getFreshCacheEntry(cacheMap, key, ttlMs)
   if (memoryValue) return memoryValue
@@ -343,6 +395,52 @@ function cacheEntry(cacheMap, key, value) {
   setMemoryCacheEntry(cacheMap, key, value)
   setSessionCacheEntry(key, value)
   return value
+}
+
+function getCachedValueSnapshot(cacheMap, key, ttlMs, allowStale = true) {
+  const freshMemoryRecord = getFreshMemoryCacheRecord(cacheMap, key, ttlMs)
+  if (freshMemoryRecord) {
+    return {
+      value: freshMemoryRecord.value,
+      timestamp: freshMemoryRecord.timestamp,
+      isStale: false
+    }
+  }
+
+  const freshSessionRecord = getFreshSessionCacheRecord(key, ttlMs)
+  if (freshSessionRecord?.value !== undefined) {
+    cacheMap.set(key, freshSessionRecord)
+    return {
+      value: freshSessionRecord.value,
+      timestamp: freshSessionRecord.timestamp,
+      isStale: false
+    }
+  }
+
+  if (!allowStale) {
+    return null
+  }
+
+  const staleMemoryRecord = getStaleMemoryCacheRecord(cacheMap, key)
+  if (staleMemoryRecord) {
+    return {
+      value: staleMemoryRecord.value,
+      timestamp: staleMemoryRecord.timestamp,
+      isStale: true
+    }
+  }
+
+  const staleSessionRecord = getStaleSessionCacheRecord(key)
+  if (staleSessionRecord?.value !== undefined) {
+    cacheMap.set(key, staleSessionRecord)
+    return {
+      value: staleSessionRecord.value,
+      timestamp: staleSessionRecord.timestamp,
+      isStale: true
+    }
+  }
+
+  return null
 }
 
 function delay(ms) {
@@ -829,7 +927,7 @@ async function fetchCatalog(user, token, catalogType, options = {}) {
 
     for (let attempt = 0; attempt <= retries; attempt += 1) {
       try {
-        const response = await fetch(endpoint, {
+        const response = await apiFetch(endpoint, {
           signal,
           headers: {
             'Authorization': `Bearer ${token}`
@@ -926,7 +1024,7 @@ export async function fetchLiveCatalog(user, token, options = {}) {
     signal,
     country = 'TR',
     forceRefresh = false,
-    disableCache = true,
+    disableCache = false,
     ttlMs = DEFAULT_TTL_MS,
     retries = 1
   } = options
@@ -970,7 +1068,7 @@ export async function fetchLiveCatalog(user, token, options = {}) {
 
     for (let attempt = 0; attempt <= retries; attempt += 1) {
       try {
-        const response = await fetch(endpoint, {
+        const response = await apiFetch(endpoint, {
           signal,
           cache: disableCache ? 'no-store' : 'default',
           headers: {
@@ -1055,6 +1153,36 @@ export async function fetchLiveCatalog(user, token, options = {}) {
 
 export function fetchSeriesCatalog(user, token, options = {}) {
   return fetchCatalog(user, token, 'series', options)
+}
+
+export function getCachedLiveCatalogSnapshot(user, token, options = {}) {
+  const {
+    country = 'TR',
+    ttlMs = DEFAULT_TTL_MS,
+    allowStale = true,
+    deliveryMode = null
+  } = options
+
+  if (!user?.code || !token) {
+    return null
+  }
+
+  const normalizedCountry = String(country || 'TR').trim().toUpperCase() || 'TR'
+  const resolvedDeliveryMode = resolvePlaylistDeliveryMode(user, deliveryMode)
+  const tokenKey = tokenFingerprint(token)
+  const catalogVariant = `country:${normalizedCountry}`
+  const catalogCacheKey = buildCatalogCacheKey(user.code, tokenKey, 'live', catalogVariant, resolvedDeliveryMode)
+  const snapshot = getCachedValueSnapshot(catalogMemoryCache, catalogCacheKey, ttlMs, allowStale)
+
+  if (!snapshot) {
+    return null
+  }
+
+  return {
+    ...snapshot,
+    country: normalizedCountry,
+    cacheKey: catalogCacheKey
+  }
 }
 
 export function fetchSeriesDetail(user, token, seriesName, options = {}) {

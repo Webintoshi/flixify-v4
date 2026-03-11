@@ -1,8 +1,6 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
-import { API_BASE_URL } from '../config/api'
-
-const API_URL = API_BASE_URL
+import { apiFetch } from '../config/api'
 
 export const useAdminStore = create(
   persist(
@@ -20,7 +18,7 @@ export const useAdminStore = create(
       login: async (email, password) => {
         set({ isLoading: true, error: null })
         try {
-          const response = await fetch(`${API_URL}/admin/login`, {
+          const response = await apiFetch('/admin/login', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ email, password })
@@ -68,7 +66,7 @@ export const useAdminStore = create(
         if (!adminToken) return
 
         try {
-          const response = await fetch(`${API_URL}/admin/profile`, {
+          const response = await apiFetch('/admin/profile', {
             headers: { 
               'Authorization': `Bearer ${adminToken}`,
               'Content-Type': 'application/json'
@@ -90,7 +88,7 @@ export const useAdminStore = create(
       fetchUsers: async () => {
         const { adminToken } = get()
         try {
-          const response = await fetch(`${API_URL}/admin/users`, {
+          const response = await apiFetch('/admin/users', {
             headers: { 'Authorization': `Bearer ${adminToken}` }
           })
           
@@ -117,7 +115,7 @@ export const useAdminStore = create(
       updateUserPackage: async (userCode, packageData) => {
         const { adminToken } = get()
         try {
-          const response = await fetch(`${API_URL}/admin/users/${userCode}/package`, {
+          const response = await apiFetch(`/admin/users/${userCode}/package`, {
             method: 'PUT',
             headers: { 
               'Authorization': `Bearer ${adminToken}`,
@@ -136,7 +134,7 @@ export const useAdminStore = create(
       extendUserExpiry: async (userCode, days) => {
         const { adminToken } = get()
         try {
-          const response = await fetch(`${API_URL}/admin/users/${userCode}/extend`, {
+          const response = await apiFetch(`/admin/users/${userCode}/extend`, {
             method: 'POST',
             headers: { 
               'Authorization': `Bearer ${adminToken}`,
@@ -155,7 +153,7 @@ export const useAdminStore = create(
       updateUserM3U: async (userCode, m3uUrl) => {
         const { adminToken } = get()
         try {
-          const response = await fetch(`${API_URL}/admin/users/${userCode}/m3u`, {
+          const response = await apiFetch(`/admin/users/${userCode}/m3u`, {
             method: 'PUT',
             headers: { 
               'Authorization': `Bearer ${adminToken}`,
@@ -175,7 +173,7 @@ export const useAdminStore = create(
       fetchPackages: async () => {
         const { adminToken } = get()
         try {
-          const response = await fetch(`${API_URL}/admin/packages`, {
+          const response = await apiFetch('/admin/packages', {
             headers: { 'Authorization': `Bearer ${adminToken}` }
           })
           
@@ -210,7 +208,7 @@ export const useAdminStore = create(
             duration_days: (packageData.duration || 1) * 30, // Ayı güne çevir
           }
           
-          const response = await fetch(`${API_URL}/admin/packages`, {
+          const response = await apiFetch('/admin/packages', {
             method: 'POST',
             headers: { 
               'Authorization': `Bearer ${adminToken}`,
@@ -237,7 +235,7 @@ export const useAdminStore = create(
             duration_days: (packageData.duration || 1) * 30, // Ayı güne çevir
           }
           
-          const response = await fetch(`${API_URL}/admin/packages/${packageId}`, {
+          const response = await apiFetch(`/admin/packages/${packageId}`, {
             method: 'PUT',
             headers: { 
               'Authorization': `Bearer ${adminToken}`,
@@ -256,7 +254,7 @@ export const useAdminStore = create(
       deletePackage: async (packageId) => {
         const { adminToken } = get()
         try {
-          const response = await fetch(`${API_URL}/admin/packages/${packageId}`, {
+          const response = await apiFetch(`/admin/packages/${packageId}`, {
             method: 'DELETE',
             headers: { 'Authorization': `Bearer ${adminToken}` }
           })
@@ -272,7 +270,7 @@ export const useAdminStore = create(
       fetchPayments: async () => {
         const { adminToken } = get()
         try {
-          const response = await fetch(`${API_URL}/admin/payments`, {
+          const response = await apiFetch('/admin/payments', {
             headers: { 'Authorization': `Bearer ${adminToken}` }
           })
           if (!response.ok) throw new Error('Ödemeler getirilemedi')
@@ -286,7 +284,7 @@ export const useAdminStore = create(
       approvePayment: async (paymentId) => {
         const { adminToken } = get()
         try {
-          const response = await fetch(`${API_URL}/admin/payments/${paymentId}/approve`, {
+          const response = await apiFetch(`/admin/payments/${paymentId}/approve`, {
             method: 'POST',
             headers: { 'Authorization': `Bearer ${adminToken}` }
           })
@@ -301,7 +299,7 @@ export const useAdminStore = create(
       rejectPayment: async (paymentId, reason) => {
         const { adminToken } = get()
         try {
-          const response = await fetch(`${API_URL}/admin/payments/${paymentId}/reject`, {
+          const response = await apiFetch(`/admin/payments/${paymentId}/reject`, {
             method: 'POST',
             headers: { 
               'Authorization': `Bearer ${adminToken}`,
@@ -321,7 +319,7 @@ export const useAdminStore = create(
       fetchAdmins: async () => {
         const { adminToken } = get()
         try {
-          const response = await fetch(`${API_URL}/admin/admins`, {
+          const response = await apiFetch('/admin/admins', {
             headers: { 'Authorization': `Bearer ${adminToken}` }
           })
           if (!response.ok) throw new Error('Adminler getirilemedi')
@@ -335,7 +333,7 @@ export const useAdminStore = create(
       createAdmin: async (adminData) => {
         const { adminToken } = get()
         try {
-          const response = await fetch(`${API_URL}/admin/admins`, {
+          const response = await apiFetch('/admin/admins', {
             method: 'POST',
             headers: { 
               'Authorization': `Bearer ${adminToken}`,
@@ -354,7 +352,7 @@ export const useAdminStore = create(
       deleteAdmin: async (adminId) => {
         const { adminToken } = get()
         try {
-          const response = await fetch(`${API_URL}/admin/admins/${adminId}`, {
+          const response = await apiFetch(`/admin/admins/${adminId}`, {
             method: 'DELETE',
             headers: { 'Authorization': `Bearer ${adminToken}` }
           })
@@ -370,7 +368,7 @@ export const useAdminStore = create(
       deleteUser: async (userCode) => {
         const { adminToken } = get()
         try {
-          const response = await fetch(`${API_URL}/admin/users/${userCode}`, {
+          const response = await apiFetch(`/admin/users/${userCode}`, {
             method: 'DELETE',
             headers: { 'Authorization': `Bearer ${adminToken}` }
           })
@@ -389,7 +387,7 @@ export const useAdminStore = create(
       fetchAnalytics: async () => {
         const { adminToken } = get()
         try {
-          const response = await fetch(`${API_URL}/admin/analytics`, {
+          const response = await apiFetch('/admin/analytics', {
             headers: { 'Authorization': `Bearer ${adminToken}` }
           })
           if (!response.ok) throw new Error('Analiz verileri getirilemedi')
@@ -403,7 +401,7 @@ export const useAdminStore = create(
       fetchDashboardStats: async () => {
         const { adminToken } = get()
         try {
-          const response = await fetch(`${API_URL}/admin/dashboard`, {
+          const response = await apiFetch('/admin/dashboard', {
             headers: { 'Authorization': `Bearer ${adminToken}` }
           })
           if (!response.ok) throw new Error('Dashboard verileri getirilemedi')

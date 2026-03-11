@@ -3,7 +3,7 @@ import {
   Monitor, Smartphone, Tablet, Tv, LogOut, AlertCircle, CheckCircle, 
   Clock, MapPin, Globe, Shield, X, Trash2, Users, Power
 } from 'lucide-react';
-import { buildApiUrl } from '../../config/api';
+import { apiFetch } from '../../config/api';
 
 // Renkler
 const PRIMARY = '#E50914';
@@ -49,7 +49,7 @@ function ProfileDevices() {
   const fetchDevices = async () => {
     try {
       const token = localStorage.getItem('iptv_auth_token');
-      const response = await fetch(buildApiUrl('/user/devices'), {
+      const response = await apiFetch('/user/devices', {
         headers: {
           'Authorization': `Bearer ${token}`
         }
@@ -84,7 +84,7 @@ function ProfileDevices() {
   const handleLogoutDevice = async (deviceId) => {
     try {
       const token = localStorage.getItem('iptv_auth_token');
-      const response = await fetch(buildApiUrl(`/user/devices/${deviceId}`), {
+      const response = await apiFetch(`/user/devices/${deviceId}`, {
         method: 'DELETE',
         headers: {
           'Authorization': `Bearer ${token}`

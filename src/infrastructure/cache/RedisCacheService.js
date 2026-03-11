@@ -287,6 +287,14 @@ class RedisCacheService extends CacheService {
     }
   }
 
+  getStatus() {
+    return {
+      driver: this._isConnected ? 'redis' : 'memory',
+      connected: this._isConnected,
+      fallbackEntries: this._memoryStore.size
+    };
+  }
+
   async close() {
     try {
       await this._redis.quit();

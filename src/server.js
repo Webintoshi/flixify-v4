@@ -57,7 +57,7 @@ const { errorHandler, notFoundHandler } = require('./api/middleware/errorHandler
 const createRoutes = require('./api/routes');
 
 function buildAllowedOrigins() {
-  const configuredOrigins = (process.env.CORS_ORIGINS || process.env.FRONTEND_ORIGINS || '')
+  const configuredOrigins = (process.env.CORS_ORIGINS || process.env.CORS_ORIGIN || process.env.FRONTEND_ORIGINS || '')
     .split(',')
     .map((origin) => origin.trim())
     .filter(Boolean);
@@ -81,6 +81,142 @@ function isAllowedOrigin(origin, allowedOrigins) {
   }
 
   return allowedOrigins.defaultPatterns.some((pattern) => pattern.test(origin));
+}
+
+function setNoStoreHeaders(res) {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  res.setHeader('Surrogate-Control', 'no-store');
+}
+
+function formatMemoryUsage(memoryUsage = {}) {
+  return Object.fromEntries(
+    Object.entries(memoryUsage).map(([key, value]) => [
+      key,
+      {
+        bytes: value,
+        mb: Number((value / (1024 * 1024)).toFixed(2))
+      }
+    ])
+  );
+}
+
+function createRuntimeStatusProvider({
+  cacheService,
+  supabaseClient,
+  useMockRepository,
+  mediaTooling,
+  telegramBotService,
+  redisClient
+}) {
+  const cacheTtlMs = Number.parseInt(process.env.HEALTHCHECK_CACHE_TTL_MS || '30000', 10);
+  let cachedSnapshot = null;
+  let cachedAt = 0;
+  let inflight = null;
+
+  return async function getRuntimeStatus(options = {}) {
+    const { forceRefresh = false } = options;
+    const now = Date.now();
+
+    if (!forceRefresh && cachedSnapshot && (now - cachedAt) < cacheTtlMs) {
+      return cachedSnapshot;
+    }
+
+    if (!forceRefresh && inflight) {
+      return inflight;
+    }
+
+    inflight = (async () => {
+      const cacheStatus = typeof cacheService?.getStatus === 'function'
+        ? cacheService.getStatus()
+        : {
+          driver: redisClient ? 'redis' : 'memory',
+          connected: false,
+          fallbackEntries: 0
+        };
+
+      const cacheHealthy = redisClient
+        ? await cacheService.healthCheck()
+        : true;
+
+      const cache = {
+        ...cacheStatus,
+        healthy: cacheHealthy
+      };
+
+      let database = {
+        provider: useMockRepository ? 'memory' : 'supabase',
+        healthy: false,
+        degraded: false,
+        error: null
+      };
+
+      if (useMockRepository) {
+        database = {
+          ...database,
+          healthy: true,
+          degraded: true
+        };
+      } else {
+        try {
+          const { error } = await supabaseClient
+            .from('users')
+            .select('id', { head: true, count: 'planned' })
+            .limit(1);
+
+          database = {
+            ...database,
+            healthy: !error,
+            error: error?.message || null
+          };
+        } catch (error) {
+          database = {
+            ...database,
+            healthy: false,
+            error: error.message
+          };
+        }
+      }
+
+      const media = {
+        ...mediaTooling,
+        healthy: Boolean(mediaTooling?.ready)
+      };
+
+      const summaryStatus = (!database.healthy || !cache.healthy || !media.healthy)
+        ? 'degraded'
+        : 'ok';
+
+      const snapshot = {
+        status: summaryStatus,
+        timestamp: new Date().toISOString(),
+        uptimeSeconds: Math.round(process.uptime()),
+        version: process.env.npm_package_version || '1.0.0',
+        environment: process.env.NODE_ENV || 'development',
+        memory: formatMemoryUsage(process.memoryUsage()),
+        dependencies: {
+          database,
+          cache,
+          media,
+          telegram: {
+            enabled: telegramBotService.isEnabled()
+          }
+        }
+      };
+
+      cachedSnapshot = snapshot;
+      cachedAt = Date.now();
+
+      return snapshot;
+    })();
+
+    try {
+      return await inflight;
+    } finally {
+      inflight = null;
+    }
+  };
 }
 
 async function checkCommandAvailability(command) {
@@ -120,10 +256,10 @@ async function startServer() {
 
   // Supabase Client
   const supabaseUrl = process.env.SUPABASE_URL;
-  const supabaseKey = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_ANON_KEY;
+  const supabaseKey = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
 
   if (!supabaseUrl || !supabaseKey) {
-    logger.error('Missing Supabase configuration. Check SUPABASE_URL and SUPABASE_SERVICE_KEY');
+    logger.error('Missing Supabase configuration. Check SUPABASE_URL and SUPABASE_SERVICE_KEY or SUPABASE_SERVICE_ROLE_KEY');
     process.exit(1);
   }
 
@@ -267,6 +403,14 @@ async function startServer() {
   // Store Redis client in app locals for access in routes
   app.locals.redisClient = redisClient;
   app.locals.mediaTooling = mediaTooling;
+  app.locals.getRuntimeStatus = createRuntimeStatusProvider({
+    cacheService,
+    supabaseClient,
+    useMockRepository,
+    mediaTooling,
+    telegramBotService,
+    redisClient
+  });
 
   // Security middleware
   app.use(helmet({
@@ -368,7 +512,25 @@ async function startServer() {
       }
     });
   });
-  
+
+  app.get('/', async (_req, res) => {
+    setNoStoreHeaders(res);
+
+    res.json({
+      status: 'success',
+      data: {
+        service: 'iptv-platform',
+        version: process.env.npm_package_version || '1.0.0',
+        documentation: {
+          apiRoot: '/api/v1',
+          health: '/api/v1/health',
+          readiness: '/api/v1/ready',
+          m3uHealth: '/api/v1/m3u/health'
+        }
+      }
+    });
+  });
+
   // Development routes (REMOVE IN PRODUCTION)
   if (process.env.NODE_ENV === 'development') {
     const devRoutes = require('./api/routes/dev')(userRepository, activateUser);
@@ -376,12 +538,18 @@ async function startServer() {
   }
 
   // Health check at root
-  app.get('/health', (req, res) => {
-    res.json({
-      status: 'healthy',
-      timestamp: new Date().toISOString(),
-      version: process.env.npm_package_version || '1.0.0',
-      mediaTooling: req.app.locals.mediaTooling || null
+  app.get('/health', async (req, res) => {
+    setNoStoreHeaders(res);
+    const runtimeStatus = typeof req.app.locals.getRuntimeStatus === 'function'
+      ? await req.app.locals.getRuntimeStatus()
+      : null;
+
+    res.status(200).json({
+      status: runtimeStatus?.status === 'degraded' ? 'degraded' : 'healthy',
+      timestamp: runtimeStatus?.timestamp || new Date().toISOString(),
+      version: runtimeStatus?.version || process.env.npm_package_version || '1.0.0',
+      uptimeSeconds: runtimeStatus?.uptimeSeconds || Math.round(process.uptime()),
+      dependencies: runtimeStatus?.dependencies || null
     });
   });
 

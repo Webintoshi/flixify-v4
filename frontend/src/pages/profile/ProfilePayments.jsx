@@ -24,7 +24,7 @@ import {
   ChevronRight,
   X
 } from 'lucide-react';
-import { buildApiUrl } from '../../config/api';
+import { apiFetch } from '../../config/api';
 
 // Renkler
 const PRIMARY = '#E50914';
@@ -82,7 +82,7 @@ function ProfilePayments() {
   const fetchPayments = async () => {
     try {
       const token = localStorage.getItem('iptv_auth_token');
-      const response = await fetch(buildApiUrl('/user/payments'), {
+      const response = await apiFetch('/user/payments', {
         headers: {
           'Authorization': `Bearer ${token}`
         }

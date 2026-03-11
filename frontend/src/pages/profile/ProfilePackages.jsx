@@ -8,7 +8,7 @@ import {
   Sparkles, AlertCircle, Loader2, X, Wallet, Building2,
   MessageCircle, Clock, Shield
 } from 'lucide-react';
-import { buildApiUrl } from '../../config/api';
+import { apiFetch } from '../../config/api';
 
 // ============================================
 // 🎨 THEME
@@ -103,7 +103,7 @@ function ProfilePackages() {
       setLoading(true);
       setError(null);
       
-      const response = await fetch(buildApiUrl('/packages/public'));
+      const response = await apiFetch('/packages/public');
       
       if (!response.ok) {
         throw new Error('Paketler yüklenemedi');
