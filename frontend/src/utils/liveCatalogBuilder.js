@@ -1,8 +1,8 @@
-import { DEFAULT_LIVE_COUNTRY_CODE, LIVE_TV_COUNTRIES } from '../config/liveTvTaxonomy'
+import { DEFAULT_LIVE_COUNTRY_CODE, LIVE_TV_COUNTRIES, LIVE_TV_CATEGORY_ALIASES } from '../config/liveTvTaxonomy'
 import { inferStreamContainer, parsePlaylistEntries, unwrapProxyTargetUrl } from './playlistParser'
 
 const COUNTRY_MATCHERS = {
-  TR: [/^TR\s/iu],
+  TR: [/^TR(?:\b|\s|:)/iu],
   FR: [/^France\s/iu],
   DE: [/^Germany\s/iu],
   GB: [/^UK\s/iu],
@@ -107,12 +107,32 @@ function isVodUrl(value = '') {
 }
 
 const categoryCountryMap = new Map()
+const aliasCategoryMap = new Map()
 
 LIVE_TV_COUNTRIES.forEach((country) => {
   country.categories.forEach((category) => {
     categoryCountryMap.set(normalizeKey(category), country.code)
   })
 })
+
+Object.entries(LIVE_TV_CATEGORY_ALIASES).forEach(([alias, canonical]) => {
+  aliasCategoryMap.set(normalizeKey(alias), normalizeLabel(canonical))
+})
+
+function resolveCategory(rawGroup) {
+  const normalizedGroup = normalizeLabel(rawGroup)
+  const normalizedKey = normalizeKey(normalizedGroup)
+
+  if (!normalizedGroup) {
+    return 'Diger'
+  }
+
+  if (aliasCategoryMap.has(normalizedKey)) {
+    return aliasCategoryMap.get(normalizedKey)
+  }
+
+  return normalizedGroup
+}
 
 function resolveCountryCode(rawGroup) {
   const normalizedGroup = normalizeLabel(rawGroup)
@@ -200,15 +220,18 @@ function buildLiveCountryTree(items = []) {
 export function buildLiveCatalogFromPlaylist(content, requestedCountry = DEFAULT_LIVE_COUNTRY_CODE) {
   const items = parsePlaylistEntries(content)
     .filter((entry) => entry?.url && !isVodUrl(entry.url))
-    .map((entry, index) => ({
-      id: `live:${index}:${normalizeKey(entry.title || entry.tvgName || 'unknown')}`,
-      name: String(entry.title || entry.tvgName || 'Bilinmiyor').trim() || 'Bilinmiyor',
-      logo: String(entry.logo || '').trim(),
-      group: normalizeLabel(entry.rawGroup) || 'Diger',
-      countryCode: resolveCountryCode(entry.rawGroup),
-      url: entry.url,
-      sourceType: inferStreamContainer(entry.originalUrl || entry.url)
-    }))
+    .map((entry, index) => {
+      const group = resolveCategory(entry.rawGroup)
+      return {
+        id: `live:${index}:${normalizeKey(entry.title || entry.tvgName || 'unknown')}`,
+        name: String(entry.title || entry.tvgName || 'Bilinmiyor').trim() || 'Bilinmiyor',
+        logo: String(entry.logo || '').trim(),
+        group,
+        countryCode: resolveCountryCode(group),
+        url: entry.url,
+        sourceType: inferStreamContainer(entry.originalUrl || entry.url)
+      }
+    })
 
   const collapsedItems = collapseLiveVariants(items)
   const countries = buildLiveCountryTree(collapsedItems)

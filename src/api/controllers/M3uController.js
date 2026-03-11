@@ -1019,7 +1019,7 @@ class M3uController {
     }
 
     const providerSignature = buildProviderCatalogSignature(m3uUrl);
-    const cacheKey = `catalog:live:shared:${providerSignature}:v1`;
+    const cacheKey = `catalog:live:shared:${providerSignature}:v2`;
     const inflightKey = `catalog:live:shared:${providerSignature}:${forceRefresh ? 'refresh' : 'cached'}`;
     let sharedCatalog = !forceRefresh ? await this._cacheService.get(cacheKey) : null;
 
@@ -2466,6 +2466,7 @@ class M3uController {
       const { url } = await this._getUserM3U.execute({ code });
       const providerSignature = buildProviderCatalogSignature(url);
       await this._cacheService.delete(`catalog:live:shared:${providerSignature}:v1`);
+      await this._cacheService.delete(`catalog:live:shared:${providerSignature}:v2`);
     } catch {
       // Ignore live catalog cache cleanup failures for inactive users.
     }

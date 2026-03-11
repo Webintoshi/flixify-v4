@@ -5,7 +5,7 @@ import { Search, Tv, Volume2, VolumeX, Maximize, AlertCircle, RefreshCw, Chevron
 import mpegts from 'mpegts.js'
 import Hls from 'hls.js'
 import { fetchLiveCatalog, getCachedLiveCatalogSnapshot, hasAssignedPlaylist, hasValidSubscription } from '../services/playlist'
-import { DEFAULT_LIVE_COUNTRY_CODE, LIVE_TV_COUNTRIES } from '../config/liveTvTaxonomy'
+import { DEFAULT_LIVE_COUNTRY_CODE, LIVE_TV_COUNTRIES, getLiveCategoryDisplayLabel } from '../config/liveTvTaxonomy'
 import { resolveChannelFallbackLogo } from '../config/channelLogoFallbacks'
 import VodPlayer from '../components/player/VodPlayer'
 
@@ -14,7 +14,7 @@ const BG_DARK = '#0a0a0a'
 const BG_SURFACE = '#141414'
 const BG_CARD = '#1a1a1a'
 const LIVE_CATALOG_TTL_MS = 5 * 60 * 1000
-const LIVE_PAGE_STATE_PREFIX = 'iptv_live_page_state_v1_'
+const LIVE_PAGE_STATE_PREFIX = 'iptv_live_page_state_v2_'
 
 const normalizeLiveGroupLabel = (value) => {
   const normalized = String(value || '').replace(/\s+/g, ' ').trim()
@@ -28,15 +28,6 @@ const normalizeLiveCountryCode = (value) => {
   return LIVE_TV_COUNTRIES.some((country) => country.code === normalized)
     ? normalized
     : DEFAULT_LIVE_COUNTRY_CODE
-}
-
-const buildLiveCategoryIcon = (value) => {
-  const cleaned = normalizeLiveGroupLabel(value).replace(/[^0-9A-Za-z/&\s-]/g, ' ')
-  const tokens = cleaned.split(/\s+/).filter(Boolean)
-
-  if (tokens.length === 0) return 'TV'
-  if (tokens.length === 1) return tokens[0].slice(0, 2).toLocaleUpperCase('tr-TR')
-  return `${tokens[0][0] || ''}${tokens[1][0] || ''}`.toLocaleUpperCase('tr-TR')
 }
 
 function useDebounce(value, delay) {
@@ -223,30 +214,46 @@ export default function PlayerPage() {
     setSelectedCategory('all')
   }, [selectedCountry])
 
+  const visibleCountries = useMemo(
+    () => liveCountries.filter((country) => Number(country?.count || 0) > 0),
+    [liveCountries]
+  )
+
   const liveCategories = useMemo(() => {
-    const activeCountry = liveCountries.find((country) => country.code === selectedCountry)
+    const activeCountry = visibleCountries.find((country) => country.code === selectedCountry)
+      || visibleCountries[0]
+      || liveCountries.find((country) => country.code === selectedCountry)
       || staticLiveCountries.find((country) => country.code === selectedCountry)
       || staticLiveCountries.find((country) => country.defaultSelected)
       || staticLiveCountries[0]
       || null
 
-    const categoryItems = Array.isArray(activeCountry?.categories) ? activeCountry.categories : []
+    const categoryItems = Array.isArray(activeCountry?.categories)
+      ? activeCountry.categories.filter((category) => Number(category?.count || 0) > 0)
+      : []
 
     return [
       {
         id: 'all',
-        name: 'Tümü',
-        icon: 'TV',
+        name: 'T\u00FCm\u00FC',
         count: channels.length
       },
       ...categoryItems.map((category) => ({
         id: category?.id || `group:${normalizeLiveGroupKey(category?.name)}`,
-        name: normalizeLiveGroupLabel(category?.name),
-        icon: buildLiveCategoryIcon(category?.name),
+        name: getLiveCategoryDisplayLabel(category?.name),
         count: Number(category?.count || 0)
       }))
     ]
-  }, [channels.length, liveCountries, selectedCountry, staticLiveCountries])
+  }, [channels.length, liveCountries, selectedCountry, staticLiveCountries, visibleCountries])
+
+  useEffect(() => {
+    if (isVodMode) return
+    if (visibleCountries.length === 0) return
+    if (visibleCountries.some((country) => country.code === selectedCountry)) return
+
+    skipCategoryResetRef.current = true
+    setSelectedCountry(visibleCountries[0].code)
+  }, [isVodMode, selectedCountry, visibleCountries])
 
   useEffect(() => {
     if (isVodMode || !user?.code) return
@@ -737,15 +744,14 @@ export default function PlayerPage() {
             {/* Countries */}
             <div className="flex-1 overflow-x-auto hide-scrollbar">
               <div className="flex gap-1.5 min-w-max">
-                {liveCountries.map((country) => (
+                {visibleCountries.map((country) => (
                   <button
                     key={country.code}
                     onClick={() => setSelectedCountry(country.code)}
                     className="px-3 py-1.5 rounded-md text-xs font-medium transition-all whitespace-nowrap"
                     style={{
                       backgroundColor: selectedCountry === country.code ? PRIMARY : 'rgba(255,255,255,0.08)',
-                      color: 'white',
-                      opacity: country.count > 0 ? 1 : 0.5,
+                      color: 'white'
                     }}
                   >
                     {country.name}
@@ -769,7 +775,6 @@ export default function PlayerPage() {
                   border: `1px solid ${selectedCategory === cat.id ? PRIMARY : 'rgba(255,255,255,0.1)'}`,
                 }}
               >
-                <span className="font-bold">{cat.icon}</span>
                 <span>{cat.name}</span>
                 <span className="opacity-50 ml-0.5">{cat.count}</span>
               </button>

@@ -9,7 +9,7 @@ import { buildLiveCatalogFromPlaylist } from '../utils/liveCatalogBuilder'
 
 const PLAYLIST_RAW_CACHE_PREFIX = 'iptv_playlist_raw_v2_'
 const PLAYLIST_PARSED_CACHE_PREFIX = 'iptv_playlist_parsed_v2_'
-const CATALOG_CACHE_PREFIX = 'iptv_catalog_v1_'
+const CATALOG_CACHE_PREFIX = 'iptv_catalog_v2_'
 const DEFAULT_TTL_MS = 5 * 60 * 1000
 const PLAYLIST_PATH_FIXES = [
   ['/playlisth/', '/playlist/'],

@@ -3,28 +3,29 @@ export const LIVE_TV_COUNTRIES = [
     code: 'TR',
     name: 'Türkiye',
     categories: [
-      'TR ✨ Ulusal',
-      'TR ✨ Ulusal 4K',
-      'TR ✨ Spor',
-      'TR ✨ BeIN Sports',
-      'TR ✨ Exxen Sports',
-      'TR ✨ S-Sport Plus',
-      'TR ✨ Tabii Sport',
-      'TR ✨ Tivibu Sport & Smart Sport',
-      'TR ✨ Haber',
-      'TR ✨ Muzik',
-      'TR ✨ Dini Kanallar',
-      'TR ✨ Yöresel',
-      'TR ✨ Cocuk',
-      'TR ✨ HEVC',
-      'TR ✨ Raw',
-      'TR ✨ Radio',
-      'TR ✨ Turkcell Tv+',
-      'TR ✨ Bein Connect TOD',
-      'TR ✨ BluTV',
-      'TR ✨ EXXEN',
-      'TR ✨ Gain',
-      'TR ✨ PUHUTV'
+      'TR:ULUSAL',
+      'TR:ULUSAL 4K',
+      'TR:HEVC',
+      'TR:RAW',
+      'TR:HABER',
+      'TR:SPOR',
+      'TR:BEINSPORT',
+      'TR:EXXEN SPORTS',
+      'TR:S-SPORT PLUS',
+      'TR:TABII SPORT',
+      'TR:TIVIBU&SMART SPORT',
+      'TR:SINEMA KANALLARI',
+      'TR:YERLI DIZI',
+      'TR:COCUK',
+      'TR:BELGESEL',
+      'TR:MUZIK',
+      'TR:YORESEL TV',
+      'TR:DINI KANALLAR',
+      'TR:RADIO',
+      'TR:7/24 YESILCAM',
+      'TR:7/24 YABANCI DIZI',
+      'TR:7/24 SHOW',
+      'TR:7/24 AMBIYANS'
     ],
     defaultSelected: true
   },
@@ -310,6 +311,77 @@ export const LIVE_TV_COUNTRIES = [
     categories: ['Sport ✨ PPV', 'VIP ✨ Sports']
   }
 ]
+
+
+export const LIVE_TV_CATEGORY_ALIASES = {
+  'TR ✨ Ulusal': 'TR:ULUSAL',
+  'TR ✨ Ulusal 4K': 'TR:ULUSAL 4K',
+  'TR ✨ Spor': 'TR:SPOR',
+  'TR ✨ BeIN Sports': 'TR:BEINSPORT',
+  'TR ✨ Exxen Sports': 'TR:EXXEN SPORTS',
+  'TR ✨ S-Sport Plus': 'TR:S-SPORT PLUS',
+  'TR ✨ Tabii Sport': 'TR:TABII SPORT',
+  'TR ✨ Tivibu Sport & Smart Sport': 'TR:TIVIBU&SMART SPORT',
+  'TR ✨ Haber': 'TR:HABER',
+  'TR ✨ Muzik': 'TR:MUZIK',
+  'TR ✨ Dini Kanallar': 'TR:DINI KANALLAR',
+  'TR ✨ Yöresel': 'TR:YORESEL TV',
+  'TR ✨ Cocuk': 'TR:COCUK',
+  'TR ✨ HEVC': 'TR:HEVC',
+  'TR ✨ Raw': 'TR:RAW',
+  'TR ✨ Radio': 'TR:RADIO',
+  '7/24 YABANCI DIZI': 'TR:7/24 YABANCI DIZI',
+  'TR:ULUSAL 4K✨': 'TR:ULUSAL 4K',
+  'TR:SPOR ⚽': 'TR:SPOR',
+  'TR:YORESEL': 'TR:YORESEL TV',
+  'TR:S SPORT PLUS': 'TR:S-SPORT PLUS'
+}
+export const LIVE_TV_CATEGORY_DISPLAY_LABELS = {
+  'TR:ULUSAL': 'Ulusal',
+  'TR:ULUSAL 4K': 'Ulusal 4K',
+  'TR:HEVC': 'HEVC',
+  'TR:RAW': 'Raw',
+  'TR:HABER': 'Haber',
+  'TR:SPOR': 'Spor',
+  'TR:BEINSPORT': 'BeIN Sports',
+  'TR:DIGER': 'Di\u011Fer',
+  'Diger': 'Di\u011Fer',
+  'TR:EXXEN SPORTS': 'Exxen Sports',
+  'TR:S-SPORT PLUS': 'S-Sport Plus',
+  'TR:TABII SPORT': 'Tabii Sport',
+  'TR:TIVIBU&SMART SPORT': 'Tivibu Sport & Smart Sport',
+  'TR:SINEMA KANALLARI': 'Sinema Kanallar\u0131',
+  'TR:YERLI DIZI': 'Yerli Dizi',
+  'TR:COCUK': '\u00C7ocuk',
+  'TR:BELGESEL': 'Belgesel',
+  'TR:MUZIK': 'M\u00FCzik',
+  'TR:YORESEL TV': 'Y\u00F6resel TV',
+  'TR:DINI KANALLAR': 'Dini Kanallar',
+  'TR:RADIO': 'Radio',
+  'TR:7/24 YESILCAM': '7/24 Ye\u015Fil\u00E7am',
+  'TR:7/24 YABANCI DIZI': '7/24 Yabanc\u0131 Dizi',
+  'TR:7/24 SHOW': '7/24 Show',
+  'TR:7/24 AMBIYANS': '7/24 Ambiyans'
+}
+
+export function getLiveCategoryDisplayLabel(value = '') {
+  const normalized = String(value || '').trim()
+  if (!normalized) {
+    return 'Di\u011Fer'
+  }
+
+  if (LIVE_TV_CATEGORY_DISPLAY_LABELS[normalized]) {
+    return LIVE_TV_CATEGORY_DISPLAY_LABELS[normalized]
+  }
+
+  return normalized
+    .replace(/^[A-Z]{2,5}:/, '')
+    .replace(/^.*?\s+[\u2728\u2B50]\s+/u, '')
+    .replace(/[\u2728\u2B50]/gu, ' ')
+    .replace(/\s*&\s*/g, ' & ')
+    .replace(/\s+/g, ' ')
+    .trim() || normalized
+}
 
 export const DEFAULT_LIVE_COUNTRY_CODE =
   LIVE_TV_COUNTRIES.find((country) => country.defaultSelected)?.code || 'TR'
