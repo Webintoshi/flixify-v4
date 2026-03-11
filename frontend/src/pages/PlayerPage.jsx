@@ -8,6 +8,14 @@ import { fetchLiveCatalog, getCachedLiveCatalogSnapshot, hasAssignedPlaylist, ha
 import { DEFAULT_LIVE_COUNTRY_CODE, LIVE_TV_COUNTRIES, getLiveCategoryDisplayLabel } from '../config/liveTvTaxonomy'
 import { resolveChannelFallbackLogo } from '../config/channelLogoFallbacks'
 import VodPlayer from '../components/player/VodPlayer'
+import {
+  bindFullscreenChangeListeners,
+  canPlayNativeHls,
+  exitElementFullscreen,
+  getBrowserCapabilities,
+  isFullscreenActive,
+  requestElementFullscreen
+} from '../utils/browserSupport'
 
 const PRIMARY = '#E50914'
 const BG_DARK = '#0a0a0a'
@@ -28,6 +36,27 @@ const normalizeLiveCountryCode = (value) => {
   return LIVE_TV_COUNTRIES.some((country) => country.code === normalized)
     ? normalized
     : DEFAULT_LIVE_COUNTRY_CODE
+}
+
+function getLiveEdgeTime(video) {
+  if (!video) return null
+
+  const seekable = video.seekable
+  if (seekable && seekable.length > 0) {
+    const lastIndex = seekable.length - 1
+    const rangeStart = seekable.start(lastIndex)
+    const rangeEnd = seekable.end(lastIndex)
+
+    if (Number.isFinite(rangeStart) && Number.isFinite(rangeEnd)) {
+      return Math.max(rangeStart, rangeEnd - 1)
+    }
+  }
+
+  if (Number.isFinite(video.duration) && video.duration > 1) {
+    return Math.max(0, video.duration - 1)
+  }
+
+  return null
 }
 
 function useDebounce(value, delay) {
@@ -117,12 +146,16 @@ export default function PlayerPage() {
   const playerRef = useRef(null)
   const controlsTimeoutRef = useRef(null)
   const searchInputRef = useRef(null)
+  const nativePlaybackCleanupRef = useRef(() => {})
+  const playbackRecoveryTimeoutRef = useRef(null)
+  const playbackModeRef = useRef('idle')
   
   const { user, token } = useAuthStore()
   const mediaType = String(searchParams.get('type') || '').trim().toLowerCase()
   const videoUrl = searchParams.get('url') || ''
   const videoTitle = searchParams.get('title') || ''
   const isVodMode = ['movie', 'series'].includes(mediaType) && Boolean(videoUrl)
+  const browserCapabilities = useMemo(() => getBrowserCapabilities(), [])
   const staticLiveCountries = useMemo(() => buildStaticLiveCountries(), [])
   const initialLivePageState = useMemo(() => readPersistedLivePageState(user?.code), [user?.code])
   const initialSelectedCountry = useMemo(
@@ -549,12 +582,141 @@ export default function PlayerPage() {
     [currentChannel, resolveChannelLogoSource]
   )
 
+  const clearPlaybackRecoveryTimeout = useCallback(() => {
+    if (playbackRecoveryTimeoutRef.current) {
+      clearTimeout(playbackRecoveryTimeoutRef.current)
+      playbackRecoveryTimeoutRef.current = null
+    }
+  }, [])
+
+  const nudgeVideoToLiveEdge = useCallback(() => {
+    const video = videoRef.current
+    if (!video) return false
+
+    const targetTime = getLiveEdgeTime(video)
+    if (!Number.isFinite(targetTime)) {
+      return false
+    }
+
+    if (Math.abs(video.currentTime - targetTime) <= 0.5) {
+      return false
+    }
+
+    try {
+      video.currentTime = targetTime
+      return true
+    } catch {
+      return false
+    }
+  }, [])
+
+  const resumeLivePlayback = useCallback(() => {
+    const video = videoRef.current
+    if (!video) return
+
+    const playPromise = video.play?.()
+    if (playPromise?.catch) {
+      playPromise.catch(() => {})
+    }
+  }, [])
+
+  const recoverPlayback = useCallback(() => {
+    if (isVodMode) return
+
+    const video = videoRef.current
+    if (!video) return
+
+    nudgeVideoToLiveEdge()
+
+    if (hlsPlayerRef.current) {
+      try {
+        hlsPlayerRef.current.startLoad(-1)
+      } catch {
+        // noop
+      }
+
+      if (video.readyState < 2) {
+        try {
+          hlsPlayerRef.current.recoverMediaError()
+        } catch {
+          // noop
+        }
+      }
+    }
+
+    if (playbackModeRef.current === 'mpegts' && playerRef.current) {
+      try {
+        playerRef.current.play()
+      } catch {
+        // noop
+      }
+    }
+
+    resumeLivePlayback()
+  }, [isVodMode, nudgeVideoToLiveEdge, resumeLivePlayback])
+
+  const schedulePlaybackRecovery = useCallback((delayMs = 160) => {
+    if (isVodMode) return
+
+    clearPlaybackRecoveryTimeout()
+    playbackRecoveryTimeoutRef.current = setTimeout(() => {
+      playbackRecoveryTimeoutRef.current = null
+      recoverPlayback()
+    }, delayMs)
+  }, [clearPlaybackRecoveryTimeout, isVodMode, recoverPlayback])
+
+  useEffect(() => () => {
+    clearPlaybackRecoveryTimeout()
+  }, [clearPlaybackRecoveryTimeout])
+
   useEffect(() => {
     if (isVodMode) return
     if (!currentChannel || !videoRef.current) return
     
     const video = videoRef.current
+    const container = document.getElementById('video-container')
     const url = currentChannel.url
+    const sourceType = String(currentChannel?.sourceType || '').trim().toLowerCase()
+    const isHlsSource = sourceType === 'hls' || /\.m3u8(?:$|[?#])/i.test(url)
+    const isMpegTsSource = sourceType === 'mpegts' || /(?:\.ts(?:$|[?#]))|(?:[?&]output=mpegts\b)/i.test(url)
+    const preferNativeHls = isHlsSource && canPlayNativeHls(video) && (browserCapabilities.isSafari || browserCapabilities.isIOS)
+    const supportsMpegTs = Boolean(mpegts?.getFeatureList?.().mseLivePlayback)
+    const cleanupEntries = []
+
+    const bindEvent = (target, eventName, handler, options) => {
+      if (!target?.addEventListener || typeof handler !== 'function') return
+      target.addEventListener(eventName, handler, options)
+      cleanupEntries.push(() => target.removeEventListener(eventName, handler, options))
+    }
+
+    const bindWindowEvent = (eventName, handler, options) => {
+      window.addEventListener(eventName, handler, options)
+      cleanupEntries.push(() => window.removeEventListener(eventName, handler, options))
+    }
+
+    const teardownPlaybackBridges = () => {
+      cleanupEntries.forEach((cleanup) => cleanup())
+      cleanupEntries.length = 0
+      nativePlaybackCleanupRef.current = () => {}
+      clearPlaybackRecoveryTimeout()
+    }
+
+    const markPlaybackReady = () => {
+      setLoading(false)
+      setError(null)
+    }
+
+    const handleResizeRecovery = () => {
+      schedulePlaybackRecovery(180)
+    }
+
+    const handleUnexpectedPause = () => {
+      if (document.hidden || video.ended) return
+      schedulePlaybackRecovery(140)
+    }
+
+    nativePlaybackCleanupRef.current?.()
+    clearPlaybackRecoveryTimeout()
     setError(null)
     setLoading(true)
     
@@ -570,45 +732,131 @@ export default function PlayerPage() {
     video.pause()
     video.removeAttribute('src')
     video.load()
+
+    video.setAttribute('playsinline', 'true')
+    video.setAttribute('webkit-playsinline', 'true')
+    video.preload = 'auto'
+
+    bindEvent(video, 'playing', markPlaybackReady)
+    bindEvent(video, 'canplay', markPlaybackReady)
+    bindEvent(video, 'waiting', () => schedulePlaybackRecovery(140))
+    bindEvent(video, 'stalled', () => schedulePlaybackRecovery(140))
+    bindEvent(video, 'suspend', () => schedulePlaybackRecovery(180))
+    bindEvent(video, 'pause', handleUnexpectedPause)
+    bindWindowEvent('resize', handleResizeRecovery, { passive: true })
+    bindWindowEvent('orientationchange', handleResizeRecovery)
+    cleanupEntries.push(bindFullscreenChangeListeners(() => {
+      window.setTimeout(handleResizeRecovery, 60)
+    }))
+
+    if (container && typeof ResizeObserver !== 'undefined') {
+      const resizeObserver = new ResizeObserver(() => handleResizeRecovery())
+      resizeObserver.observe(container)
+      cleanupEntries.push(() => resizeObserver.disconnect())
+    }
+
+    nativePlaybackCleanupRef.current = teardownPlaybackBridges
+
+    if (browserCapabilities.isInternetExplorer) {
+      playbackModeRef.current = 'unsupported'
+      setLoading(false)
+      setError('Internet Explorer canli yayin altyapisini desteklemiyor. Safari, Chrome, Brave, Vivaldi veya Edge kullanin.')
+      return teardownPlaybackBridges
+    }
     
-    if (Hls.isSupported()) {
+    if (preferNativeHls) {
+      playbackModeRef.current = 'native-hls'
+      bindEvent(video, 'loadedmetadata', () => {
+        nudgeVideoToLiveEdge()
+        markPlaybackReady()
+        resumeLivePlayback()
+      }, { once: true })
+      bindEvent(video, 'error', () => {
+        setLoading(false)
+        setError('Yayin yuklenemedi')
+      }, { once: true })
+
+      video.src = url
+      video.load()
+      resumeLivePlayback()
+    /* legacy branch removed
+      })
+        if (data.fatal) setError('Yayın yüklenemedi')
+    */ } else if (isHlsSource && Hls.isSupported()) {
+      playbackModeRef.current = 'hls'
       const hls = new Hls({
+        backBufferLength: 90,
+        capLevelToPlayerSize: false,
         enableWorker: true,
-        maxBufferLength: 30,
-        liveSyncDurationCount: 3,
+        fragLoadingMaxRetry: 6,
+        levelLoadingMaxRetry: 6,
+        liveDurationInfinity: true,
+        liveMaxLatencyDurationCount: 12,
+        liveSyncDurationCount: 4,
+        lowLatencyMode: false,
+        manifestLoadingMaxRetry: 4,
+        maxBufferLength: 60,
+        maxLiveSyncPlaybackRate: 1.2,
+        maxMaxBufferLength: 120,
+        startFragPrefetch: true
       })
       hlsPlayerRef.current = hls
       hls.loadSource(url)
       hls.attachMedia(video)
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
-        setLoading(false)
-        video.play().catch(() => {})
+        nudgeVideoToLiveEdge()
+        markPlaybackReady()
+        resumeLivePlayback()
       })
       hls.on(Hls.Events.ERROR, (_, data) => {
-        if (data?.fatal) {
-          setLoading(false)
-          setError('Yayin yuklenemedi')
+        if (!data?.fatal) {
           return
         }
-        if (data.fatal) setError('Yayın yüklenemedi')
-      })
-    } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-      const handleNativeError = () => {
+
+        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+          schedulePlaybackRecovery(120)
+          try {
+            hls.startLoad(-1)
+          } catch {
+            // noop
+          }
+          return
+        }
+
+        if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+          schedulePlaybackRecovery(80)
+          try {
+            hls.recoverMediaError()
+          } catch {
+            // noop
+          }
+          return
+        }
+
         setLoading(false)
         setError('Yayin yuklenemedi')
-      }
+      })
+    } else if (isHlsSource && canPlayNativeHls(video)) {
+      playbackModeRef.current = 'native-hls'
+      bindEvent(video, 'loadedmetadata', () => {
+        nudgeVideoToLiveEdge()
+        markPlaybackReady()
+        resumeLivePlayback()
+      }, { once: true })
+      bindEvent(video, 'error', () => {
+        setLoading(false)
+        setError('Yayin yuklenemedi')
+      }, { once: true })
 
       video.src = url
-      video.addEventListener('loadedmetadata', () => {
-        setLoading(false)
-        video.play().catch(() => {})
-      }, { once: true })
-      video.addEventListener('error', handleNativeError, { once: true })
-    } else if (mpegts.getFeatureList().mseLivePlayback) {
+      video.load()
+      resumeLivePlayback()
+    } else if (isMpegTsSource && supportsMpegTs) {
+      playbackModeRef.current = 'mpegts'
       const player = mpegts.createPlayer({
         type: 'mpegts',
         url: url,
-        isLive: true,
+        isLive: true
       })
       playerRef.current = player
       player.attachMediaElement(video)
@@ -618,21 +866,35 @@ export default function PlayerPage() {
       })
       player.load()
       player.play()
-        .then(() => setLoading(false))
+        .then(() => markPlaybackReady())
         .catch(() => {
           setLoading(false)
           setError('Yayin yuklenemedi')
         })
     } else {
+      playbackModeRef.current = 'unsupported'
       setLoading(false)
       setError('Tarayici bu yayin formatini desteklemiyor')
     }
     
     return () => {
+      teardownPlaybackBridges()
       hlsPlayerRef.current?.destroy()
+      hlsPlayerRef.current = null
       playerRef.current?.destroy()
+      playerRef.current = null
     }
-  }, [currentChannel, isVodMode])
+  }, [
+    browserCapabilities.isIOS,
+    browserCapabilities.isInternetExplorer,
+    browserCapabilities.isSafari,
+    clearPlaybackRecoveryTimeout,
+    currentChannel,
+    isVodMode,
+    nudgeVideoToLiveEdge,
+    resumeLivePlayback,
+    schedulePlaybackRecovery
+  ])
 
   const handleMouseMove = useCallback(() => {
     setShowControls(true)
@@ -658,12 +920,19 @@ export default function PlayerPage() {
 
   const toggleFullscreen = () => {
     const container = document.getElementById('video-container')
+    const video = videoRef.current
+
     if (!container) return
-    if (!document.fullscreenElement) {
-      container.requestFullscreen().catch(() => {})
-    } else {
-      document.exitFullscreen().catch(() => {})
-    }
+
+    const fullscreenAction = isFullscreenActive(document)
+      ? exitElementFullscreen(document)
+      : requestElementFullscreen(container, video)
+
+    Promise.resolve(fullscreenAction)
+      .catch(() => {})
+      .finally(() => {
+        schedulePlaybackRecovery(180)
+      })
   }
 
   useEffect(() => {
